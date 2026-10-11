@@ -5,7 +5,7 @@
 use acid_engine::host::Command;
 use acid_engine::params::ParamId;
 use acid_engine::project::{
-    DrumHit, DrumPattern, Project, STEPS, SeqView, SynthPattern, SynthStep,
+    DrumHit, DrumPattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
 };
 use std::path::PathBuf;
 
@@ -61,6 +61,10 @@ pub enum Edit {
         synth: usize,
         view: SeqView,
     },
+    #[allow(dead_code)] // used by Task 7
+    Song {
+        song: Box<Song>,
+    },
 }
 
 /// Which edits may fold into one undo step during a gesture.
@@ -77,6 +81,7 @@ enum MergeKey {
     Bpm,
     Swing,
     View(usize),
+    Song,
 }
 
 fn merge_key(edit: &Edit) -> MergeKey {
@@ -100,6 +105,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
         Edit::View { synth, .. } => MergeKey::View(*synth),
+        Edit::Song { .. } => MergeKey::Song,
     }
 }
 
@@ -299,6 +305,9 @@ impl Document {
                 synth,
                 view: std::mem::replace(&mut p.synths[synth].view, view),
             },
+            Edit::Song { song } => Edit::Song {
+                song: Box::new(std::mem::replace(&mut p.song, *song)),
+            },
         }
     }
 
@@ -327,6 +336,7 @@ impl Document {
             Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
             Edit::Swing(_) => vec![Command::SetSwing(p.swing)],
             Edit::View { .. } => Vec::new(),
+            Edit::Song { .. } => vec![Command::Song(Box::new(p.song.clone()))],
         }
     }
 }
@@ -628,6 +638,31 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, UNDO_LIMIT);
+    }
+
+    #[test]
+    fn song_edits_merge_into_one_record_pass() {
+        use acid_engine::project::Bar;
+        let mut d = doc();
+        for n in 1..=5 {
+            let mut song = d.project.song.clone();
+            song.bars = vec![Bar::default(); n];
+            let cmds = d.apply(
+                Edit::Song {
+                    song: Box::new(song),
+                },
+                true,
+            );
+            assert!(matches!(cmds.as_slice(), [Command::Song(s)] if s.bars.len() == n));
+        }
+        d.end_gesture();
+        d.undo();
+        assert!(
+            d.project.song.bars.is_empty(),
+            "the whole pass undoes at once"
+        );
+        d.redo();
+        assert_eq!(d.project.song.bars.len(), 5);
     }
 
     #[test]
