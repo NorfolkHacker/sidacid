@@ -6,6 +6,7 @@ pub mod fx;
 pub mod mixer;
 pub mod params;
 pub mod project;
+pub mod sequencer;
 pub mod synth;
 
 #[cfg(test)]
