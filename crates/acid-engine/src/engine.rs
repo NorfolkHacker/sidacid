@@ -5,13 +5,16 @@
 use crate::drums::{DrumKit, KitKind};
 use crate::mixer::{Mixer, StereoBuf};
 use crate::params::{PARAM_COUNT, ParamId};
-use crate::project::{DrumPattern, PATTERNS, Project, SynthPattern};
-use crate::sequencer::{SeqEvent, Sequencer};
+use crate::project::{DrumPattern, PATTERNS, Project, Song, SynthPattern};
+use crate::sequencer::{Mode, SeqEvent, Sequencer};
+use crate::song::MAX_BARS;
 use crate::synth::BassSynth;
 
 /// Upper bound on sequencer ticks fired without time advancing; guards
 /// against a sequencer that never moves forward.
 const MAX_TICKS_PER_POSITION: usize = 64;
+/// Sequencer event buffer size: never grows on the audio thread.
+const EVENT_RESERVE: usize = 64 + 2 * PARAM_COUNT;
 
 pub struct Engine {
     sample_rate: f32,
@@ -25,6 +28,11 @@ pub struct Engine {
     events: Vec<SeqEvent>,
     /// Knob values set through `set_param`, indexed by `ParamId::index`.
     knobs: Vec<f32>,
+    /// Effective value per param: the knob, or song automation / live
+    /// record value. Lane restores return here.
+    base: Vec<f32>,
+    /// Params held by the user while recording: automation skips them.
+    touched: Vec<bool>,
     /// `ParamId::all()`, so knobs can be re-applied without allocating.
     ids: Vec<ParamId>,
     guard_fired: bool,
@@ -53,8 +61,10 @@ impl Engine {
                 vec![DrumPattern::default(); PATTERNS],
             ],
             chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
-            events: Vec::with_capacity(64),
+            events: Vec::with_capacity(EVENT_RESERVE),
             knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
+            base: ParamId::all().iter().map(|id| id.info().default).collect(),
+            touched: vec![false; PARAM_COUNT],
             ids: ParamId::all(),
             guard_fired: false,
             song: crate::project::Song::default(),
@@ -71,6 +81,7 @@ impl Engine {
         for id in ParamId::all() {
             self.set_param(id, p.param(id));
         }
+        self.song = p.song.clone();
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
         for (m, &slot) in p.selected.iter().enumerate() {
@@ -87,6 +98,7 @@ impl Engine {
         }
         let v = v.clamp(0.0, 1.0);
         self.knobs[i] = v;
+        self.base[i] = v;
         self.apply_param(id, v);
     }
 
@@ -106,7 +118,7 @@ impl Engine {
 
     fn restore_param(&mut self, id: ParamId) {
         if let Some(i) = id.index() {
-            let v = self.knobs[i];
+            let v = self.base[i];
             self.apply_param(id, v);
         }
     }
@@ -136,7 +148,74 @@ impl Engine {
         for s in &mut self.synths {
             s.note_off();
         }
+        self.base.copy_from_slice(&self.knobs);
+        self.touched.fill(false);
         self.restore_all_knobs();
+    }
+
+    /// Plays a value without changing the saved knob (record mode).
+    pub fn set_param_live(&mut self, id: ParamId, v: f32) {
+        let Some(i) = id.index() else { return };
+        if !v.is_finite() {
+            return;
+        }
+        let v = v.clamp(0.0, 1.0);
+        self.base[i] = v;
+        self.apply_param(id, v);
+    }
+
+    /// While touched, song automation for `id` is not applied.
+    pub fn touch(&mut self, id: ParamId, on: bool) {
+        if let Some(i) = id.index() {
+            self.touched[i] = on;
+        }
+    }
+
+    fn apply_automation(&mut self, id: ParamId, v: f32) {
+        let Some(i) = id.index() else { return };
+        if self.touched[i] || !v.is_finite() {
+            return;
+        }
+        self.base[i] = v.clamp(0.0, 1.0);
+        self.apply_param(id, self.base[i]);
+    }
+
+    /// Swaps in a new song (real-time safe). An invalid song leaves both
+    /// sides untouched and returns false.
+    pub fn swap_song(&mut self, song: &mut Song) -> bool {
+        let refs_ok = song
+            .bars
+            .iter()
+            .flat_map(|b| b.patterns)
+            .flatten()
+            .all(|r| (r.0 as usize) < PATTERNS);
+        let lanes_ok = song.automation.len() <= PARAM_COUNT
+            && song.automation.iter().all(|l| l.param.is_valid());
+        if song.bars.len() > MAX_BARS || !refs_ok || !lanes_ok {
+            return false;
+        }
+        std::mem::swap(&mut self.song, song);
+        true
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.seq.set_mode(mode);
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.seq.mode()
+    }
+
+    pub fn set_song_start(&mut self, bar: usize) {
+        self.seq.set_song_start(bar);
+    }
+
+    pub fn song_bar(&self) -> usize {
+        self.seq.song_bar()
+    }
+
+    pub fn song_step(&self) -> u32 {
+        self.seq.song_step()
     }
 
     pub fn is_playing(&self) -> bool {
@@ -266,8 +345,11 @@ impl Engine {
                         }
                         SeqEvent::Param { id, value } => self.apply_param(id, value),
                         SeqEvent::ParamRestore { id } => self.restore_param(id),
-                        SeqEvent::Automation { id, value } => self.apply_param(id, value),
+                        SeqEvent::Automation { id, value } => self.apply_automation(id, value),
                     }
+                }
+                if self.seq.take_ended() {
+                    self.stop();
                 }
                 continue;
             }
@@ -591,5 +673,102 @@ mod tests {
         e.play();
         let (l, _) = render(&mut e, 1.0);
         assert!(peak(&l) > 0.01, "master level was restored by stop()");
+    }
+
+    fn two_bar_demo() -> Project {
+        let mut p = crate::demo::demo_project();
+        let bar = crate::project::Bar {
+            patterns: [Some(crate::project::PatternRef(0)); 4],
+            ..Default::default()
+        };
+        p.song.bars = vec![bar, bar];
+        p
+    }
+
+    #[test]
+    fn a_song_plays_and_stops_by_itself() {
+        let mut e = Engine::from_project(SR, &two_bar_demo());
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.play();
+        let (l, _) = render(&mut e, 1.0);
+        assert!(peak(&l) > 0.01);
+        render(&mut e, 4.0); // two bars at 128 BPM ≈ 3.75 s
+        assert!(!e.is_playing(), "song ended");
+    }
+
+    #[test]
+    fn automation_plays_in_song_mode_and_stop_restores_the_knob() {
+        let mut p = two_bar_demo();
+        crate::song::write_automation(&mut p.song, ParamId::Master(MasterParam::Level), 0, 0, 0.0);
+        let mut e = Engine::from_project(SR, &p);
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.play();
+        let (l, _) = render(&mut e, 1.0);
+        assert_eq!(peak(&l[64..]), 0.0, "automation holds master at 0");
+        e.stop();
+        e.set_mode(crate::sequencer::Mode::Pattern);
+        e.play();
+        let (l, _) = render(&mut e, 1.0);
+        assert!(peak(&l) > 0.01, "knob value restored by stop");
+    }
+
+    #[test]
+    fn a_touched_param_ignores_automation() {
+        let mut p = two_bar_demo();
+        crate::song::write_automation(
+            &mut p.song,
+            ParamId::Master(MasterParam::Level),
+            0,
+            200,
+            0.0,
+        );
+        let mut e = Engine::from_project(SR, &p);
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.touch(ParamId::Master(MasterParam::Level), true);
+        e.play();
+        let (l, _) = render(&mut e, 1.0);
+        assert!(peak(&l) > 0.01);
+    }
+
+    #[test]
+    fn live_values_do_not_move_the_knob() {
+        let mut e = demo_engine();
+        e.play();
+        e.set_param_live(ParamId::Master(MasterParam::Level), 0.0);
+        let (l, _) = render(&mut e, 0.5);
+        assert_eq!(peak(&l[64..]), 0.0);
+        e.stop();
+        e.play();
+        let (l, _) = render(&mut e, 0.5);
+        assert!(peak(&l) > 0.01, "stop restored the saved knob");
+    }
+
+    #[test]
+    fn swap_song_validates() {
+        let mut e = demo_engine();
+        let mut good = two_bar_demo().song;
+        assert!(e.swap_song(&mut good));
+        let mut bad = crate::project::Song {
+            bars: vec![Default::default(); crate::song::MAX_BARS + 1],
+            ..Default::default()
+        };
+        assert!(!e.swap_song(&mut bad));
+        assert_eq!(
+            bad.bars.len(),
+            crate::song::MAX_BARS + 1,
+            "rejected song is untouched"
+        );
+    }
+
+    #[test]
+    fn song_start_and_position() {
+        let mut e = Engine::from_project(SR, &two_bar_demo());
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.set_song_start(1);
+        e.play();
+        render(&mut e, 0.01);
+        assert_eq!(e.song_bar(), 1);
+        assert_eq!(e.song_step(), 16);
+        assert_eq!(e.mode(), crate::sequencer::Mode::Song);
     }
 }

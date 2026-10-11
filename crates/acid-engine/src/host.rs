@@ -6,7 +6,8 @@
 
 use crate::engine::Engine;
 use crate::params::ParamId;
-use crate::project::{DrumPattern, SynthPattern};
+use crate::project::{DrumPattern, Song, SynthPattern};
+use crate::sequencer::Mode;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 pub const COMMAND_CAPACITY: usize = 4096;
@@ -39,6 +40,13 @@ pub enum Command {
         pattern: Box<DrumPattern>,
     },
     ReplaceEngine(Box<Engine>),
+    SetMode(Mode),
+    Song(Box<Song>),
+    SetSongStart(u16),
+    /// The user is holding (true) or released (false) a knob while recording.
+    Touch(ParamId, bool),
+    /// Sound follows the knob without changing its saved value (record mode).
+    SetParamLive(ParamId, f32),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -52,6 +60,10 @@ pub struct Status {
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
     pub guard_fired: bool,
+    pub mode: Mode,
+    pub song_bar: u16,
+    /// Global song step (song mode).
+    pub song_step: u32,
 }
 
 pub enum Event {
@@ -59,6 +71,7 @@ pub enum Event {
     DisposeSynthPattern(Box<SynthPattern>),
     DisposeDrumPattern(Box<DrumPattern>),
     DisposeEngine(Box<Engine>),
+    DisposeSong(Box<Song>),
 }
 
 pub struct EngineHost {
@@ -152,6 +165,14 @@ impl EngineHost {
                     std::mem::swap(&mut self.engine, &mut engine);
                     self.dispose(Event::DisposeEngine(engine));
                 }
+                Command::SetMode(mode) => self.engine.set_mode(mode),
+                Command::Song(mut song) => {
+                    self.engine.swap_song(&mut song);
+                    self.dispose(Event::DisposeSong(song));
+                }
+                Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
+                Command::Touch(id, on) => self.engine.touch(id, on),
+                Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
             }
         }
     }
@@ -173,6 +194,9 @@ impl EngineHost {
             meters: self.meters,
             cpu: self.cpu,
             guard_fired: self.guard_fired,
+            mode: self.engine.mode(),
+            song_bar: self.engine.song_bar().min(u16::MAX as usize) as u16,
+            song_step: self.engine.song_step(),
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
@@ -297,5 +321,33 @@ mod tests {
         let disposed = std::iter::from_fn(|| rx.pop().ok())
             .any(|e| matches!(e, Event::DisposeSynthPattern(_)));
         assert!(disposed);
+    }
+
+    #[test]
+    fn song_commands_and_status() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let song = crate::project::Song {
+            bars: vec![crate::project::Bar::default(); 4],
+            ..Default::default()
+        };
+        tx.push(Command::Song(Box::new(song))).unwrap();
+        tx.push(Command::SetMode(crate::sequencer::Mode::Song))
+            .unwrap();
+        tx.push(Command::SetSongStart(2)).unwrap();
+        tx.push(Command::Play).unwrap();
+        run(&mut host, 2048);
+        let events: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        assert!(events.iter().any(|e| matches!(e, Event::DisposeSong(_))));
+        let status = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::Status(s) => Some(*s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(status.mode, crate::sequencer::Mode::Song);
+        assert_eq!(status.song_bar, 2);
+        assert_eq!(status.song_step, 32);
     }
 }
