@@ -1,7 +1,7 @@
 //! Seeded pattern randomisers (spec §11). Pure functions: the same seed
 //! always gives the same pattern, so tests are deterministic.
 
-use crate::drums::{BD, SD};
+use crate::drums::{BD, CH, CP, OH, SD};
 use crate::project::{DrumHit, DrumPattern, Gate, STEPS, SynthPattern};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
@@ -159,11 +159,225 @@ pub fn randomise_synth(
     out
 }
 
+const KICKS: [&[usize]; 4] = [&[0, 4, 8, 12], &[0, 3, 6, 10], &[0, 6, 8, 11], &[0, 7, 10]];
+/// (closed hat steps, open hat steps)
+const HATS: [(&[usize], &[usize]); 4] = [
+    (&[0, 4, 8, 12], &[2, 6, 10, 14]),
+    (&[0, 2, 4, 6, 8, 10, 12, 14], &[]),
+    (&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], &[]),
+    (&[0, 3, 4, 7, 8, 11, 12, 15], &[14]),
+];
+/// How likely each instrument is to gain a hit when evolving.
+const INST_WEIGHTS: [f32; 8] = [1.0, 0.8, 0.4, 0.4, 0.5, 0.4, 2.0, 1.0];
+/// Downbeats over offbeats over the rest.
+const STEP_WEIGHTS: [f32; 4] = [3.0, 1.0, 2.0, 1.0];
+
+fn open_mutes_closed(p: &mut DrumPattern) {
+    for step in &mut p.steps {
+        if step[OH] != DrumHit::Off {
+            step[CH] = DrumHit::Off;
+        }
+    }
+}
+
+fn weighted(rng: &mut Pcg32, weights: &[f32]) -> usize {
+    let total: f32 = weights.iter().sum();
+    let mut r = rng.gen_range(0.0..total);
+    for (i, w) in weights.iter().enumerate() {
+        if r < *w {
+            return i;
+        }
+        r -= w;
+    }
+    weights.len() - 1
+}
+
+fn random_hit(rng: &mut Pcg32, p: &DrumPattern, len: usize) -> Option<(usize, usize)> {
+    let count = p.steps[..len]
+        .iter()
+        .flatten()
+        .filter(|h| **h != DrumHit::Off)
+        .count();
+    if count == 0 {
+        return None;
+    }
+    let mut k = rng.gen_range(0..count);
+    for (step, row) in p.steps[..len].iter().enumerate() {
+        for (inst, hit) in row.iter().enumerate() {
+            if *hit != DrumHit::Off {
+                if k == 0 {
+                    return Some((step, inst));
+                }
+                k -= 1;
+            }
+        }
+    }
+    None
+}
+
+pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let len = length_of(length);
+    let mut p = DrumPattern {
+        length: len as u8,
+        ..DrumPattern::default()
+    };
+    let kick = if rng.gen_bool(0.5) {
+        KICKS[0]
+    } else {
+        KICKS[rng.gen_range(1..KICKS.len())]
+    };
+    let backbeat = if rng.gen_bool(0.5) { SD } else { CP };
+    let (closed, open) = HATS[rng.gen_range(0..HATS.len())];
+    for block in (0..len).step_by(16) {
+        let mut put = |step: usize, inst: usize, hit: DrumHit| {
+            if block + step < len {
+                p.steps[block + step][inst] = hit;
+            }
+        };
+        for &s in kick {
+            put(s, BD, if s == 0 { DrumHit::Accent } else { DrumHit::On });
+        }
+        for s in [4, 12] {
+            put(s, backbeat, DrumHit::On);
+        }
+        for &s in closed {
+            put(s, CH, DrumHit::On);
+        }
+        for &s in open {
+            put(s, OH, DrumHit::On);
+        }
+    }
+    open_mutes_closed(&mut p);
+    p
+}
+
+pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let mut out = p.clone();
+    let len = length_of(p.length);
+    let step_weights: Vec<f32> = (0..len)
+        .map(|i| STEP_WEIGHTS[i % STEP_WEIGHTS.len()])
+        .collect();
+    for _ in 0..rng.gen_range(1..=3) {
+        let op: f32 = rng.r#gen();
+        if op < 0.5 {
+            let inst = weighted(&mut rng, &INST_WEIGHTS);
+            let step = weighted(&mut rng, &step_weights);
+            if out.steps[step][inst] == DrumHit::Off {
+                out.steps[step][inst] = DrumHit::On;
+            }
+        } else if op < 0.8 {
+            if let Some((step, inst)) = random_hit(&mut rng, &out, len) {
+                let to = if rng.gen_bool(0.5) {
+                    (step + 1) % len
+                } else {
+                    (step + len - 1) % len
+                };
+                if out.steps[to][inst] == DrumHit::Off {
+                    out.steps[to][inst] = out.steps[step][inst];
+                    out.steps[step][inst] = DrumHit::Off;
+                }
+            }
+        } else if let Some((step, inst)) = random_hit(&mut rng, &out, len) {
+            out.steps[step][inst] = match out.steps[step][inst] {
+                DrumHit::On => DrumHit::Accent,
+                _ => DrumHit::On,
+            };
+        }
+    }
+    open_mutes_closed(&mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::drums::BD;
+    use crate::drums::{CH, CP, OH};
     use crate::project::SynthStep;
+
+    fn hits(p: &DrumPattern) -> usize {
+        p.steps
+            .iter()
+            .flatten()
+            .filter(|h| **h != DrumHit::Off)
+            .count()
+    }
+
+    #[test]
+    fn template_has_a_kick_on_one_and_a_backbeat() {
+        for seed in 0..50 {
+            let p = drum_template(seed, 16);
+            assert_eq!(p.length, 16);
+            assert_eq!(p.steps[0][BD], DrumHit::Accent, "seed {seed}");
+            for s in [4, 12] {
+                assert!(
+                    p.steps[s][SD] != DrumHit::Off || p.steps[s][CP] != DrumHit::Off,
+                    "seed {seed}"
+                );
+            }
+            assert!(
+                p.steps
+                    .iter()
+                    .all(|s| !(s[OH] != DrumHit::Off && s[CH] != DrumHit::Off))
+            );
+        }
+    }
+
+    #[test]
+    fn template_repeats_over_longer_patterns() {
+        let p = drum_template(3, 32);
+        assert_eq!(p.length, 32);
+        assert_eq!(p.steps[16][BD], DrumHit::Accent);
+        assert_eq!(&p.steps[..16], &p.steps[16..32]);
+        assert!(p.steps[32..].iter().flatten().all(|h| *h == DrumHit::Off));
+    }
+
+    #[test]
+    fn template_is_deterministic() {
+        assert_eq!(drum_template(9, 16), drum_template(9, 16));
+    }
+
+    #[test]
+    fn evolve_makes_small_deterministic_changes() {
+        let base = drum_template(1, 16);
+        let mut changed = 0;
+        for seed in 0..50 {
+            let e = evolve_drums(&base, seed);
+            assert_eq!(e, evolve_drums(&base, seed));
+            let diff = base
+                .steps
+                .iter()
+                .flatten()
+                .zip(e.steps.iter().flatten())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(diff <= 9, "seed {seed}: {diff} cells changed"); // 3 ops × (2 cells + a muted closed hat)
+            if diff > 0 {
+                changed += 1;
+            }
+            assert!(
+                e.steps
+                    .iter()
+                    .all(|s| !(s[OH] != DrumHit::Off && s[CH] != DrumHit::Off))
+            );
+            assert!(
+                e.steps[16..].iter().flatten().all(|h| *h == DrumHit::Off),
+                "stays inside the length"
+            );
+        }
+        assert!(
+            changed >= 40,
+            "evolve usually changes something ({changed}/50)"
+        );
+    }
+
+    #[test]
+    fn evolving_an_empty_pattern_adds_hits() {
+        let e = evolve_drums(&DrumPattern::default(), 11);
+        assert!(hits(&e) >= 1);
+    }
 
     fn groove_four_on_floor() -> DrumPattern {
         let mut g = DrumPattern::default();
