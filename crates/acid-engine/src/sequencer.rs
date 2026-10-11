@@ -4,7 +4,15 @@
 //! tick (gate off unless sliding/tied into the next step).
 
 use crate::params::ParamId;
-use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern};
+use crate::project::{DrumHit, DrumPattern, Gate, PatternRef, Song, SynthPattern};
+use crate::song::{DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Pattern,
+    Song,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeqEvent {
@@ -29,6 +37,11 @@ pub enum SeqEvent {
     ParamRestore {
         id: ParamId,
     },
+    /// A recorded song-automation value for this step.
+    Automation {
+        id: ParamId,
+        value: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +59,10 @@ struct Track {
     prev_slide: bool,
     /// Param whose lane value is overriding the knob on the current step.
     lane_override: Option<ParamId>,
+    /// The machine plays nothing this bar.
+    silent: bool,
+    /// The bar's synth transpose.
+    transpose_add: i8,
 }
 
 pub struct Sequencer {
@@ -58,6 +75,17 @@ pub struct Sequencer {
     samples_to_next: f64,
     /// 0, 1 = synths; 2, 3 = drum kits.
     tracks: [Track; 4],
+    mode: Mode,
+    song_start: usize,
+    song_bar: usize,
+    bar_step: usize,
+    bar_len: usize,
+    song_step: u32,
+    /// The song position must be recomputed at the next bar start.
+    seek: bool,
+    /// The next step emits every lane's held value, not just its points.
+    auto_sync: bool,
+    ended: bool,
 }
 
 fn len_of(length: u8) -> usize {
@@ -75,6 +103,15 @@ impl Sequencer {
             phase: Phase::StepStart,
             samples_to_next: 0.0,
             tracks: [Track::default(); 4],
+            mode: Mode::Pattern,
+            song_start: 0,
+            song_bar: 0,
+            bar_step: 0,
+            bar_len: DEFAULT_BAR_STEPS,
+            song_step: 0,
+            seek: false,
+            auto_sync: false,
+            ended: false,
         }
     }
 
@@ -115,11 +152,20 @@ impl Sequencer {
         self.global_step = 0;
         self.phase = Phase::StepStart;
         self.samples_to_next = 0.0;
+        self.ended = false;
+        if self.mode == Mode::Song {
+            self.song_bar = self.song_start;
+            self.bar_step = 0;
+            self.bar_len = DEFAULT_BAR_STEPS;
+            self.seek = true;
+        }
         for t in &mut self.tracks {
             t.step = 0;
             t.gate_open = false;
             t.prev_slide = false;
             t.lane_override = None;
+            t.silent = false;
+            t.transpose_add = 0;
             if let Some(q) = t.queued.take() {
                 t.pattern = q;
             }
@@ -133,6 +179,8 @@ impl Sequencer {
             t.gate_open = false;
             t.prev_slide = false;
             t.lane_override = None;
+            t.silent = false;
+            t.transpose_add = 0;
         }
     }
 
@@ -140,7 +188,85 @@ impl Sequencer {
         self.playing
     }
 
+    /// Ignored while playing (the UI stops before switching).
+    pub fn set_mode(&mut self, mode: Mode) {
+        if !self.playing {
+            self.mode = mode;
+        }
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn set_song_start(&mut self, bar: usize) {
+        self.song_start = bar;
+    }
+
+    pub fn song_bar(&self) -> usize {
+        self.song_bar
+    }
+
+    pub fn song_step(&self) -> u32 {
+        self.song_step
+    }
+
+    /// True once after a song played past its last bar.
+    pub fn take_ended(&mut self) -> bool {
+        std::mem::take(&mut self.ended)
+    }
+
+    /// Loads the current bar's patterns, mutes and transposes. Returns
+    /// false (and stops) when the song has no bar here.
+    fn load_bar(
+        &mut self,
+        song: &Song,
+        synths: [&[SynthPattern]; 2],
+        drums: [&[DrumPattern]; 2],
+        out: &mut Vec<SeqEvent>,
+    ) -> bool {
+        let Some(bar) = song.bars.get(self.song_bar) else {
+            for s in 0..2 {
+                if self.tracks[s].gate_open {
+                    out.push(SeqEvent::NoteOff { synth: s });
+                }
+            }
+            self.stop();
+            self.ended = true;
+            return false;
+        };
+        if self.seek {
+            self.song_step = bar_start_step(song, self.song_bar, synths, drums);
+            self.seek = false;
+            self.auto_sync = true;
+        }
+        self.bar_len = bar_steps(bar, synths, drums);
+        for m in 0..4 {
+            let bank_len = if m < 2 {
+                synths[m].len()
+            } else {
+                drums[m - 2].len()
+            };
+            let t = &mut self.tracks[m];
+            t.step = 0;
+            match bar.patterns[m] {
+                Some(PatternRef(slot)) if (slot as usize) < bank_len => {
+                    t.pattern = slot;
+                    t.silent = bar.mutes[m];
+                }
+                _ => t.silent = true,
+            }
+            if m < 2 {
+                t.transpose_add = bar.transpose[m];
+            }
+        }
+        true
+    }
+
     pub fn select(&mut self, machine: usize, slot: u8) {
+        if self.mode == Mode::Song && self.playing {
+            return;
+        }
         let t = &mut self.tracks[machine];
         if self.playing {
             t.queued = Some(slot);
@@ -179,6 +305,7 @@ impl Sequencer {
         &mut self,
         synths: [&[SynthPattern]; 2],
         drums: [&[DrumPattern]; 2],
+        song: &Song,
         out: &mut Vec<SeqEvent>,
     ) {
         if !self.playing {
@@ -187,8 +314,25 @@ impl Sequencer {
         let half = self.step_len(self.global_step) * 0.5;
         match self.phase {
             Phase::StepStart => {
+                if self.mode == Mode::Song
+                    && self.bar_step == 0
+                    && !self.load_bar(song, synths, drums, out)
+                {
+                    return;
+                }
                 for s in 0..2 {
                     let t = &mut self.tracks[s];
+                    if t.silent {
+                        if t.gate_open {
+                            out.push(SeqEvent::NoteOff { synth: s });
+                            t.gate_open = false;
+                        }
+                        t.prev_slide = false;
+                        if let Some(id) = t.lane_override.take() {
+                            out.push(SeqEvent::ParamRestore { id });
+                        }
+                        continue;
+                    }
                     let pat = &synths[s][t.pattern as usize];
                     if t.step >= len_of(pat.length) {
                         t.step = 0;
@@ -199,7 +343,7 @@ impl Sequencer {
                             let legato = t.prev_slide && t.gate_open;
                             out.push(SeqEvent::Note {
                                 synth: s,
-                                midi: step.midi(pat.transpose),
+                                midi: step.midi(pat.transpose.saturating_add(t.transpose_add)),
                                 accent: step.accent,
                                 legato,
                             });
@@ -209,7 +353,7 @@ impl Sequencer {
                             if !t.gate_open {
                                 out.push(SeqEvent::Note {
                                     synth: s,
-                                    midi: step.midi(pat.transpose),
+                                    midi: step.midi(pat.transpose.saturating_add(t.transpose_add)),
                                     accent: step.accent,
                                     legato: false,
                                 });
@@ -250,6 +394,9 @@ impl Sequencer {
                 }
                 for k in 0..2 {
                     let t = &mut self.tracks[2 + k];
+                    if t.silent {
+                        continue;
+                    }
                     let pat = &drums[k][t.pattern as usize];
                     if t.step >= len_of(pat.length) {
                         t.step = 0;
@@ -270,11 +417,30 @@ impl Sequencer {
                         }
                     }
                 }
+                if self.mode == Mode::Song {
+                    for lane in &song.automation {
+                        let value = if self.auto_sync {
+                            value_at(lane, self.song_step)
+                        } else {
+                            lane.points.get(&self.song_step).copied()
+                        };
+                        if let Some(value) = value {
+                            out.push(SeqEvent::Automation {
+                                id: lane.param,
+                                value,
+                            });
+                        }
+                    }
+                    self.auto_sync = false;
+                }
                 self.phase = Phase::Mid;
             }
             Phase::Mid => {
                 for s in 0..2 {
                     let t = &mut self.tracks[s];
+                    if t.silent {
+                        continue;
+                    }
                     let pat = &synths[s][t.pattern as usize];
                     let len = len_of(pat.length);
                     if t.gate_open {
@@ -303,6 +469,20 @@ impl Sequencer {
                     }
                 }
                 self.global_step += 1;
+                if self.mode == Mode::Song {
+                    self.song_step = self.song_step.saturating_add(1);
+                    self.bar_step += 1;
+                    if self.bar_step >= self.bar_len {
+                        self.bar_step = 0;
+                        self.song_bar += 1;
+                        if let Some((a, b)) = song.loop_range
+                            && self.song_bar > b as usize
+                        {
+                            self.song_bar = a as usize;
+                            self.seek = true;
+                        }
+                    }
+                }
                 self.phase = Phase::StepStart;
             }
         }
@@ -332,6 +512,7 @@ mod tests {
     struct Fixture {
         synths: [Vec<SynthPattern>; 2],
         drums: [Vec<DrumPattern>; 2],
+        song: crate::project::Song,
     }
 
     impl Fixture {
@@ -345,6 +526,7 @@ mod tests {
                     vec![DrumPattern::default(); 4],
                     vec![DrumPattern::default(); 4],
                 ],
+                song: crate::project::Song::default(),
             }
         }
 
@@ -359,6 +541,7 @@ mod tests {
                     seq.tick(
                         [&self.synths[0], &self.synths[1]],
                         [&self.drums[0], &self.drums[1]],
+                        &self.song,
                         &mut buf,
                     );
                     out.extend(buf.iter().map(|e| (pos, *e)));
@@ -671,5 +854,161 @@ mod tests {
                 (5513, SeqEvent::ParamRestore { id })
             ]
         );
+    }
+
+    fn song_bar(refs: [Option<u8>; 4]) -> crate::project::Bar {
+        crate::project::Bar {
+            patterns: refs.map(|r| r.map(crate::project::PatternRef)),
+            ..Default::default()
+        }
+    }
+
+    fn notes(ev: &[(usize, SeqEvent)]) -> Vec<(usize, u8)> {
+        ev.iter()
+            .filter_map(|(p, e)| match e {
+                SeqEvent::Note { midi, .. } => Some((*p, *midi)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn song_seq() -> Sequencer {
+        let mut s = new_seq();
+        s.set_mode(Mode::Song);
+        s
+    }
+
+    #[test]
+    fn song_plays_bars_in_order() {
+        let mut f = Fixture::new();
+        f.synths[0][0].steps[0] = on(0);
+        f.synths[0][1].steps[0] = on(7);
+        f.song.bars = vec![
+            song_bar([Some(0), None, None, None]),
+            song_bar([Some(1), None, None, None]),
+        ];
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 33 * 5513);
+        assert_eq!(notes(&ev), vec![(0, 36), (88_200, 43)]);
+        assert!(!s.is_playing(), "stops after the last bar");
+        assert!(s.take_ended());
+        assert!(!s.take_ended(), "reported once");
+    }
+
+    #[test]
+    fn bar_length_follows_the_longest_pattern_and_shorter_ones_loop() {
+        let mut f = Fixture::new();
+        f.synths[0][0].length = 8;
+        f.synths[0][0].steps[0] = on(0);
+        f.drums[0][0].length = 16;
+        f.song.bars = vec![song_bar([Some(0), None, Some(0), None])];
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 17 * 5513);
+        assert_eq!(
+            notes(&ev).len(),
+            2,
+            "8-step synth pattern plays twice in the 16-step bar"
+        );
+    }
+
+    #[test]
+    fn none_and_mute_silence_a_machine_and_transpose_adds() {
+        let mut f = Fixture::new();
+        f.synths[0][0].steps[0] = on(0);
+        f.drums[0][0].steps[0][0] = DrumHit::On;
+        let mut muted = song_bar([None, None, Some(0), None]);
+        muted.mutes[2] = true;
+        let mut lifted = song_bar([Some(0), None, Some(0), None]);
+        lifted.transpose[0] = 5;
+        f.song.bars = vec![muted, lifted];
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 32 * 5513);
+        let drums = ev
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Drum { .. }))
+            .count();
+        assert_eq!(drums, 1, "muted in bar 1, playing in bar 2");
+        assert_eq!(
+            notes(&ev),
+            vec![(88_200, 41)],
+            "no synth in bar 1; bar 2 transposed +5"
+        );
+    }
+
+    #[test]
+    fn loop_range_repeats_and_resets_the_song_step() {
+        let mut f = Fixture::new();
+        f.song.bars = vec![
+            song_bar([None; 4]),
+            song_bar([None; 4]),
+            song_bar([None; 4]),
+        ];
+        f.song.loop_range = Some((1, 2));
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 48 * 5513 + 10);
+        assert!(s.is_playing());
+        assert_eq!(s.song_bar(), 1, "jumped back to the loop start");
+        assert_eq!(s.song_step(), 16);
+    }
+
+    #[test]
+    fn automation_emits_points_and_syncs_on_start() {
+        use crate::params::{MasterParam, ParamId};
+        let id = ParamId::Master(MasterParam::Level);
+        let mut f = Fixture::new();
+        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
+        crate::song::write_automation(&mut f.song, id, 3, 3, 0.25);
+        crate::song::write_automation(&mut f.song, id, 16, 16, 0.75);
+        let autos = |ev: &[(usize, SeqEvent)]| -> Vec<(usize, f32)> {
+            ev.iter()
+                .filter_map(|(p, e)| match e {
+                    SeqEvent::Automation { value, .. } => Some((*p, *value)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 17 * 5513);
+        assert_eq!(autos(&ev), vec![(16_538, 0.25), (88_200, 0.75)]);
+
+        let mut s = song_seq();
+        s.set_song_start(1);
+        s.play();
+        assert_eq!(s.song_bar(), 1);
+        let ev = f.run(&mut s, 10);
+        assert_eq!(
+            autos(&ev),
+            vec![(0, 0.75)],
+            "starting mid-song applies the held value"
+        );
+        assert_eq!(s.song_step(), 16);
+    }
+
+    #[test]
+    fn pattern_mode_ignores_the_song_and_mode_is_fixed_while_playing() {
+        let mut f = Fixture::new();
+        f.synths[0][0].steps[0] = on(0);
+        f.song.bars = vec![song_bar([None; 4])];
+        let mut s = new_seq();
+        s.play();
+        s.set_mode(Mode::Song);
+        assert_eq!(s.mode(), Mode::Pattern);
+        let ev = f.run(&mut s, 100);
+        assert_eq!(notes(&ev), vec![(0, 36)]);
+    }
+
+    #[test]
+    fn an_empty_song_ends_immediately() {
+        let f = Fixture::new();
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 10);
+        assert!(!s.is_playing());
+        assert!(s.take_ended());
     }
 }

@@ -28,6 +28,7 @@ pub struct Engine {
     /// `ParamId::all()`, so knobs can be re-applied without allocating.
     ids: Vec<ParamId>,
     guard_fired: bool,
+    song: crate::project::Song,
 }
 
 impl Engine {
@@ -56,6 +57,7 @@ impl Engine {
             knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
             ids: ParamId::all(),
             guard_fired: false,
+            song: crate::project::Song::default(),
         }
     }
 
@@ -247,6 +249,7 @@ impl Engine {
                 self.seq.tick(
                     [&self.synth_patterns[0], &self.synth_patterns[1]],
                     [&self.drum_patterns[0], &self.drum_patterns[1]],
+                    &self.song,
                     &mut self.events,
                 );
                 for i in 0..self.events.len() {
@@ -263,6 +266,7 @@ impl Engine {
                         }
                         SeqEvent::Param { id, value } => self.apply_param(id, value),
                         SeqEvent::ParamRestore { id } => self.restore_param(id),
+                        SeqEvent::Automation { id, value } => self.apply_param(id, value),
                     }
                 }
                 continue;
