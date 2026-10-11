@@ -1,10 +1,14 @@
-//! Waveshaping distortion: asymmetric tanh with 2x oversampling, a tone
-//! low-pass and dry/wet mix.
+//! Waveshaping distortion: asymmetric tanh with real 2x oversampling, a
+//! tone low-pass, a DC blocker and dry/wet mix.
 
 use crate::params::{exp, lin};
 use std::f32::consts::TAU;
 
 const BIAS: f32 = 0.15;
+/// DC blocker pole.
+const DC_R: f32 = 0.9995;
+/// Butterworth Q for the 2x-rate anti-imaging / anti-alias low-pass.
+const BUTTER_Q: f32 = 0.707_1;
 
 pub struct Distortion {
     pub on: bool,
@@ -12,17 +16,51 @@ pub struct Distortion {
     drive: f32,
     mix: f32,
     tone_coef: f32,
-    lp: [f32; 2],
+    /// Biquad low-pass coefficients at the 2x rate: b0, b1, b2, a1, a2.
+    bq: [f32; 5],
+    /// Per channel: previous input sample (for the upsampling midpoint).
     prev: [f32; 2],
+    /// Per channel: direct form II transposed biquad state.
+    bq_z1: [f32; 2],
+    bq_z2: [f32; 2],
+    /// Per channel: tone low-pass state.
+    lp: [f32; 2],
+    /// Per channel: DC blocker state.
+    dc_x1: [f32; 2],
+    dc_y1: [f32; 2],
 }
 
 fn shape(x: f32, drive: f32) -> f32 {
     (drive * x + BIAS).tanh() - BIAS.tanh()
 }
 
+/// RBJ cookbook low-pass, normalised. Returns [b0, b1, b2, a1, a2].
+fn butter_lpf(fc: f32, fs: f32) -> [f32; 5] {
+    let w0 = TAU * fc / fs;
+    let (sin_w, cos_w) = w0.sin_cos();
+    let alpha = sin_w / (2.0 * BUTTER_Q);
+    let a0 = 1.0 + alpha;
+    let b0 = (1.0 - cos_w) * 0.5 / a0;
+    let b1 = (1.0 - cos_w) / a0;
+    [b0, b1, b0, -2.0 * cos_w / a0, (1.0 - alpha) / a0]
+}
+
 impl Distortion {
     pub fn new(sample_rate: f32) -> Self {
-        let mut d = Self { on: false, sample_rate, drive: 1.0, mix: 1.0, tone_coef: 1.0, lp: [0.0; 2], prev: [0.0; 2] };
+        let mut d = Self {
+            on: false,
+            sample_rate,
+            drive: 1.0,
+            mix: 1.0,
+            tone_coef: 1.0,
+            bq: butter_lpf(0.45 * sample_rate, 2.0 * sample_rate),
+            prev: [0.0; 2],
+            bq_z1: [0.0; 2],
+            bq_z2: [0.0; 2],
+            lp: [0.0; 2],
+            dc_x1: [0.0; 2],
+            dc_y1: [0.0; 2],
+        };
         d.set_drive(0.3);
         d.set_tone(0.6);
         d
@@ -41,10 +79,24 @@ impl Distortion {
         self.mix = lin(v, 0.0, 1.0);
     }
 
-    /// Clears filter state (used by the mixer's NaN guard).
+    /// Clears all filter and oversampling state (used by the mixer's NaN guard).
     pub fn reset(&mut self) {
-        self.lp = [0.0; 2];
         self.prev = [0.0; 2];
+        self.bq_z1 = [0.0; 2];
+        self.bq_z2 = [0.0; 2];
+        self.lp = [0.0; 2];
+        self.dc_x1 = [0.0; 2];
+        self.dc_y1 = [0.0; 2];
+    }
+
+    /// One sample through the 2x-rate biquad (direct form II transposed).
+    #[inline]
+    fn biquad(&mut self, ch: usize, x: f32) -> f32 {
+        let [b0, b1, b2, a1, a2] = self.bq;
+        let y = b0 * x + self.bq_z1[ch];
+        self.bq_z1[ch] = b1 * x - a1 * y + self.bq_z2[ch];
+        self.bq_z2[ch] = b2 * x - a2 * y;
+        y
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
@@ -54,11 +106,19 @@ impl Distortion {
         for (ch, buf) in [l, r].into_iter().enumerate() {
             for x in buf.iter_mut() {
                 let dry = *x;
+                // Upsample to 2x: midpoint, then the sample itself.
                 let mid = 0.5 * (self.prev[ch] + dry);
                 self.prev[ch] = dry;
-                let wet = 0.5 * (shape(mid, self.drive) + shape(dry, self.drive));
-                self.lp[ch] += (wet - self.lp[ch]) * self.tone_coef;
-                *x = dry + (self.lp[ch] - dry) * self.mix;
+                // Shape both 2x samples, then filter them at the 2x rate.
+                let _ = self.biquad(ch, shape(mid, self.drive));
+                let os = self.biquad(ch, shape(dry, self.drive));
+                // Decimate: keep the second 2x sample only.
+                self.lp[ch] += (os - self.lp[ch]) * self.tone_coef;
+                // DC blocker on the wet path at base rate.
+                let wet = self.lp[ch] - self.dc_x1[ch] + DC_R * self.dc_y1[ch];
+                self.dc_x1[ch] = self.lp[ch];
+                self.dc_y1[ch] = wet;
+                *x = dry + (wet - dry) * self.mix;
             }
         }
     }
@@ -116,5 +176,20 @@ mod tests {
         for (a, b) in l.iter().zip(&orig) {
             assert!((a - b).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn dc_is_removed_at_high_drive() {
+        let mut d = Distortion::new(SR);
+        d.on = true;
+        d.set_drive(1.0);
+        d.set_tone(1.0);
+        d.set_mix(1.0);
+        let mut l: Vec<f32> = (0..44_100).map(|i| (TAU * 110.0 * i as f32 / SR).sin()).collect();
+        let mut r = l.clone();
+        d.process(&mut l, &mut r);
+        let tail = &l[22_050..];
+        let mean = tail.iter().sum::<f32>() / tail.len() as f32;
+        assert!(mean.abs() < 0.01, "mean = {mean}");
     }
 }
