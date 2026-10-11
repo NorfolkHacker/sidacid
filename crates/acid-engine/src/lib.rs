@@ -2,6 +2,7 @@
 //! No GUI or audio-device dependencies; everything renders offline.
 
 pub mod drums;
+pub mod fx;
 pub mod params;
 pub mod project;
 pub mod synth;
