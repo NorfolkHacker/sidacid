@@ -1,0 +1,560 @@
+//! The editable project plus undo/redo. Every change is an `Edit`;
+//! applying one returns the engine `Command`s that bring the audio
+//! thread in line. Undo stores the inverse edit.
+#![allow(dead_code)] // wired up by the UI in Task 6
+
+use acid_engine::host::Command;
+use acid_engine::params::ParamId;
+use acid_engine::project::{
+    DrumHit, DrumPattern, Project, STEPS, SeqView, SynthPattern, SynthStep,
+};
+use std::path::PathBuf;
+
+pub const UNDO_LIMIT: usize = 200;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Edit {
+    Param {
+        id: ParamId,
+        value: f32,
+    },
+    SynthStep {
+        synth: usize,
+        slot: u8,
+        step: usize,
+        value: SynthStep,
+    },
+    SynthLength {
+        synth: usize,
+        slot: u8,
+        length: u8,
+    },
+    SynthTranspose {
+        synth: usize,
+        slot: u8,
+        transpose: i8,
+    },
+    SynthPattern {
+        synth: usize,
+        slot: u8,
+        pattern: Box<SynthPattern>,
+    },
+    DrumHit {
+        kit: usize,
+        slot: u8,
+        step: usize,
+        inst: usize,
+        hit: DrumHit,
+    },
+    DrumLength {
+        kit: usize,
+        slot: u8,
+        length: u8,
+    },
+    DrumPattern {
+        kit: usize,
+        slot: u8,
+        pattern: Box<DrumPattern>,
+    },
+    Bpm(f32),
+    Swing(f32),
+    View {
+        synth: usize,
+        view: SeqView,
+    },
+}
+
+/// Which edits may fold into one undo step during a gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MergeKey {
+    Param(ParamId),
+    Synth(usize, u8),
+    Drum(usize, u8),
+    Bpm,
+    Swing,
+    View(usize),
+}
+
+fn merge_key(edit: &Edit) -> MergeKey {
+    match edit {
+        Edit::Param { id, .. } => MergeKey::Param(*id),
+        Edit::SynthStep { synth, slot, .. }
+        | Edit::SynthLength { synth, slot, .. }
+        | Edit::SynthTranspose { synth, slot, .. }
+        | Edit::SynthPattern { synth, slot, .. } => MergeKey::Synth(*synth, *slot),
+        Edit::DrumHit { kit, slot, .. }
+        | Edit::DrumLength { kit, slot, .. }
+        | Edit::DrumPattern { kit, slot, .. } => MergeKey::Drum(*kit, *slot),
+        Edit::Bpm(_) => MergeKey::Bpm,
+        Edit::Swing(_) => MergeKey::Swing,
+        Edit::View { synth, .. } => MergeKey::View(*synth),
+    }
+}
+
+pub struct Document {
+    pub project: Project,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
+    /// Merge key of the open gesture, if the last edit was a merging one.
+    gesture: Option<MergeKey>,
+}
+
+impl Document {
+    pub fn new(project: Project) -> Self {
+        Self {
+            project,
+            path: None,
+            dirty: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            gesture: None,
+        }
+    }
+
+    /// Applies `edit` and returns the engine commands to send. With
+    /// `merge`, consecutive edits to the same target form one undo step
+    /// until `end_gesture`.
+    pub fn apply(&mut self, edit: Edit, merge: bool) -> Vec<Command> {
+        let key = merge_key(&edit);
+        let continuing = merge && self.gesture == Some(key) && !self.undo.is_empty();
+        let inverse = self.apply_raw(edit);
+        let cmds = self.commands_for(&inverse);
+        if !continuing {
+            self.undo.push(inverse);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+        }
+        self.gesture = merge.then_some(key);
+        self.redo.clear();
+        self.dirty = true;
+        cmds
+    }
+
+    pub fn end_gesture(&mut self) {
+        self.gesture = None;
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> Vec<Command> {
+        self.gesture = None;
+        let Some(edit) = self.undo.pop() else {
+            return Vec::new();
+        };
+        let inverse = self.apply_raw(edit);
+        let cmds = self.commands_for(&inverse);
+        self.redo.push(inverse);
+        self.dirty = true;
+        cmds
+    }
+
+    pub fn redo(&mut self) -> Vec<Command> {
+        self.gesture = None;
+        let Some(edit) = self.redo.pop() else {
+            return Vec::new();
+        };
+        let inverse = self.apply_raw(edit);
+        let cmds = self.commands_for(&inverse);
+        self.undo.push(inverse);
+        self.dirty = true;
+        cmds
+    }
+
+    /// Selecting a pattern is a transport action: saved, not undoable.
+    pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
+        self.project.selected[machine] = slot;
+        self.dirty = true;
+        vec![Command::SelectPattern {
+            machine: machine as u8,
+            slot,
+        }]
+    }
+
+    /// Applies an edit and returns its inverse.
+    fn apply_raw(&mut self, edit: Edit) -> Edit {
+        let p = &mut self.project;
+        match edit {
+            Edit::Param { id, value } => {
+                let old = p.param(id);
+                p.params.insert(id, value.clamp(0.0, 1.0));
+                Edit::Param { id, value: old }
+            }
+            Edit::SynthStep {
+                synth,
+                slot,
+                step,
+                value,
+            } => {
+                let old = std::mem::replace(
+                    &mut p.synths[synth].patterns[slot as usize].steps[step],
+                    value,
+                );
+                Edit::SynthStep {
+                    synth,
+                    slot,
+                    step,
+                    value: old,
+                }
+            }
+            Edit::SynthLength {
+                synth,
+                slot,
+                length,
+            } => {
+                let pat = &mut p.synths[synth].patterns[slot as usize];
+                let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
+                Edit::SynthLength {
+                    synth,
+                    slot,
+                    length: old,
+                }
+            }
+            Edit::SynthTranspose {
+                synth,
+                slot,
+                transpose,
+            } => {
+                let pat = &mut p.synths[synth].patterns[slot as usize];
+                let old = std::mem::replace(&mut pat.transpose, transpose.clamp(-12, 12));
+                Edit::SynthTranspose {
+                    synth,
+                    slot,
+                    transpose: old,
+                }
+            }
+            Edit::SynthPattern {
+                synth,
+                slot,
+                pattern,
+            } => {
+                let old = std::mem::replace(&mut p.synths[synth].patterns[slot as usize], *pattern);
+                Edit::SynthPattern {
+                    synth,
+                    slot,
+                    pattern: Box::new(old),
+                }
+            }
+            Edit::DrumHit {
+                kit,
+                slot,
+                step,
+                inst,
+                hit,
+            } => {
+                let old = std::mem::replace(
+                    &mut p.drums[kit].patterns[slot as usize].steps[step][inst],
+                    hit,
+                );
+                Edit::DrumHit {
+                    kit,
+                    slot,
+                    step,
+                    inst,
+                    hit: old,
+                }
+            }
+            Edit::DrumLength { kit, slot, length } => {
+                let pat = &mut p.drums[kit].patterns[slot as usize];
+                let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
+                Edit::DrumLength {
+                    kit,
+                    slot,
+                    length: old,
+                }
+            }
+            Edit::DrumPattern { kit, slot, pattern } => {
+                let old = std::mem::replace(&mut p.drums[kit].patterns[slot as usize], *pattern);
+                Edit::DrumPattern {
+                    kit,
+                    slot,
+                    pattern: Box::new(old),
+                }
+            }
+            Edit::Bpm(bpm) => Edit::Bpm(std::mem::replace(&mut p.bpm, bpm.clamp(40.0, 300.0))),
+            Edit::Swing(swing) => {
+                Edit::Swing(std::mem::replace(&mut p.swing, swing.clamp(0.0, 0.75)))
+            }
+            Edit::View { synth, view } => Edit::View {
+                synth,
+                view: std::mem::replace(&mut p.synths[synth].view, view),
+            },
+        }
+    }
+
+    /// Commands that sync the engine with the project at `edit`'s target.
+    fn commands_for(&self, edit: &Edit) -> Vec<Command> {
+        let p = &self.project;
+        match edit {
+            Edit::Param { id, .. } => vec![Command::SetParam(*id, p.param(*id))],
+            Edit::SynthStep { synth, slot, .. }
+            | Edit::SynthLength { synth, slot, .. }
+            | Edit::SynthTranspose { synth, slot, .. }
+            | Edit::SynthPattern { synth, slot, .. } => vec![Command::SynthPattern {
+                synth: *synth as u8,
+                slot: *slot,
+                pattern: Box::new(p.synths[*synth].patterns[*slot as usize].clone()),
+            }],
+            Edit::DrumHit { kit, slot, .. }
+            | Edit::DrumLength { kit, slot, .. }
+            | Edit::DrumPattern { kit, slot, .. } => {
+                vec![Command::DrumPattern {
+                    kit: *kit as u8,
+                    slot: *slot,
+                    pattern: Box::new(p.drums[*kit].patterns[*slot as usize].clone()),
+                }]
+            }
+            Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
+            Edit::Swing(_) => vec![Command::SetSwing(p.swing)],
+            Edit::View { .. } => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acid_engine::params::{ParamId, SynthParam};
+    use acid_engine::project::{DrumHit, Gate, SeqView, SynthStep};
+
+    fn doc() -> Document {
+        Document::new(Project::default())
+    }
+
+    const CUTOFF: ParamId = ParamId::Synth(0, SynthParam::Cutoff);
+
+    #[test]
+    fn param_edit_updates_project_and_emits_command() {
+        let mut d = doc();
+        let cmds = d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.9,
+            },
+            false,
+        );
+        assert_eq!(d.project.param(CUTOFF), 0.9);
+        assert!(
+            matches!(cmds.as_slice(), [Command::SetParam(id, v)] if *id == CUTOFF && *v == 0.9)
+        );
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn undo_and_redo_round_trip() {
+        let mut d = doc();
+        let before = d.project.clone();
+        let step = SynthStep {
+            note: 3,
+            octave: 1,
+            gate: Gate::On,
+            accent: true,
+            slide: false,
+        };
+        d.apply(
+            Edit::SynthStep {
+                synth: 1,
+                slot: 5,
+                step: 2,
+                value: step,
+            },
+            false,
+        );
+        d.apply(
+            Edit::DrumHit {
+                kit: 0,
+                slot: 0,
+                step: 4,
+                inst: 1,
+                hit: DrumHit::Accent,
+            },
+            false,
+        );
+        let after = d.project.clone();
+        d.undo();
+        d.undo();
+        assert_eq!(d.project, before);
+        assert!(!d.can_undo());
+        d.redo();
+        d.redo();
+        assert_eq!(d.project, after);
+        assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn a_gesture_is_one_undo_step() {
+        let mut d = doc();
+        let start = d.project.param(CUTOFF);
+        for v in [0.4, 0.5, 0.6, 0.7] {
+            d.apply(
+                Edit::Param {
+                    id: CUTOFF,
+                    value: v,
+                },
+                true,
+            );
+        }
+        d.end_gesture();
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.1,
+            },
+            true,
+        );
+        d.end_gesture();
+        d.undo();
+        assert_eq!(d.project.param(CUTOFF), 0.7);
+        d.undo();
+        assert_eq!(d.project.param(CUTOFF), start);
+    }
+
+    #[test]
+    fn different_params_never_merge() {
+        let mut d = doc();
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.9,
+            },
+            true,
+        );
+        d.apply(
+            Edit::Param {
+                id: ParamId::Synth(0, SynthParam::Resonance),
+                value: 0.9,
+            },
+            true,
+        );
+        d.undo();
+        assert_eq!(d.project.param(CUTOFF), 0.9);
+    }
+
+    #[test]
+    fn new_edit_clears_redo() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(140.0), false);
+        d.undo();
+        assert!(d.can_redo());
+        d.apply(Edit::Bpm(150.0), false);
+        assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn step_edits_send_the_whole_pattern() {
+        let mut d = doc();
+        let cmds = d.apply(
+            Edit::SynthLength {
+                synth: 0,
+                slot: 3,
+                length: 7,
+            },
+            false,
+        );
+        match cmds.as_slice() {
+            [
+                Command::SynthPattern {
+                    synth: 0,
+                    slot: 3,
+                    pattern,
+                },
+            ] => assert_eq!(pattern.length, 7),
+            _ => panic!("expected one SynthPattern command"),
+        }
+        let cmds = d.apply(
+            Edit::DrumLength {
+                kit: 1,
+                slot: 2,
+                length: 12,
+            },
+            false,
+        );
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::DrumPattern {
+                kit: 1,
+                slot: 2,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn values_are_clamped() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(1000.0), false);
+        assert_eq!(d.project.bpm, 300.0);
+        d.apply(Edit::Swing(-1.0), false);
+        assert_eq!(d.project.swing, 0.0);
+        d.apply(
+            Edit::SynthLength {
+                synth: 0,
+                slot: 0,
+                length: 0,
+            },
+            false,
+        );
+        assert_eq!(d.project.synths[0].patterns[0].length, 1);
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 2.0,
+            },
+            false,
+        );
+        assert_eq!(d.project.param(CUTOFF), 1.0);
+    }
+
+    #[test]
+    fn view_edit_is_undoable_and_silent() {
+        let mut d = doc();
+        let cmds = d.apply(
+            Edit::View {
+                synth: 1,
+                view: SeqView::PianoRoll,
+            },
+            false,
+        );
+        assert!(cmds.is_empty());
+        assert_eq!(d.project.synths[1].view, SeqView::PianoRoll);
+        d.undo();
+        assert_eq!(d.project.synths[1].view, SeqView::Step303);
+    }
+
+    #[test]
+    fn undo_history_is_bounded() {
+        let mut d = doc();
+        for i in 0..(UNDO_LIMIT + 50) {
+            d.apply(Edit::Bpm(60.0 + i as f32 * 0.1), false);
+        }
+        let mut n = 0;
+        while d.can_undo() {
+            d.undo();
+            n += 1;
+        }
+        assert_eq!(n, UNDO_LIMIT);
+    }
+
+    #[test]
+    fn select_pattern_marks_dirty_and_commands_engine() {
+        let mut d = doc();
+        let cmds = d.select_pattern(2, 17);
+        assert_eq!(d.project.selected[2], 17);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::SelectPattern {
+                machine: 2,
+                slot: 17
+            }]
+        ));
+        assert!(d.dirty);
+    }
+}

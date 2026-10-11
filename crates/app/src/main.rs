@@ -1,6 +1,8 @@
 //! SidAcid. Plan 1 ships only the offline demo renderer; the GUI arrives
 //! in Plan 2.
 
+mod document;
+
 use std::path::Path;
 use std::process::ExitCode;
 

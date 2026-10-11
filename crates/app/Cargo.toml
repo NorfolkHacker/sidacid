@@ -10,3 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 acid-engine = { path = "../acid-engine" }
+eframe.workspace = true
+cpal.workspace = true
+rfd.workspace = true
+rtrb.workspace = true

@@ -12,6 +12,9 @@ serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 hound = "3.5"
 rtrb = "0.3"
+eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+cpal = "0.15"
+rfd = "0.15"
 
 # Audio tests render seconds of sound; unoptimised builds are too slow.
 [profile.dev]
