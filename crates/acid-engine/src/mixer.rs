@@ -85,6 +85,7 @@ pub struct Mixer {
     delay_send: StereoBuf,
     reverb_send: StereoBuf,
     wet: StereoBuf,
+    meters: [f32; 5],
 }
 
 impl Mixer {
@@ -103,6 +104,7 @@ impl Mixer {
             delay_send: StereoBuf::new(max_block),
             reverb_send: StereoBuf::new(max_block),
             wet: StereoBuf::new(max_block),
+            meters: [0.0; 5],
         };
         for id in ParamId::all() {
             m.set_param(id, id.info().default);
@@ -112,6 +114,12 @@ impl Mixer {
 
     pub fn set_bpm(&mut self, bpm: f32) {
         self.delay.set_bpm(bpm);
+    }
+
+    /// Peak levels since the last call: channels 0..4 post-fader, then
+    /// the master after the final clip. Resets them.
+    pub fn take_meters(&mut self) -> [f32; 5] {
+        std::mem::take(&mut self.meters)
     }
 
     pub fn set_param(&mut self, id: ParamId, v: f32) {
@@ -163,7 +171,7 @@ impl Mixer {
             b.r[..n].fill(0.0);
         }
         let any_solo = self.strips.iter().any(|s| s.solo);
-        for (strip, buf) in self.strips.iter_mut().zip(chans.iter_mut()) {
+        for (c, (strip, buf)) in self.strips.iter_mut().zip(chans.iter_mut()).enumerate() {
             let (l, r) = (&mut buf.l[..n], &mut buf.r[..n]);
             strip.dist.process(l, r);
             strip.comp.process(l, r);
@@ -174,6 +182,7 @@ impl Mixer {
             for i in 0..n {
                 let sl = l[i] * gl;
                 let sr = r[i] * gr;
+                self.meters[c] = self.meters[c].max(sl.abs()).max(sr.abs());
                 out_l[i] += sl;
                 out_r[i] += sr;
                 self.delay_send.l[i] += sl * strip.delay_send;
@@ -226,6 +235,7 @@ impl Mixer {
         }
         for v in out_l.iter_mut().chain(out_r.iter_mut()) {
             *v = v.clamp(-1.0, 1.0);
+            self.meters[4] = self.meters[4].max(v.abs());
         }
         false
     }

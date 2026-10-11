@@ -14,6 +14,7 @@ use crate::synth::BassSynth;
 const MAX_TICKS_PER_POSITION: usize = 64;
 
 pub struct Engine {
+    sample_rate: f32,
     synths: [BassSynth; 2],
     kits: [DrumKit; 2],
     mixer: Mixer,
@@ -26,6 +27,7 @@ pub struct Engine {
     knobs: Vec<f32>,
     /// `ParamId::all()`, so knobs can be re-applied without allocating.
     ids: Vec<ParamId>,
+    guard_fired: bool,
 }
 
 impl Engine {
@@ -33,6 +35,7 @@ impl Engine {
 
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            sample_rate,
             synths: [BassSynth::new(sample_rate), BassSynth::new(sample_rate)],
             kits: [
                 DrumKit::new(KitKind::K808, sample_rate),
@@ -52,6 +55,7 @@ impl Engine {
             events: Vec::with_capacity(64),
             knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
             ids: ParamId::all(),
+            guard_fired: false,
         }
     }
 
@@ -144,20 +148,65 @@ impl Engine {
         }
     }
 
-    /// Stores `p` and returns the old pattern. An invalid target or a
-    /// malformed pattern is not stored: `p` is handed back unchanged.
-    pub fn set_synth_pattern(&mut self, synth: usize, slot: u8, p: SynthPattern) -> SynthPattern {
-        if synth >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
-            return p;
-        }
-        std::mem::replace(&mut self.synth_patterns[synth][slot as usize], p)
+    /// Builds an engine with a project loaded. Allocates; call off the
+    /// audio thread.
+    pub fn from_project(sample_rate: f32, p: &Project) -> Engine {
+        let mut e = Engine::new(sample_rate);
+        e.load_project(p);
+        e
     }
 
-    pub fn set_drum_pattern(&mut self, kit: usize, slot: u8, p: DrumPattern) -> DrumPattern {
-        if kit >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
-            return p;
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Swaps `p` with the stored pattern (real-time safe). An invalid
+    /// target or malformed pattern leaves both untouched and returns false.
+    pub fn swap_synth_pattern(&mut self, synth: usize, slot: u8, p: &mut SynthPattern) -> bool {
+        if synth >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+            return false;
         }
-        std::mem::replace(&mut self.drum_patterns[kit][slot as usize], p)
+        std::mem::swap(&mut self.synth_patterns[synth][slot as usize], p);
+        true
+    }
+
+    pub fn swap_drum_pattern(&mut self, kit: usize, slot: u8, p: &mut DrumPattern) -> bool {
+        if kit >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+            return false;
+        }
+        std::mem::swap(&mut self.drum_patterns[kit][slot as usize], p);
+        true
+    }
+
+    /// Stores `p` and returns the old pattern. An invalid target or a
+    /// malformed pattern is not stored: `p` is handed back unchanged.
+    pub fn set_synth_pattern(
+        &mut self,
+        synth: usize,
+        slot: u8,
+        mut p: SynthPattern,
+    ) -> SynthPattern {
+        self.swap_synth_pattern(synth, slot, &mut p);
+        p
+    }
+
+    pub fn set_drum_pattern(&mut self, kit: usize, slot: u8, mut p: DrumPattern) -> DrumPattern {
+        self.swap_drum_pattern(kit, slot, &mut p);
+        p
+    }
+
+    pub fn queued_patterns(&self) -> [Option<u8>; 4] {
+        std::array::from_fn(|m| self.seq.queued_pattern(m))
+    }
+
+    /// See `Mixer::take_meters`.
+    pub fn take_meters(&mut self) -> [f32; 5] {
+        self.mixer.take_meters()
+    }
+
+    /// True once if the mixer's NaN guard fired since the last call.
+    pub fn take_guard_fired(&mut self) -> bool {
+        std::mem::take(&mut self.guard_fired)
     }
 
     pub fn playhead(&self) -> [usize; 4] {
@@ -238,6 +287,7 @@ impl Engine {
             pos += run;
         }
         if self.mixer.process(&mut self.chans, n, out_l, out_r) {
+            self.guard_fired = true;
             for s in &mut self.synths {
                 s.reset();
             }
@@ -458,6 +508,62 @@ mod tests {
         assert_eq!(peak(&l[64..5000]), 0.0);
         // ...then the knob value comes back.
         assert!(peak(&l[6000..20_000]) > 0.01);
+    }
+
+    #[test]
+    fn from_project_matches_load_project() {
+        let p = crate::demo::demo_project();
+        let mut a = Engine::from_project(SR, &p);
+        let mut b = Engine::new(SR);
+        b.load_project(&p);
+        a.play();
+        b.play();
+        let (la, _) = render(&mut a, 0.5);
+        let (lb, _) = render(&mut b, 0.5);
+        assert_eq!(la, lb);
+        assert_eq!(a.sample_rate(), SR);
+    }
+
+    #[test]
+    fn swap_exchanges_patterns_and_rejects_bad_ones() {
+        let mut e = demo_engine();
+        let mut p = SynthPattern::default();
+        assert!(e.swap_synth_pattern(0, 0, &mut p));
+        assert!(
+            p.steps.iter().any(|s| s.gate != crate::project::Gate::Off),
+            "got the old pattern back"
+        );
+        let mut bad = SynthPattern::default();
+        bad.steps.pop();
+        assert!(!e.swap_synth_pattern(0, 1, &mut bad));
+        assert_eq!(bad.steps.len(), 63, "rejected pattern is untouched");
+        let mut d = DrumPattern::default();
+        assert!(e.swap_drum_pattern(1, 0, &mut d));
+        assert!(!e.swap_drum_pattern(2, 0, &mut d));
+    }
+
+    #[test]
+    fn meters_report_and_reset() {
+        let mut e = demo_engine();
+        e.play();
+        render(&mut e, 0.5);
+        let m = e.take_meters();
+        assert!(m[0] > 0.01 && m[2] > 0.01 && m[4] > 0.01, "{m:?}");
+        assert!(m[4] <= 1.0 + 1e-6, "master is post-clip");
+        e.stop();
+        render(&mut e, 5.0);
+        e.take_meters();
+        render(&mut e, 0.05);
+        assert!(e.take_meters().iter().all(|v| *v < 1e-3));
+        assert!(!e.take_guard_fired());
+    }
+
+    #[test]
+    fn queued_patterns_are_reported() {
+        let mut e = demo_engine();
+        e.play();
+        e.select_pattern(3, 5);
+        assert_eq!(e.queued_patterns(), [None, None, None, Some(5)]);
     }
 
     #[test]
