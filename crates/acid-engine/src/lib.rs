@@ -1,6 +1,7 @@
 //! SidAcid sound engine: instruments, effects, sequencer and project data.
 //! No GUI or audio-device dependencies; everything renders offline.
 
+pub mod drums;
 pub mod params;
 pub mod project;
 pub mod synth;
