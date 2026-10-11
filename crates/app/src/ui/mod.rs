@@ -5,6 +5,8 @@
 pub mod knob;
 mod pads;
 mod params_ui;
+mod pianoroll;
+mod roll_edit;
 mod step303;
 mod step_edit;
 mod synth_panel;
@@ -31,6 +33,8 @@ pub struct ViewState {
     pub scroll_accum: [f32; 2],
     /// Whether a note cell of each synth was scrolled on the previous frame.
     pub scrolling: [bool; 2],
+    /// Mouse drag in progress in each synth's piano roll.
+    pub roll_drag: [Option<roll_edit::RollDrag>; 2],
 }
 
 pub struct SidAcidApp {
@@ -171,6 +175,14 @@ pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piano_roll_view_draws_headless() {
+        let mut doc = Document::new(acid_engine::demo::demo_project());
+        doc.project.synths[0].view = acid_engine::project::SeqView::PianoRoll;
+        let mut app = SidAcidApp::headless(doc);
+        run_frames(&mut app, 2);
+    }
 
     #[test]
     fn ui_draws_headless() {

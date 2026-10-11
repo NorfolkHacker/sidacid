@@ -3,7 +3,7 @@
 use super::SidAcidApp;
 use crate::document::Edit;
 use acid_engine::params::{ParamId, SynthParam};
-use acid_engine::project::PatternRef;
+use acid_engine::project::{PatternRef, SeqView};
 use eframe::egui;
 
 const KNOBS: [(SynthParam, &str); 15] = [
@@ -81,6 +81,18 @@ impl SidAcidApp {
                     if r2.drag_stopped() || r2.lost_focus() {
                         self.doc.end_gesture();
                     }
+                    ui.separator();
+                    let view = self.doc.project.synths[synth].view;
+                    for (v, label) in [
+                        (SeqView::Step303, "303"),
+                        (SeqView::PianoRoll, "Piano roll"),
+                    ] {
+                        if ui.selectable_label(view == v, label).clicked() && view != v {
+                            let cmds = self.doc.apply(Edit::View { synth, view: v }, false);
+                            self.send(cmds);
+                            self.view.writers[synth] = None;
+                        }
+                    }
                     if let Some(w) = self.view.writers[synth] {
                         ui.label(format!(
                             "Step-write: step {}  octave {:+}  (Esc to stop)",
@@ -89,7 +101,10 @@ impl SidAcidApp {
                         ));
                     }
                 });
-                self.step303(ui, synth);
+                match self.doc.project.synths[synth].view {
+                    SeqView::Step303 => self.step303(ui, synth),
+                    SeqView::PianoRoll => self.piano_roll(ui, synth),
+                }
             });
     }
 }
