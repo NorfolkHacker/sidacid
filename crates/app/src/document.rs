@@ -61,7 +61,6 @@ pub enum Edit {
         synth: usize,
         view: SeqView,
     },
-    #[allow(dead_code)] // used by Task 7
     Song {
         song: Box<Song>,
     },

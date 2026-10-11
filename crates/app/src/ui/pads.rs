@@ -36,6 +36,7 @@ impl SidAcidApp {
                         let cmds = self.doc.select_pattern(machine, slot);
                         self.send(cmds);
                         self.view.focus = machine;
+                        self.record_pattern_change(machine, slot);
                     }
                 }
             });

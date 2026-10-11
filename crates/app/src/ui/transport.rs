@@ -2,8 +2,8 @@
 
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
-use acid_engine::host::Command;
 use acid_engine::params::{MasterParam, ParamId};
+use acid_engine::sequencer::Mode;
 use eframe::egui;
 
 impl SidAcidApp {
@@ -18,10 +18,39 @@ impl SidAcidApp {
                 .add(egui::Button::new("Play").selected(playing))
                 .clicked()
             {
-                self.send(vec![Command::Play]);
+                self.play();
             }
             if ui.button("Stop").clicked() {
-                self.send(vec![Command::Stop]);
+                self.stop();
+            }
+            ui.separator();
+            for (m, label) in [(Mode::Pattern, "Pattern"), (Mode::Song, "Song")] {
+                if ui.selectable_label(self.view.mode == m, label).clicked() {
+                    self.set_mode(m);
+                }
+            }
+            let rec_text = egui::RichText::new("Rec").color(if self.view.record {
+                theme::ACCENT
+            } else {
+                ui.visuals().text_color()
+            });
+            let rec = ui.add_enabled(
+                self.view.mode == Mode::Song,
+                egui::Button::new(rec_text).selected(self.view.record),
+            );
+            if rec
+                .on_hover_text("Record pattern changes and knob moves into the song")
+                .clicked()
+            {
+                self.set_record(!self.view.record);
+            }
+            if self.view.mode == Mode::Song {
+                let bar = if self.status.playing {
+                    self.status.song_bar as usize
+                } else {
+                    self.view.song_cursor
+                };
+                ui.label(format!("Bar {}", bar + 1));
             }
             ui.separator();
             let shown_bpm = self.doc.project.bpm;

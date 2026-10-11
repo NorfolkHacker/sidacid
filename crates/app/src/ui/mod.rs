@@ -10,6 +10,7 @@ mod mixer_panel;
 mod pads;
 mod params_ui;
 mod pianoroll;
+mod record;
 mod roll_edit;
 mod step303;
 mod step_edit;
@@ -58,6 +59,17 @@ pub struct ViewState {
     pub audio_lost: bool,
     /// One automatic restart was tried since audio last ran fine.
     pub auto_retried: bool,
+    /// Pattern or Song transport mode (not saved).
+    pub mode: acid_engine::sequencer::Mode,
+    /// Record armed (song mode only).
+    pub record: bool,
+    /// Song bar playback starts from, and the bar the song editor shows.
+    pub song_cursor: usize,
+    /// Knob values heard while recording (saved knobs stay unchanged).
+    pub live: std::collections::HashMap<acid_engine::params::ParamId, f32>,
+    /// Last step recorded for the held knob.
+    pub rec_last: Option<(acid_engine::params::ParamId, u32)>,
+    pub was_playing: bool,
 }
 
 pub struct SidAcidApp {
@@ -183,6 +195,11 @@ impl SidAcidApp {
         }
         self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
+        self.record_automation();
+        if self.view.was_playing && !self.status.playing && self.view.record {
+            self.stop_recording();
+        }
+        self.view.was_playing = self.status.playing;
         if let Some(t) = self.view.clip_text.take() {
             ctx.copy_text(t);
         }
@@ -253,6 +270,116 @@ pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recording_app() -> SidAcidApp {
+        let mut doc = Document::new(acid_engine::demo::demo_project());
+        doc.project.song.bars = vec![acid_engine::project::Bar::default(); 4];
+        let mut app = SidAcidApp::headless(doc);
+        app.view.mode = acid_engine::sequencer::Mode::Song;
+        app.view.record = true;
+        app.status.playing = true;
+        app
+    }
+
+    #[test]
+    fn recording_writes_held_knob_values_as_one_undo_step() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = recording_app();
+        app.view.touched_knob = Some(id);
+        app.view.live.insert(id, 0.7);
+        app.status.song_step = 4;
+        app.record_automation();
+        app.view.live.insert(id, 0.9);
+        app.status.song_step = 7;
+        app.record_automation();
+        let lane = acid_engine::song::lane(&app.doc.project.song, id).unwrap();
+        let points: Vec<(u32, f32)> = lane.points.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(points, vec![(4, 0.7), (5, 0.9), (6, 0.9), (7, 0.9)]);
+        assert_eq!(
+            app.doc.project.param(id),
+            acid_engine::demo::demo_project().param(id),
+            "saved knob untouched"
+        );
+        app.stop_recording();
+        app.doc.undo();
+        assert!(app.doc.project.song.automation.is_empty());
+    }
+
+    #[test]
+    fn nothing_is_recorded_unless_armed_in_song_mode_and_playing() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        for case in 0..3 {
+            let mut app = recording_app();
+            match case {
+                0 => app.view.record = false,
+                1 => app.view.mode = acid_engine::sequencer::Mode::Pattern,
+                _ => app.status.playing = false,
+            }
+            app.view.touched_knob = Some(id);
+            app.view.live.insert(id, 0.7);
+            app.record_automation();
+            assert!(app.doc.project.song.automation.is_empty(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn recorded_pad_change_fills_following_bars() {
+        let mut app = recording_app();
+        app.status.song_bar = 1;
+        app.record_pattern_change(0, 9);
+        let refs: Vec<_> = app
+            .doc
+            .project
+            .song
+            .bars
+            .iter()
+            .map(|b| b.patterns[0].map(|r| r.0))
+            .collect();
+        assert_eq!(refs, vec![None, Some(9), Some(9), Some(9)]);
+    }
+
+    #[test]
+    fn switching_mode_stops_and_disarms() {
+        let mut app = recording_app();
+        app.pending.clear();
+        app.set_mode(acid_engine::sequencer::Mode::Pattern);
+        assert!(!app.view.record);
+        assert!(matches!(
+            app.pending.as_slice(),
+            [
+                Command::Stop,
+                Command::SetMode(acid_engine::sequencer::Mode::Pattern)
+            ]
+        ));
+    }
+
+    #[test]
+    fn stop_twice_returns_to_the_loop_start() {
+        let mut app = recording_app();
+        app.doc.project.song.loop_range = Some((1, 2));
+        app.status.playing = false;
+        app.view.song_cursor = 3;
+        app.stop();
+        assert_eq!(app.view.song_cursor, 1);
+        app.doc.project.song.loop_range = None;
+        app.stop();
+        assert_eq!(app.view.song_cursor, 0);
+    }
+
+    #[test]
+    fn song_play_sends_the_start_bar_first() {
+        let mut app = recording_app();
+        app.status.playing = false;
+        app.view.song_cursor = 2;
+        app.pending.clear();
+        app.play();
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Command::SetSongStart(2), Command::Play]
+        ));
+    }
 
     #[test]
     fn piano_roll_view_draws_headless() {

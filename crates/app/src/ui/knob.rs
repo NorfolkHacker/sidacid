@@ -38,7 +38,14 @@ pub fn notches_to_value(value: f32, notches: i32) -> f32 {
 
 /// A rotary knob: drag vertically (Shift = fine), scroll, double-click to
 /// reset to `default`.
-pub fn knob(ui: &mut egui::Ui, label: &str, value: f32, default: f32, tooltip: &str) -> KnobOutput {
+pub fn knob(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: f32,
+    default: f32,
+    tooltip: &str,
+    automated: bool,
+) -> KnobOutput {
     let (rect, response) = ui.allocate_exact_size(CELL, Sense::click_and_drag());
     let mut new_value = None;
     let mut touched = response.dragged();
@@ -94,6 +101,9 @@ pub fn knob(ui: &mut egui::Ui, label: &str, value: f32, default: f32, tooltip: &
         Stroke::new(2.5_f32, theme::ACID),
     ));
     painter.circle_filled(center, radius, theme::KNOB_BODY);
+    if automated {
+        painter.circle_stroke(center, radius + 6.0, Stroke::new(1.5_f32, theme::SLIDE));
+    }
     painter.line_segment(
         [
             center,

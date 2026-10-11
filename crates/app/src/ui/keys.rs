@@ -2,7 +2,6 @@
 
 use super::SidAcidApp;
 use super::files::Pending;
-use acid_engine::host::Command;
 use eframe::egui::{self, Key, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,12 +73,11 @@ impl SidAcidApp {
             }
             match s {
                 Shortcut::PlayStop => {
-                    let cmd = if self.status.playing {
-                        Command::Stop
+                    if self.status.playing {
+                        self.stop()
                     } else {
-                        Command::Play
-                    };
-                    self.send(vec![cmd]);
+                        self.play()
+                    }
                 }
                 Shortcut::Save => {
                     self.save(false);

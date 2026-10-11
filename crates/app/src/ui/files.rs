@@ -127,6 +127,10 @@ impl SidAcidApp {
         self.view.scroll_accum = [0.0; 2];
         self.view.scrolling = [false; 2];
         self.view.touched_knob = None;
+        self.view.live.clear();
+        self.view.rec_last = None;
+        self.view.record = false;
+        self.view.song_cursor = 0;
         for m in 0..4 {
             self.view.bank[m] = self.doc.project.selected[m] / BANK_SIZE as u8;
         }
