@@ -42,6 +42,11 @@ pub enum SeqEvent {
         id: ParamId,
         value: f32,
     },
+    /// The song position jumped to before this lane's first point: the
+    /// param goes back to its knob value.
+    AutomationReset {
+        id: ParamId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +90,12 @@ pub struct Sequencer {
     seek: bool,
     /// The next step emits every lane's held value, not just its points.
     auto_sync: bool,
+    /// The song changed while playing: the next step start recomputes
+    /// the song position and the current bar's length.
+    resync_pending: bool,
+    /// The pattern last selected per machine; restored when song
+    /// playback (which overrides the tracks' patterns) is left.
+    chosen: [u8; 4],
     ended: bool,
 }
 
@@ -111,6 +122,8 @@ impl Sequencer {
             song_step: 0,
             seek: false,
             auto_sync: false,
+            resync_pending: false,
+            chosen: [0; 4],
             ended: false,
         }
     }
@@ -170,10 +183,12 @@ impl Sequencer {
                 t.pattern = q;
             }
         }
+        self.resync_pending = false;
     }
 
     pub fn stop(&mut self) {
         self.playing = false;
+        self.resync_pending = false;
         for t in &mut self.tracks {
             t.step = 0;
             t.gate_open = false;
@@ -181,6 +196,25 @@ impl Sequencer {
             t.lane_override = None;
             t.silent = false;
             t.transpose_add = 0;
+        }
+        if self.mode == Mode::Song {
+            self.restore_chosen();
+        }
+    }
+
+    /// Puts each machine back on its last selected pattern.
+    fn restore_chosen(&mut self) {
+        for (t, &slot) in self.tracks.iter_mut().zip(&self.chosen) {
+            t.pattern = slot;
+            t.queued = None;
+        }
+    }
+
+    /// The song was edited while playing: re-derive the song position
+    /// (and the current bar's length) at the next step. Real-time safe.
+    pub fn resync(&mut self) {
+        if self.playing && self.mode == Mode::Song {
+            self.resync_pending = true;
         }
     }
 
@@ -190,8 +224,9 @@ impl Sequencer {
 
     /// Ignored while playing (the UI stops before switching).
     pub fn set_mode(&mut self, mode: Mode) {
-        if !self.playing {
+        if !self.playing && self.mode != mode {
             self.mode = mode;
+            self.restore_chosen();
         }
     }
 
@@ -263,7 +298,59 @@ impl Sequencer {
         true
     }
 
+    /// Song playback ignores the choice (the bars pick the patterns) but
+    /// remembers it for when playback stops or the mode changes.
+    /// Song automation for the current step. On a sync step every lane
+    /// reports its held value, and lanes with no point yet reset.
+    fn emit_automation(&mut self, song: &Song, out: &mut Vec<SeqEvent>) {
+        for lane in &song.automation {
+            if self.auto_sync {
+                out.push(match value_at(lane, self.song_step) {
+                    Some(value) => SeqEvent::Automation {
+                        id: lane.param,
+                        value,
+                    },
+                    None => SeqEvent::AutomationReset { id: lane.param },
+                });
+            } else if let Some(&value) = lane.points.get(&self.song_step) {
+                out.push(SeqEvent::Automation {
+                    id: lane.param,
+                    value,
+                });
+            }
+        }
+        self.auto_sync = false;
+    }
+
+    /// Re-derives the song position after a song edit. At a bar start the
+    /// bar load does it; mid-bar the current bar's length and position are
+    /// recomputed here. A bar that no longer exists ends at its old length.
+    fn apply_resync(
+        &mut self,
+        song: &Song,
+        synths: [&[SynthPattern]; 2],
+        drums: [&[DrumPattern]; 2],
+    ) {
+        self.resync_pending = false;
+        if self.bar_step == 0 {
+            self.seek = true;
+            return;
+        }
+        let Some(bar) = song.bars.get(self.song_bar) else {
+            return;
+        };
+        self.song_step = bar_start_step(song, self.song_bar, synths, drums) + self.bar_step as u32;
+        self.bar_len = bar_steps(bar, synths, drums);
+        self.auto_sync = true;
+        if self.bar_step >= self.bar_len {
+            // The bar got shorter than where we are: the next bar start
+            // must find its position afresh.
+            self.seek = true;
+        }
+    }
+
     pub fn select(&mut self, machine: usize, slot: u8) {
+        self.chosen[machine] = slot;
         if self.mode == Mode::Song && self.playing {
             return;
         }
@@ -314,11 +401,15 @@ impl Sequencer {
         let half = self.step_len(self.global_step) * 0.5;
         match self.phase {
             Phase::StepStart => {
-                if self.mode == Mode::Song
-                    && self.bar_step == 0
-                    && !self.load_bar(song, synths, drums, out)
-                {
-                    return;
+                if self.mode == Mode::Song {
+                    if self.resync_pending {
+                        self.apply_resync(song, synths, drums);
+                    }
+                    if self.bar_step == 0 && !self.load_bar(song, synths, drums, out) {
+                        return;
+                    }
+                    // Before the pattern lanes, so a lane value wins on its step.
+                    self.emit_automation(song, out);
                 }
                 for s in 0..2 {
                     let t = &mut self.tracks[s];
@@ -416,22 +507,6 @@ impl Sequencer {
                             }),
                         }
                     }
-                }
-                if self.mode == Mode::Song {
-                    for lane in &song.automation {
-                        let value = if self.auto_sync {
-                            value_at(lane, self.song_step)
-                        } else {
-                            lane.points.get(&self.song_step).copied()
-                        };
-                        if let Some(value) = value {
-                            out.push(SeqEvent::Automation {
-                                id: lane.param,
-                                value,
-                            });
-                        }
-                    }
-                    self.auto_sync = false;
                 }
                 self.phase = Phase::Mid;
             }
@@ -1000,6 +1075,139 @@ mod tests {
         assert_eq!(s.mode(), Mode::Pattern);
         let ev = f.run(&mut s, 100);
         assert_eq!(notes(&ev), vec![(0, 36)]);
+    }
+
+    #[test]
+    fn selection_during_song_playback_is_kept_for_pattern_mode() {
+        let mut f = Fixture::new();
+        for b in f.synths.iter_mut() {
+            b.resize(8, SynthPattern::default());
+        }
+        for b in f.drums.iter_mut() {
+            b.resize(8, DrumPattern::default());
+        }
+        f.synths[0][2].steps[0] = on(4);
+        f.synths[0][5].steps[0] = on(9);
+        f.song.bars = vec![song_bar([Some(5); 4]), song_bar([Some(5); 4])];
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 3 * 5513);
+        for m in 0..4 {
+            s.select(m, 2);
+            assert_eq!(s.current_pattern(m), 5, "ignored while the song plays");
+            assert_eq!(s.queued_pattern(m), None);
+        }
+        s.stop();
+        s.set_mode(Mode::Pattern);
+        s.play();
+        for m in 0..4 {
+            assert_eq!(s.current_pattern(m), 2, "machine {m}");
+        }
+        let ev = f.run(&mut s, 100);
+        assert_eq!(notes(&ev), vec![(0, 40)], "pattern 2 plays, not 5");
+    }
+
+    fn resets(ev: &[(usize, SeqEvent)]) -> Vec<usize> {
+        ev.iter()
+            .filter_map(|(p, e)| matches!(e, SeqEvent::AutomationReset { .. }).then_some(*p))
+            .collect()
+    }
+
+    #[test]
+    fn loop_jump_resets_lanes_without_a_point_yet() {
+        use crate::params::{MasterParam, ParamId};
+        let id = ParamId::Master(MasterParam::Level);
+        let mut f = Fixture::new();
+        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
+        f.song.loop_range = Some((0, 1));
+        crate::song::write_automation(&mut f.song, id, 20, 20, 0.0);
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 33 * 5513);
+        assert!(s.is_playing(), "looping");
+        assert_eq!((s.song_bar(), s.song_step()), (0, 1), "back in bar 0");
+        // Step 32 (the loop jump) starts at 32 × 5512.5 = 176 400.
+        assert_eq!(
+            resets(&ev),
+            vec![0, 176_400],
+            "at the start and the loop jump"
+        );
+        let reset_then_point: Vec<SeqEvent> = ev
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    SeqEvent::Automation { .. } | SeqEvent::AutomationReset { .. }
+                )
+            })
+            .map(|(_, e)| *e)
+            .collect();
+        assert_eq!(
+            reset_then_point,
+            vec![
+                SeqEvent::AutomationReset { id },
+                SeqEvent::Automation { id, value: 0.0 },
+                SeqEvent::AutomationReset { id },
+            ]
+        );
+    }
+
+    #[test]
+    fn song_automation_comes_before_pattern_lanes_in_a_step() {
+        use crate::params::{MasterParam, ParamId};
+        use crate::project::ParamLane;
+        let id = ParamId::Master(MasterParam::Level);
+        let mut f = Fixture::new();
+        let mut values = vec![None; 64];
+        values[2] = Some(0.9);
+        f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
+        f.song.bars = vec![song_bar([Some(0), None, None, None])];
+        crate::song::write_automation(&mut f.song, id, 2, 2, 0.1);
+        let mut s = song_seq();
+        s.play();
+        let ev = f.run(&mut s, 3 * 5513);
+        let at_step_2: Vec<SeqEvent> = ev
+            .iter()
+            .filter(|(p, _)| *p == 11_025)
+            .map(|(_, e)| *e)
+            .collect();
+        assert_eq!(
+            at_step_2,
+            vec![
+                SeqEvent::Automation { id, value: 0.1 },
+                SeqEvent::Param { id, value: 0.9 },
+            ],
+            "the pattern lane wins on its step"
+        );
+    }
+
+    #[test]
+    fn resync_mid_bar_recomputes_the_song_position() {
+        let mut f = Fixture::new();
+        f.synths[0][1].length = 32;
+        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
+        let mut s = song_seq();
+        s.play();
+        // Past the mid tick of step 18: bar 1, bar step 3, song step 19.
+        f.run(&mut s, 103_000);
+        assert_eq!((s.song_bar(), s.song_step()), (1, 19));
+        f.song.bars[0] = song_bar([Some(1), None, None, None]);
+        s.resync();
+        f.run(&mut s, 3000); // the step-19 start tick
+        assert_eq!(s.song_step(), 32 + 3);
+        f.run(&mut s, 12 * 5513); // through the step-31 start tick
+        assert_eq!((s.song_bar(), s.song_step()), (1, 32 + 15));
+    }
+
+    #[test]
+    fn resync_is_ignored_unless_a_song_plays() {
+        let mut s = new_seq();
+        s.play();
+        s.resync();
+        assert!(!s.resync_pending);
+        let mut s = song_seq();
+        s.resync();
+        assert!(!s.resync_pending);
     }
 
     #[test]

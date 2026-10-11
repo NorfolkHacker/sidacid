@@ -180,6 +180,16 @@ impl Engine {
         self.apply_param(id, self.base[i]);
     }
 
+    /// No automation applies here yet: back to the knob (unless held).
+    fn reset_automation(&mut self, id: ParamId) {
+        let Some(i) = id.index() else { return };
+        if self.touched[i] {
+            return;
+        }
+        self.base[i] = self.knobs[i];
+        self.apply_param(id, self.knobs[i]);
+    }
+
     /// Swaps in a new song (real-time safe). An invalid song leaves both
     /// sides untouched and returns false.
     pub fn swap_song(&mut self, song: &mut Song) -> bool {
@@ -195,6 +205,7 @@ impl Engine {
             return false;
         }
         std::mem::swap(&mut self.song, song);
+        self.seq.resync();
         true
     }
 
@@ -346,6 +357,7 @@ impl Engine {
                         SeqEvent::Param { id, value } => self.apply_param(id, value),
                         SeqEvent::ParamRestore { id } => self.restore_param(id),
                         SeqEvent::Automation { id, value } => self.apply_automation(id, value),
+                        SeqEvent::AutomationReset { id } => self.reset_automation(id),
                     }
                 }
                 if self.seq.take_ended() {
@@ -758,6 +770,62 @@ mod tests {
             crate::song::MAX_BARS + 1,
             "rejected song is untouched"
         );
+    }
+
+    #[test]
+    fn looping_back_before_the_first_point_restores_the_knob() {
+        let mut p = two_bar_demo();
+        p.song.loop_range = Some((0, 1));
+        crate::song::write_automation(
+            &mut p.song,
+            ParamId::Master(MasterParam::Level),
+            20,
+            20,
+            0.0,
+        );
+        let mut e = Engine::from_project(SR, &p);
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.play();
+        let (l, _) = render(&mut e, 3.5); // two bars at 128 BPM ≈ 3.75 s
+        assert!(peak(&l[..40_000]) > 0.01, "bar 0 plays before the point");
+        assert!(
+            peak(&l[110_000..]) < 1e-3,
+            "master held at 0 from step 20 on"
+        );
+        render(&mut e, 0.5);
+        assert!(e.is_playing() && e.song_bar() == 0, "looped to bar 0");
+        let (l, _) = render(&mut e, 1.0);
+        assert!(peak(&l) > 0.01, "second pass through bar 0 is audible");
+    }
+
+    #[test]
+    fn swapping_the_song_mid_bar_resyncs_the_position() {
+        let mut e = Engine::from_project(SR, &two_bar_demo());
+        let mut long = crate::demo::demo_project().synths[0].patterns[0].clone();
+        long.length = 32;
+        e.set_synth_pattern(0, 7, long);
+        e.set_mode(crate::sequencer::Mode::Song);
+        e.play();
+        let mut l = [0.0; 64];
+        let mut r = [0.0; 64];
+        for _ in 0..10_000 {
+            if e.song_step() == 19 {
+                break;
+            }
+            e.process(&mut l, &mut r);
+        }
+        assert_eq!((e.song_bar(), e.song_step()), (1, 19));
+        let mut song = two_bar_demo().song;
+        song.bars[0].patterns[0] = Some(crate::project::PatternRef(7));
+        assert!(e.swap_song(&mut song));
+        for _ in 0..10_000 {
+            if e.song_step() > 20 {
+                break;
+            }
+            e.process(&mut l, &mut r);
+        }
+        assert_eq!(e.song_step(), 32 + 3, "bar 0 is now 32 steps long");
+        assert_eq!(e.song_bar(), 1);
     }
 
     #[test]
