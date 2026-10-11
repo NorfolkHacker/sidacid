@@ -68,8 +68,13 @@ pub enum Edit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MergeKey {
     Param(ParamId),
-    Synth(usize, u8),
-    Drum(usize, u8),
+    SynthStep(usize, u8, usize),
+    SynthLength(usize, u8),
+    SynthTranspose(usize, u8),
+    SynthPattern(usize, u8),
+    DrumHit(usize, u8, usize, usize),
+    DrumLength(usize, u8),
+    DrumPattern(usize, u8),
     Bpm,
     Swing,
     View(usize),
@@ -78,13 +83,21 @@ enum MergeKey {
 fn merge_key(edit: &Edit) -> MergeKey {
     match edit {
         Edit::Param { id, .. } => MergeKey::Param(*id),
-        Edit::SynthStep { synth, slot, .. }
-        | Edit::SynthLength { synth, slot, .. }
-        | Edit::SynthTranspose { synth, slot, .. }
-        | Edit::SynthPattern { synth, slot, .. } => MergeKey::Synth(*synth, *slot),
-        Edit::DrumHit { kit, slot, .. }
-        | Edit::DrumLength { kit, slot, .. }
-        | Edit::DrumPattern { kit, slot, .. } => MergeKey::Drum(*kit, *slot),
+        Edit::SynthStep {
+            synth, slot, step, ..
+        } => MergeKey::SynthStep(*synth, *slot, *step),
+        Edit::SynthLength { synth, slot, .. } => MergeKey::SynthLength(*synth, *slot),
+        Edit::SynthTranspose { synth, slot, .. } => MergeKey::SynthTranspose(*synth, *slot),
+        Edit::SynthPattern { synth, slot, .. } => MergeKey::SynthPattern(*synth, *slot),
+        Edit::DrumHit {
+            kit,
+            slot,
+            step,
+            inst,
+            ..
+        } => MergeKey::DrumHit(*kit, *slot, *step, *inst),
+        Edit::DrumLength { kit, slot, .. } => MergeKey::DrumLength(*kit, *slot),
+        Edit::DrumPattern { kit, slot, .. } => MergeKey::DrumPattern(*kit, *slot),
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
         Edit::View { synth, .. } => MergeKey::View(*synth),
@@ -436,6 +449,81 @@ mod tests {
         );
         d.undo();
         assert_eq!(d.project.param(CUTOFF), 0.9);
+    }
+
+    #[test]
+    fn merging_never_loses_edits_to_other_cells() {
+        use acid_engine::project::{Gate, SynthStep};
+        let mut d = doc();
+        let before = d.project.clone();
+        let on = SynthStep {
+            note: 1,
+            octave: 0,
+            gate: Gate::On,
+            accent: false,
+            slide: false,
+        };
+        d.apply(
+            Edit::SynthStep {
+                synth: 0,
+                slot: 0,
+                step: 2,
+                value: on,
+            },
+            true,
+        );
+        d.apply(
+            Edit::SynthStep {
+                synth: 0,
+                slot: 0,
+                step: 5,
+                value: on,
+            },
+            true,
+        );
+        d.apply(
+            Edit::SynthLength {
+                synth: 0,
+                slot: 0,
+                length: 8,
+            },
+            true,
+        );
+        d.end_gesture();
+        while d.can_undo() {
+            d.undo();
+        }
+        assert_eq!(d.project, before);
+    }
+
+    #[test]
+    fn consecutive_merged_pattern_edits_undo_in_one_step() {
+        let mut d = doc();
+        let before = d.project.synths[0].patterns[0].clone();
+        let mut a = before.clone();
+        a.length = 3;
+        let mut b = a.clone();
+        b.transpose = 5;
+        d.apply(
+            Edit::SynthPattern {
+                synth: 0,
+                slot: 0,
+                pattern: Box::new(a),
+            },
+            true,
+        );
+        d.apply(
+            Edit::SynthPattern {
+                synth: 0,
+                slot: 0,
+                pattern: Box::new(b),
+            },
+            true,
+        );
+        d.end_gesture();
+        d.undo();
+        assert_eq!(d.project.synths[0].patterns[0], before);
+        assert!(!d.can_undo());
     }
 
     #[test]
