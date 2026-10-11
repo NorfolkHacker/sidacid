@@ -312,6 +312,27 @@ impl Project {
         {
             return bad("song references a pattern out of range".into());
         }
+        if self.song.bars.len() > crate::song::MAX_BARS {
+            return bad(format!("song has {} bars", self.song.bars.len()));
+        }
+        if let Some((a, b)) = self.song.loop_range
+            && (a > b || b as usize >= self.song.bars.len())
+        {
+            return bad("song loop range is out of bounds".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for lane in &self.song.automation {
+            if !lane.param.is_valid() || !seen.insert(lane.param) {
+                return bad("song automation lane is invalid or repeated".into());
+            }
+            if lane
+                .points
+                .values()
+                .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+            {
+                return bad("song automation value is out of range".into());
+            }
+        }
         Ok(())
     }
 
@@ -497,5 +518,58 @@ mod tests {
         let back = Project::load(&path).unwrap();
         assert_eq!(back.name, "Saved");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn song_shapes_are_validated() {
+        use crate::params::SynthParam;
+        let mut p = Project::default();
+        p.song.bars = vec![Bar::default(); crate::song::MAX_BARS + 1];
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+
+        let mut p = Project::default();
+        p.song.bars = vec![Bar::default(); 3];
+        p.song.loop_range = Some((2, 1));
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        p.song.loop_range = Some((1, 3));
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        p.song.loop_range = Some((1, 2));
+        p.validate().unwrap();
+
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut p = Project::default();
+        let lane = AutoLane {
+            param: id,
+            points: [(0, 0.5)].into_iter().collect(),
+        };
+        p.song.automation = vec![lane.clone(), lane.clone()];
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Invalid(_))),
+            "duplicate lane"
+        );
+        p.song.automation = vec![AutoLane {
+            param: ParamId::Synth(7, SynthParam::Cutoff),
+            ..lane.clone()
+        }];
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Invalid(_))),
+            "invalid param"
+        );
+        p.song.automation = vec![AutoLane {
+            param: id,
+            points: [(0, f32::NAN)].into_iter().collect(),
+        }];
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Invalid(_))),
+            "NaN point"
+        );
+        p.song.automation = vec![AutoLane {
+            param: id,
+            points: [(0, 1.5)].into_iter().collect(),
+        }];
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Invalid(_))),
+            "out-of-range point"
+        );
     }
 }

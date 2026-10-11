@@ -14,6 +14,7 @@ pub mod params;
 pub mod project;
 pub mod render;
 pub mod sequencer;
+pub mod song;
 pub mod synth;
 
 #[cfg(test)]
