@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 sid-core = { path = "../sid-core" }
+serde.workspace = true
+ron.workspace = true
+hound.workspace = true
