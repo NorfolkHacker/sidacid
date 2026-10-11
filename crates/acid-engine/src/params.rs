@@ -7,6 +7,8 @@ pub const SYNTHS: usize = 2;
 pub const KITS: usize = 2;
 pub const CHANNELS: usize = 4;
 pub const DRUM_INSTRUMENTS: usize = 8;
+/// Number of entries in `ParamId::all()`.
+pub const PARAM_COUNT: usize = 181;
 
 macro_rules! param_enum {
     ($name:ident { $($var:ident => $label:literal),+ $(,)? }) => {
@@ -171,6 +173,34 @@ impl ParamId {
         }
     }
 
+    /// Position of this id in `ParamId::all()`; `None` for an invalid id.
+    pub fn index(self) -> Option<usize> {
+        if !self.is_valid() {
+            return None;
+        }
+        let synth_n = SynthParam::ALL.len();
+        let drum_n = DrumParam::ALL.len();
+        let per_kit = DRUM_INSTRUMENTS * drum_n + KitParam::ALL.len();
+        let kit_base = SYNTHS * synth_n;
+        let channel_base = kit_base + KITS * per_kit;
+        let fx_base = channel_base + CHANNELS * ChannelParam::ALL.len();
+        let master_base = fx_base + FxParam::ALL.len();
+        Some(match self {
+            ParamId::Synth(s, p) => s as usize * synth_n + p as usize,
+            ParamId::Drum(k, i, p) => {
+                kit_base + k as usize * per_kit + i as usize * drum_n + p as usize
+            }
+            ParamId::Kit(k, p) => {
+                kit_base + k as usize * per_kit + DRUM_INSTRUMENTS * drum_n + p as usize
+            }
+            ParamId::Channel(c, p) => {
+                channel_base + c as usize * ChannelParam::ALL.len() + p as usize
+            }
+            ParamId::Fx(p) => fx_base + p as usize,
+            ParamId::Master(p) => master_base + p as usize,
+        })
+    }
+
     pub fn all() -> Vec<ParamId> {
         let mut v = Vec::new();
         for s in 0..SYNTHS as u8 {
@@ -264,5 +294,16 @@ mod tests {
         assert_eq!(step_index(7.0, 3), 2);
         assert!(on(0.5) && !on(0.49));
         assert!((db_to_gain(-6.0) - 0.501).abs() < 1e-3);
+    }
+
+    #[test]
+    fn index_matches_registry_order() {
+        let all = ParamId::all();
+        assert_eq!(all.len(), PARAM_COUNT);
+        for (i, id) in all.iter().enumerate() {
+            assert_eq!(id.index(), Some(i), "{id:?}");
+        }
+        assert_eq!(ParamId::Synth(2, SynthParam::Tune).index(), None);
+        assert_eq!(ParamId::Drum(0, 8, DrumParam::Tune).index(), None);
     }
 }

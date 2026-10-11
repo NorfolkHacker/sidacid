@@ -26,6 +26,9 @@ pub enum SeqEvent {
         id: ParamId,
         value: f32,
     },
+    ParamRestore {
+        id: ParamId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +44,8 @@ struct Track {
     queued: Option<u8>,
     gate_open: bool,
     prev_slide: bool,
+    /// Param whose lane value is overriding the knob on the current step.
+    lane_override: Option<ParamId>,
 }
 
 pub struct Sequencer {
@@ -114,6 +119,7 @@ impl Sequencer {
             t.step = 0;
             t.gate_open = false;
             t.prev_slide = false;
+            t.lane_override = None;
             if let Some(q) = t.queued.take() {
                 t.pattern = q;
             }
@@ -126,6 +132,7 @@ impl Sequencer {
             t.step = 0;
             t.gate_open = false;
             t.prev_slide = false;
+            t.lane_override = None;
         }
     }
 
@@ -217,13 +224,28 @@ impl Sequencer {
                         }
                     }
                     t.prev_slide = step.slide && step.gate != Gate::Off;
-                    if let Some(lane) = &pat.param_lane
-                        && let Some(Some(value)) = lane.values.get(t.step)
-                    {
-                        out.push(SeqEvent::Param {
-                            id: lane.param,
-                            value: *value,
-                        });
+                    let lane_value = pat.param_lane.as_ref().and_then(|lane| {
+                        lane.values
+                            .get(t.step)
+                            .copied()
+                            .flatten()
+                            .map(|v| (lane.param, v))
+                    });
+                    match lane_value {
+                        Some((id, value)) => {
+                            if let Some(old) = t.lane_override
+                                && old != id
+                            {
+                                out.push(SeqEvent::ParamRestore { id: old });
+                            }
+                            out.push(SeqEvent::Param { id, value });
+                            t.lane_override = Some(id);
+                        }
+                        None => {
+                            if let Some(id) = t.lane_override.take() {
+                                out.push(SeqEvent::ParamRestore { id });
+                            }
+                        }
                     }
                 }
                 for k in 0..2 {
@@ -628,5 +650,26 @@ mod tests {
         s.stop();
         assert!(!s.is_playing());
         assert_eq!(s.playhead(0), 0);
+    }
+
+    #[test]
+    fn lane_override_is_restored_on_the_next_step_without_a_value() {
+        use crate::params::{ParamId, SynthParam};
+        use crate::project::ParamLane;
+        let mut f = Fixture::new();
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut values = vec![None; 64];
+        values[0] = Some(0.8);
+        f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
+        let mut s = new_seq();
+        s.play();
+        let ev = f.run(&mut s, 6000);
+        assert_eq!(
+            ev,
+            vec![
+                (0, SeqEvent::Param { id, value: 0.8 }),
+                (5513, SeqEvent::ParamRestore { id })
+            ]
+        );
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::drums::{DrumKit, KitKind};
 use crate::mixer::{Mixer, StereoBuf};
-use crate::params::ParamId;
+use crate::params::{PARAM_COUNT, ParamId};
 use crate::project::{DrumPattern, PATTERNS, Project, SynthPattern};
 use crate::sequencer::{SeqEvent, Sequencer};
 use crate::synth::BassSynth;
@@ -22,6 +22,10 @@ pub struct Engine {
     drum_patterns: [Vec<DrumPattern>; 2],
     chans: [StereoBuf; 4],
     events: Vec<SeqEvent>,
+    /// Knob values set through `set_param`, indexed by `ParamId::index`.
+    knobs: Vec<f32>,
+    /// `ParamId::all()`, so knobs can be re-applied without allocating.
+    ids: Vec<ParamId>,
 }
 
 impl Engine {
@@ -46,6 +50,8 @@ impl Engine {
             ],
             chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
             events: Vec::with_capacity(64),
+            knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
+            ids: ParamId::all(),
         }
     }
 
@@ -67,8 +73,19 @@ impl Engine {
     }
 
     /// Out-of-range ids and non-finite values are ignored; values are
-    /// clamped to 0..=1.
+    /// clamped to 0..=1. The value is remembered as the knob position.
     pub fn set_param(&mut self, id: ParamId, v: f32) {
+        let Some(i) = id.index() else { return };
+        if !v.is_finite() {
+            return;
+        }
+        let v = v.clamp(0.0, 1.0);
+        self.knobs[i] = v;
+        self.apply_param(id, v);
+    }
+
+    /// Applies a value without remembering it (param-lane overrides).
+    fn apply_param(&mut self, id: ParamId, v: f32) {
         if !id.is_valid() || !v.is_finite() {
             return;
         }
@@ -78,6 +95,20 @@ impl Engine {
             ParamId::Drum(k, i, p) => self.kits[k as usize].set_param(i as usize, p, v),
             ParamId::Kit(k, p) => self.kits[k as usize].set_kit_param(p, v),
             _ => self.mixer.set_param(id, v),
+        }
+    }
+
+    fn restore_param(&mut self, id: ParamId) {
+        if let Some(i) = id.index() {
+            let v = self.knobs[i];
+            self.apply_param(id, v);
+        }
+    }
+
+    fn restore_all_knobs(&mut self) {
+        for i in 0..PARAM_COUNT {
+            let (id, v) = (self.ids[i], self.knobs[i]);
+            self.apply_param(id, v);
         }
     }
 
@@ -99,6 +130,7 @@ impl Engine {
         for s in &mut self.synths {
             s.note_off();
         }
+        self.restore_all_knobs();
     }
 
     pub fn is_playing(&self) -> bool {
@@ -180,7 +212,8 @@ impl Engine {
                         SeqEvent::Drum { kit, inst, accent } => {
                             self.kits[kit].trigger(inst, accent)
                         }
-                        SeqEvent::Param { id, value } => self.set_param(id, value),
+                        SeqEvent::Param { id, value } => self.apply_param(id, value),
+                        SeqEvent::ParamRestore { id } => self.restore_param(id),
                     }
                 }
                 continue;
@@ -405,5 +438,48 @@ mod tests {
         render(&mut e, 0.3);
         assert!(e.playhead()[2] >= 2);
         assert_eq!(e.current_patterns(), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn lane_value_overrides_only_its_step() {
+        use crate::project::ParamLane;
+        let mut e = demo_engine();
+        let mut p = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let mut values = vec![None; 64];
+        values[0] = Some(0.0);
+        p.param_lane = Some(ParamLane {
+            param: ParamId::Master(MasterParam::Level),
+            values,
+        });
+        e.set_synth_pattern(0, 0, p);
+        e.play();
+        let (l, _) = render(&mut e, 0.5);
+        // Step 0 (about 5500 samples at the demo's 128 BPM + swing) is silent...
+        assert_eq!(peak(&l[64..5000]), 0.0);
+        // ...then the knob value comes back.
+        assert!(peak(&l[6000..20_000]) > 0.01);
+    }
+
+    #[test]
+    fn stop_restores_knobs_overridden_by_a_lane() {
+        use crate::project::ParamLane;
+        let mut e = demo_engine();
+        let mut p = crate::demo::demo_project().synths[0].patterns[0].clone();
+        p.param_lane = Some(ParamLane {
+            param: ParamId::Master(MasterParam::Level),
+            values: vec![Some(0.0); 64],
+        });
+        e.set_synth_pattern(0, 0, p);
+        e.play();
+        render(&mut e, 0.3);
+        e.stop();
+        e.set_synth_pattern(
+            0,
+            0,
+            crate::demo::demo_project().synths[0].patterns[0].clone(),
+        );
+        e.play();
+        let (l, _) = render(&mut e, 1.0);
+        assert!(peak(&l) > 0.01, "master level was restored by stop()");
     }
 }
