@@ -181,7 +181,6 @@ impl Document {
         cmds
     }
 
-    #[allow(dead_code)] // used by Task 8
     /// Selecting a pattern is a transport action: saved, not undoable.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
         self.project.selected[machine] = slot;

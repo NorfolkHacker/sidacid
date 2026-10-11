@@ -81,69 +81,78 @@ impl SidAcidApp {
             .id_salt("mixer")
             .default_open(true)
             .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    for ch in 0..4u8 {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.strong(CHANNEL_NAMES[ch as usize]);
-                                meter(ui, self.status.meters[ch as usize]);
-                            });
-                            egui::Grid::new(("strip", ch))
-                                .spacing([0.0, 0.0])
-                                .show(ui, |ui| {
-                                    for (i, (p, label)) in STRIP.iter().enumerate() {
-                                        self.param_knob(ui, ParamId::Channel(ch, *p), label);
-                                        if i % 4 == 3 {
+                egui::ScrollArea::horizontal()
+                    .id_salt("mixer_row")
+                    .show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            for ch in 0..4u8 {
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong(CHANNEL_NAMES[ch as usize]);
+                                        meter(ui, self.status.meters[ch as usize]);
+                                    });
+                                    egui::Grid::new(("strip", ch)).spacing([0.0, 0.0]).show(
+                                        ui,
+                                        |ui| {
+                                            for (i, (p, label)) in STRIP.iter().enumerate() {
+                                                self.param_knob(
+                                                    ui,
+                                                    ParamId::Channel(ch, *p),
+                                                    label,
+                                                );
+                                                if i % 4 == 3 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.separator();
+                            }
+                            ui.vertical(|ui| {
+                                ui.strong("Delay");
+                                egui::Grid::new("delay").spacing([0.0, 0.0]).show(ui, |ui| {
+                                    for (i, (p, label)) in DELAY.iter().enumerate() {
+                                        self.param_knob(ui, ParamId::Fx(*p), label);
+                                        if i % 2 == 1 {
                                             ui.end_row();
                                         }
                                     }
                                 });
-                        });
-                        ui.separator();
-                    }
-                    ui.vertical(|ui| {
-                        ui.strong("Delay");
-                        egui::Grid::new("delay").spacing([0.0, 0.0]).show(ui, |ui| {
-                            for (i, (p, label)) in DELAY.iter().enumerate() {
-                                self.param_knob(ui, ParamId::Fx(*p), label);
-                                if i % 2 == 1 {
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                        ui.strong("Reverb");
-                        egui::Grid::new("reverb")
-                            .spacing([0.0, 0.0])
-                            .show(ui, |ui| {
-                                for (i, (p, label)) in REVERB.iter().enumerate() {
-                                    self.param_knob(ui, ParamId::Fx(*p), label);
-                                    if i % 2 == 1 {
-                                        ui.end_row();
-                                    }
+                                ui.strong("Reverb");
+                                egui::Grid::new("reverb")
+                                    .spacing([0.0, 0.0])
+                                    .show(ui, |ui| {
+                                        for (i, (p, label)) in REVERB.iter().enumerate() {
+                                            self.param_knob(ui, ParamId::Fx(*p), label);
+                                            if i % 2 == 1 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.separator();
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong("Master");
+                                    meter(ui, self.status.meters[4]);
+                                });
+                                egui::Grid::new("master")
+                                    .spacing([0.0, 0.0])
+                                    .show(ui, |ui| {
+                                        for (i, (p, label)) in MASTER.iter().enumerate() {
+                                            self.param_knob(ui, ParamId::Master(*p), label);
+                                            if i % 2 == 1 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
+                                if ui.input(|i| i.time) < self.view.fault_until {
+                                    ui.colored_label(theme::ACCENT, "Audio fault recovered");
                                 }
                             });
-                    });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong("Master");
-                            meter(ui, self.status.meters[4]);
                         });
-                        egui::Grid::new("master")
-                            .spacing([0.0, 0.0])
-                            .show(ui, |ui| {
-                                for (i, (p, label)) in MASTER.iter().enumerate() {
-                                    self.param_knob(ui, ParamId::Master(*p), label);
-                                    if i % 2 == 1 {
-                                        ui.end_row();
-                                    }
-                                }
-                            });
-                        if ui.input(|i| i.time) < self.view.fault_until {
-                            ui.colored_label(theme::ACCENT, "Audio fault recovered");
-                        }
                     });
-                });
             });
     }
 }

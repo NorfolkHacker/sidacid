@@ -1,5 +1,6 @@
 //! Custom-painted rotary knob and click-to-cycle switch.
 
+use super::step_edit::scroll_notches;
 use super::theme;
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, Vec2, pos2, vec2};
 use std::f32::consts::PI;
@@ -17,6 +18,8 @@ pub struct KnobOutput {
     pub value: Option<f32>,
     /// The drag ended this frame (closes an undo gesture).
     pub released: bool,
+    /// The knob was dragged, scrolled or double-clicked this frame.
+    pub touched: bool,
 }
 
 pub fn drag_to_value(value: f32, dy: f32, fine: bool) -> f32 {
@@ -28,15 +31,9 @@ pub fn drag_to_value(value: f32, dy: f32, fine: bool) -> f32 {
     (value - dy * per_pixel).clamp(0.0, 1.0)
 }
 
-pub fn scroll_to_value(value: f32, scroll: f32) -> f32 {
-    let step = if scroll > 0.0 {
-        SCROLL_STEP
-    } else if scroll < 0.0 {
-        -SCROLL_STEP
-    } else {
-        0.0
-    };
-    (value + step).clamp(0.0, 1.0)
+/// Moves `value` by `notches` scroll steps.
+pub fn notches_to_value(value: f32, notches: i32) -> f32 {
+    (value + notches as f32 * SCROLL_STEP).clamp(0.0, 1.0)
 }
 
 /// A rotary knob: drag vertically (Shift = fine), scroll, double-click to
@@ -44,6 +41,7 @@ pub fn scroll_to_value(value: f32, scroll: f32) -> f32 {
 pub fn knob(ui: &mut egui::Ui, label: &str, value: f32, default: f32, tooltip: &str) -> KnobOutput {
     let (rect, response) = ui.allocate_exact_size(CELL, Sense::click_and_drag());
     let mut new_value = None;
+    let mut touched = response.dragged();
     if response.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let v = drag_to_value(value, response.drag_delta().y, fine);
@@ -53,11 +51,24 @@ pub fn knob(ui: &mut egui::Ui, label: &str, value: f32, default: f32, tooltip: &
     }
     if response.double_clicked() {
         new_value = Some(default);
+        touched = true;
     }
     if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            new_value = Some(scroll_to_value(value, scroll));
+        // Take the wheel so the rack behind the knob does not scroll, and
+        // count whole notches so the step does not depend on frame rate.
+        let delta = ui.input_mut(|i| {
+            let d = i.raw_scroll_delta.y;
+            i.raw_scroll_delta.y = 0.0;
+            i.smooth_scroll_delta.y = 0.0;
+            d
+        });
+        if delta != 0.0 {
+            touched = true;
+            let notches = ui
+                .data_mut(|d| scroll_notches(d.get_temp_mut_or_default::<f32>(response.id), delta));
+            if notches != 0 {
+                new_value = Some(notches_to_value(new_value.unwrap_or(value), notches));
+            }
         }
     }
 
@@ -101,6 +112,7 @@ pub fn knob(ui: &mut egui::Ui, label: &str, value: f32, default: f32, tooltip: &
     KnobOutput {
         value: new_value,
         released: response.drag_stopped(),
+        touched,
     }
 }
 
@@ -142,9 +154,14 @@ mod tests {
     fn values_stay_in_range() {
         assert_eq!(drag_to_value(0.99, -1000.0, false), 1.0);
         assert_eq!(drag_to_value(0.01, 1000.0, false), 0.0);
-        assert_eq!(scroll_to_value(1.0, 5.0), 1.0);
-        assert_eq!(scroll_to_value(0.0, -5.0), 0.0);
-        assert!(scroll_to_value(0.5, 1.0) > 0.5);
-        assert_eq!(scroll_to_value(0.5, 0.0), 0.5);
+    }
+
+    #[test]
+    fn notches_move_by_a_fixed_step_and_clamp() {
+        assert!((notches_to_value(0.5, 2) - 0.54).abs() < 1e-6);
+        assert!((notches_to_value(0.5, -1) - 0.48).abs() < 1e-6);
+        assert_eq!(notches_to_value(0.99, 5), 1.0);
+        assert_eq!(notches_to_value(0.01, -5), 0.0);
+        assert_eq!(notches_to_value(0.5, 0), 0.5);
     }
 }

@@ -57,23 +57,29 @@ impl SidAcidApp {
                         self.param_knob(ui, ParamId::Kit(kit as u8, KitParam::Accent), "Accent");
                     });
                 });
-                ui.horizontal(|ui| {
-                    self.pattern_pads(ui, machine);
-                    ui.separator();
-                    let mut length = self.doc.project.drums[kit].patterns[slot as usize].length;
-                    let r = ui.add(
-                        egui::DragValue::new(&mut length)
-                            .range(1..=64)
-                            .prefix("Len "),
-                    );
-                    if r.changed() {
-                        let cmds = self.doc.apply(Edit::DrumLength { kit, slot, length }, true);
-                        self.send(cmds);
-                    }
-                    if r.drag_stopped() || r.lost_focus() {
-                        self.doc.end_gesture();
-                    }
-                });
+                egui::ScrollArea::horizontal()
+                    .id_salt(("drum_pads", kit))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            self.pattern_pads(ui, machine);
+                            ui.separator();
+                            let mut length =
+                                self.doc.project.drums[kit].patterns[slot as usize].length;
+                            let r = ui.add(
+                                egui::DragValue::new(&mut length)
+                                    .range(1..=64)
+                                    .prefix("Len "),
+                            );
+                            if r.changed() {
+                                let cmds =
+                                    self.doc.apply(Edit::DrumLength { kit, slot, length }, true);
+                                self.send(cmds);
+                            }
+                            if r.drag_stopped() || r.lost_focus() {
+                                self.doc.end_gesture();
+                            }
+                        });
+                    });
                 self.drum_grid(ui, kit, slot);
             });
     }

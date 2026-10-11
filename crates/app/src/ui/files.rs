@@ -3,7 +3,7 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
-use acid_engine::project::{DrumPattern, PatternRef, Project, SynthPattern};
+use acid_engine::project::{BANK_SIZE, DrumPattern, PatternRef, Project, SynthPattern};
 use eframe::egui;
 use std::sync::mpsc;
 
@@ -124,7 +124,17 @@ impl SidAcidApp {
         self.doc = doc;
         self.view.writers = [None; 2];
         self.view.roll_drag = [None; 2];
+        self.view.scroll_accum = [0.0; 2];
+        self.view.scrolling = [false; 2];
+        self.view.touched_knob = None;
+        for m in 0..4 {
+            self.view.bank[m] = self.doc.project.selected[m] / BANK_SIZE as u8;
+        }
         self.pending.clear();
+        if let Some(audio) = self.audio.as_mut() {
+            // Stale events (disposals, old status) belong to the old engine.
+            while audio.poll().is_some() {}
+        }
         if let Some(audio) = self.audio.as_mut()
             && audio.load_project(&self.doc.project).is_err()
         {
@@ -235,7 +245,7 @@ impl SidAcidApp {
             let _ = tx.send(result);
         });
         self.view.export_rx = Some(rx);
-        self.view.message = Some(format!("Exporting {bars} bars…"));
+        self.view.status_line = Some(format!("Exporting {bars} bars…"));
     }
 
     pub(crate) fn poll_export(&mut self) {
@@ -244,6 +254,7 @@ impl SidAcidApp {
         };
         if let Ok(result) = rx.try_recv() {
             self.view.export_rx = None;
+            self.view.status_line = None;
             self.view.message = Some(match result {
                 Ok(path) => format!("Exported {}", path.display()),
                 Err(e) => format!("Export failed: {e}"),

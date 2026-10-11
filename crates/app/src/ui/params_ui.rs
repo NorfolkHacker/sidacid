@@ -39,7 +39,14 @@ impl SidAcidApp {
             let cmds = self.doc.apply(Edit::Param { id, value: v }, true);
             self.send(cmds);
         }
+        if out.touched {
+            self.view.touched_knob = Some(id);
+        } else if self.view.touched_knob == Some(id) {
+            self.view.touched_knob = None;
+            self.doc.end_gesture();
+        }
         if out.released {
+            self.view.touched_knob = None;
             self.doc.end_gesture();
         }
     }

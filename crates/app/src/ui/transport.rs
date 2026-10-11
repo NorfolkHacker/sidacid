@@ -46,13 +46,14 @@ impl SidAcidApp {
             let r = ui.add(
                 egui::Slider::new(&mut swing, 0.0..=75.0)
                     .text("Swing %")
+                    .clamping(egui::SliderClamping::Edits)
                     .max_decimals(0),
             );
             if r.changed() && (swing - shown_swing).abs() > 1e-3 {
                 let cmds = self.doc.apply(Edit::Swing(swing / 100.0), true);
                 self.send(cmds);
             }
-            if r.drag_stopped() {
+            if r.drag_stopped() || r.lost_focus() {
                 self.doc.end_gesture();
             }
             ui.separator();
@@ -68,6 +69,11 @@ impl SidAcidApp {
             let cpu_label = ui.label(egui::RichText::new(format!("CPU {cpu:.0}%")).color(colour));
             if let Some(audio) = &self.audio {
                 cpu_label.on_hover_text(audio.device_name.as_str());
+            }
+            if let Some(line) = &self.view.status_line {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(line).small());
+                });
             }
         });
     }

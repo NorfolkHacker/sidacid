@@ -50,6 +50,14 @@ pub struct ViewState {
     pub last_title: String,
     /// Text to place on the OS clipboard so Ctrl+V reaches the app.
     pub clip_text: Option<String>,
+    /// Knob whose gesture (drag, scroll, reset) is still open.
+    pub touched_knob: Option<acid_engine::params::ParamId>,
+    /// Non-blocking progress text shown at the right of the transport.
+    pub status_line: Option<String>,
+    /// The audio stream reported a failure that has not been handled yet.
+    pub audio_lost: bool,
+    /// One automatic restart was tried since audio last ran fine.
+    pub auto_retried: bool,
 }
 
 pub struct SidAcidApp {
@@ -96,25 +104,33 @@ impl SidAcidApp {
     }
 
     /// Queues commands for the audio thread. Repeated values for the same
-    /// parameter collapse into the latest one.
+    /// parameter collapse into the latest one, but only within the trailing
+    /// run of `SetParam`s so ordering against other commands is kept.
     pub(crate) fn send(&mut self, cmds: Vec<Command>) {
         for cmd in cmds {
-            if let &Command::SetParam(id, v) = &cmd
-                && let Some(Command::SetParam(_, pending)) = self
+            if let &Command::SetParam(id, v) = &cmd {
+                let run = self
                     .pending
+                    .iter()
+                    .rev()
+                    .take_while(|c| matches!(c, Command::SetParam(..)))
+                    .count();
+                let start = self.pending.len() - run;
+                if let Some(Command::SetParam(_, pending)) = self.pending[start..]
                     .iter_mut()
                     .find(|c| matches!(c, Command::SetParam(p, _) if *p == id))
-            {
-                *pending = v;
-                continue;
+                {
+                    *pending = v;
+                    continue;
+                }
             }
             self.pending.push(cmd);
         }
     }
 
-    /// Sends queued commands and reads events. Without audio, commands are
-    /// dropped: the engine is rebuilt from the project when audio starts.
-    fn pump(&mut self, now: f64) {
+    /// Sends queued commands to the audio thread. Without audio, commands
+    /// are dropped: the engine is rebuilt from the project when audio starts.
+    fn flush_pending(&mut self) {
         let Some(audio) = self.audio.as_mut() else {
             self.pending.clear();
             return;
@@ -128,24 +144,43 @@ impl SidAcidApp {
             }
         }
         self.pending = unsent;
+    }
+
+    /// Reads events, then sends queued commands.
+    fn pump(&mut self, now: f64) {
+        let Some(audio) = self.audio.as_mut() else {
+            self.pending.clear();
+            return;
+        };
         while let Some(event) = audio.poll() {
             if let Event::Status(status) = event {
                 if status.guard_fired {
                     self.view.fault_until = now + 3.0;
                 }
                 self.status = status;
+                self.view.auto_retried = false;
             }
             // Dispose events drop here, on the UI thread.
         }
-        if audio.has_failed() {
+        let failed = audio.has_failed();
+        self.flush_pending();
+        if failed {
             self.audio = None;
             self.status = Status::default();
             self.audio_error = Some("The audio device stopped.".into());
+            self.view.audio_lost = true;
         }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.pump(ctx.input(|i| i.time));
+        if self.view.audio_lost {
+            self.view.audio_lost = false;
+            if !self.view.auto_retried {
+                self.view.auto_retried = true;
+                self.start_audio();
+            }
+        }
         self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
         if let Some(t) = self.view.clip_text.take() {
@@ -181,8 +216,10 @@ impl SidAcidApp {
                 .show(ui, |ui| self.rack(ui));
         });
         self.dialogs(ctx);
-        if self.status.playing {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        self.flush_pending();
+        if self.audio.is_some() {
+            let ms = if self.status.playing { 16 } else { 150 };
+            ctx.request_repaint_after(Duration::from_millis(ms));
         }
     }
 
@@ -332,5 +369,62 @@ mod tests {
                 .as_deref()
                 .is_some_and(|t| t.starts_with("SidAcid pattern "))
         );
+    }
+
+    #[test]
+    fn coalescing_stops_at_a_non_param_command() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        app.send(vec![
+            Command::SetParam(id, 0.1),
+            Command::Play,
+            Command::SetParam(id, 0.2),
+        ]);
+        assert_eq!(app.pending.len(), 3);
+        assert!(matches!(app.pending[0], Command::SetParam(_, v) if v == 0.1));
+        assert!(matches!(app.pending[1], Command::Play));
+        assert!(matches!(app.pending[2], Command::SetParam(_, v) if v == 0.2));
+    }
+
+    #[test]
+    fn plain_redraw_does_not_rewrite_swing_or_bpm() {
+        let mut doc = Document::new(acid_engine::demo::demo_project());
+        doc.project.swing = 0.153;
+        doc.project.bpm = 133.37;
+        let mut app = SidAcidApp::headless(doc);
+        run_frames(&mut app, 3);
+        assert!(!app.doc.dirty && !app.doc.can_undo());
+        assert_eq!(app.doc.project.swing, 0.153);
+        assert_eq!(app.doc.project.bpm, 133.37);
+    }
+
+    #[test]
+    fn loading_a_document_resyncs_banks_and_clears_gestures() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.touched_knob = Some(acid_engine::params::ParamId::Master(
+            acid_engine::params::MasterParam::Level,
+        ));
+        app.view.scrolling = [true; 2];
+        app.view.scroll_accum = [12.0; 2];
+        let project = acid_engine::project::Project {
+            selected: [17, 33, 0, 127],
+            ..Default::default()
+        };
+        app.load_document(Document::new(project));
+        assert_eq!(app.view.bank, [1, 2, 0, 7]);
+        assert!(app.view.touched_knob.is_none());
+        assert_eq!(app.view.scrolling, [false; 2]);
+        assert_eq!(app.view.scroll_accum, [0.0; 2]);
+    }
+
+    #[test]
+    fn step_writer_is_dropped_when_its_synth_leaves_step_view() {
+        let mut doc = Document::new(acid_engine::demo::demo_project());
+        doc.project.synths[1].view = acid_engine::project::SeqView::PianoRoll;
+        let mut app = SidAcidApp::headless(doc);
+        app.view.writers[1] = Some(step_edit::StepWriter::new(0));
+        run_frames(&mut app, 1);
+        assert!(app.view.writers[1].is_none());
     }
 }
