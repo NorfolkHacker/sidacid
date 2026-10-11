@@ -48,6 +48,8 @@ pub struct ViewState {
     pub export_bars: u32,
     pub export_rx: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub last_title: String,
+    /// Text to place on the OS clipboard so Ctrl+V reaches the app.
+    pub clip_text: Option<String>,
 }
 
 pub struct SidAcidApp {
@@ -146,6 +148,9 @@ impl SidAcidApp {
         self.pump(ctx.input(|i| i.time));
         self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
+        if let Some(t) = self.view.clip_text.take() {
+            ctx.copy_text(t);
+        }
         self.poll_export();
         if ctx.input(|i| i.viewport().close_requested()) && self.doc.dirty && !self.view.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -304,5 +309,28 @@ mod tests {
         app.doc.dirty = false;
         app.request(files::Pending::New);
         assert_eq!(app.doc.project.name, "Untitled");
+    }
+
+    #[test]
+    fn dont_save_keeps_the_document_dirty_and_quit_closes_once() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.doc.dirty = true;
+        app.view.confirm = Some(files::Pending::Quit);
+        app.dont_save(files::Pending::Quit);
+        assert!(app.doc.dirty);
+        assert!(app.view.confirm.is_none());
+        assert!(app.view.quit);
+    }
+
+    #[test]
+    fn copy_sets_clipboard_text() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.copy_pattern();
+        assert!(
+            app.view
+                .clip_text
+                .as_deref()
+                .is_some_and(|t| t.starts_with("SidAcid pattern "))
+        );
     }
 }

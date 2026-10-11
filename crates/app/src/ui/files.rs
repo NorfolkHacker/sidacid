@@ -3,7 +3,7 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
-use acid_engine::project::{DrumPattern, Project, SynthPattern};
+use acid_engine::project::{DrumPattern, PatternRef, Project, SynthPattern};
 use eframe::egui;
 use std::sync::mpsc;
 
@@ -161,9 +161,20 @@ impl SidAcidApp {
         }
     }
 
+    /// "Don't save": drop the question and run the action. The document stays
+    /// dirty until the action actually replaces it.
+    pub(crate) fn dont_save(&mut self, action: Pending) {
+        self.view.confirm = None;
+        self.perform(action);
+    }
+
     pub(crate) fn copy_pattern(&mut self) {
         let m = self.view.focus;
         let slot = self.doc.project.selected[m] as usize;
+        self.view.clip_text = Some(format!(
+            "SidAcid pattern {}",
+            PatternRef(slot as u8).label()
+        ));
         self.view.clipboard = Some(if m < 2 {
             Clip::Synth(self.doc.project.synths[m].patterns[slot].clone())
         } else {
@@ -258,9 +269,7 @@ impl SidAcidApp {
                             self.perform(action);
                         }
                         if ui.button("Don't save").clicked() {
-                            self.view.confirm = None;
-                            self.doc.dirty = false;
-                            self.perform(action);
+                            self.dont_save(action);
                         }
                         if ui.button("Cancel").clicked() {
                             self.view.confirm = None;

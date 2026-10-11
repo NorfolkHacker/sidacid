@@ -36,7 +36,8 @@ pub fn shortcut(key: Key, modifiers: Modifiers, step_writing: bool) -> Option<Sh
 
 impl SidAcidApp {
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
+        if ctx.wants_keyboard_input() || self.view.confirm.is_some() || self.view.message.is_some()
+        {
             return;
         }
         let step_writing = self.view.writers.iter().any(Option::is_some);
@@ -57,7 +58,14 @@ impl SidAcidApp {
                 })
                 .collect()
         });
+        let (mut copied, mut pasted) = (false, false);
         for s in pressed {
+            // Backends may send both a key and a clipboard event for one press.
+            match s {
+                Shortcut::Copy if std::mem::replace(&mut copied, true) => continue,
+                Shortcut::Paste if std::mem::replace(&mut pasted, true) => continue,
+                _ => {}
+            }
             match s {
                 Shortcut::PlayStop => {
                     let cmd = if self.status.playing {
