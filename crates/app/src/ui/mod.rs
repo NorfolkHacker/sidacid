@@ -3,6 +3,8 @@
 //! to the audio thread as `Command`s through `AudioLink`.
 
 mod drum_panel;
+mod files;
+mod keys;
 pub mod knob;
 mod mixer_panel;
 mod pads;
@@ -25,7 +27,6 @@ use std::time::Duration;
 pub struct ViewState {
     /// Machine that keyboard shortcuts act on (0..4).
     pub focus: usize,
-    #[allow(dead_code)] // used by Task 7
     pub message: Option<String>,
     /// Bank shown on each machine's pads (0..8).
     pub bank: [u8; 4],
@@ -39,6 +40,14 @@ pub struct ViewState {
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
     /// Egui time until which the "audio fault recovered" label shows.
     pub fault_until: f64,
+    /// Action waiting on the unsaved-changes question.
+    pub confirm: Option<files::Pending>,
+    pub quit: bool,
+    pub clipboard: Option<files::Clip>,
+    pub export_open: bool,
+    pub export_bars: u32,
+    pub export_rx: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    pub last_title: String,
 }
 
 pub struct SidAcidApp {
@@ -136,6 +145,20 @@ impl SidAcidApp {
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.pump(ctx.input(|i| i.time));
         self.handle_step_write(ctx);
+        self.handle_shortcuts(ctx);
+        self.poll_export();
+        if ctx.input(|i| i.viewport().close_requested()) && self.doc.dirty && !self.view.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.view.confirm = Some(files::Pending::Quit);
+        }
+        if self.view.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        let title = self.window_title();
+        if title != self.view.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.view.last_title = title;
+        }
         egui::TopBottomPanel::top("transport").show(ctx, |ui| self.transport(ui));
         if let Some(err) = self.audio_error.clone() {
             egui::TopBottomPanel::top("audio_banner").show(ctx, |ui| {
@@ -152,6 +175,7 @@ impl SidAcidApp {
                 .auto_shrink(false)
                 .show(ui, |ui| self.rack(ui));
         });
+        self.dialogs(ctx);
         if self.status.playing {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
@@ -223,5 +247,62 @@ mod tests {
         ]);
         assert_eq!(app.pending.len(), 1);
         assert!(matches!(app.pending[0], Command::SetParam(_, v) if v == 0.3));
+    }
+
+    #[test]
+    fn copy_paste_between_synths_is_undoable() {
+        use acid_engine::project::Gate;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.focus = 0;
+        app.copy_pattern();
+        app.view.focus = 1;
+        app.doc.project.selected[1] = 9;
+        app.paste_pattern();
+        assert_eq!(
+            app.doc.project.synths[1].patterns[9],
+            app.doc.project.synths[0].patterns[0]
+        );
+        let cmds = app.doc.undo();
+        app.send(cmds);
+        assert!(
+            app.doc.project.synths[1].patterns[9]
+                .steps
+                .iter()
+                .all(|s| s.gate == Gate::Off)
+        );
+    }
+
+    #[test]
+    fn pasting_drums_onto_a_synth_is_refused() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.focus = 2;
+        app.copy_pattern();
+        app.view.focus = 0;
+        let before = app.doc.project.clone();
+        app.paste_pattern();
+        assert_eq!(app.doc.project, before);
+        assert!(app.view.message.is_some());
+    }
+
+    #[test]
+    fn title_shows_name_and_dirty_mark() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert_eq!(app.window_title(), "Demo — SidAcid");
+        app.doc.dirty = true;
+        app.doc.path = Some(std::path::PathBuf::from("/tmp/acid line.sidacid"));
+        assert_eq!(app.window_title(), "acid line* — SidAcid");
+    }
+
+    #[test]
+    fn new_with_unsaved_changes_asks_first() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.doc.dirty = true;
+        app.request(files::Pending::New);
+        assert!(app.view.confirm.is_some());
+        assert_eq!(app.doc.project.name, "Demo");
+        app.view.confirm = None;
+        app.doc.dirty = false;
+        app.request(files::Pending::New);
+        assert_eq!(app.doc.project.name, "Untitled");
     }
 }

@@ -20,9 +20,7 @@ pub struct AudioLink {
     commands: Producer<Command>,
     events: Consumer<Event>,
     failed: Arc<AtomicBool>,
-    #[allow(dead_code)] // used by Task 11
     pub sample_rate: f32,
-    #[allow(dead_code)] // used by Task 11
     pub device_name: String,
 }
 
@@ -75,7 +73,6 @@ impl AudioLink {
         self.failed.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // used by Task 11
     /// Builds a fresh engine for `project` here on the UI thread and
     /// swaps it in whole on the audio thread.
     pub fn load_project(&mut self, project: &Project) -> Result<(), Command> {

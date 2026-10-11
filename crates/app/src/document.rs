@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 pub const UNDO_LIMIT: usize = 200;
 
-#[allow(dead_code)] // Edit variants are used by Tasks 7-10
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
     Param {
@@ -106,7 +105,6 @@ fn merge_key(edit: &Edit) -> MergeKey {
 
 pub struct Document {
     pub project: Project,
-    #[allow(dead_code)] // used by Task 11
     pub path: Option<PathBuf>,
     pub dirty: bool,
     undo: Vec<Edit>,
@@ -151,17 +149,14 @@ impl Document {
         self.gesture = None;
     }
 
-    #[allow(dead_code)] // used by Task 11
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
-    #[allow(dead_code)] // used by Task 11
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
 
-    #[allow(dead_code)] // used by Task 11
     pub fn undo(&mut self) -> Vec<Command> {
         self.gesture = None;
         let Some(edit) = self.undo.pop() else {
@@ -174,7 +169,6 @@ impl Document {
         cmds
     }
 
-    #[allow(dead_code)] // used by Task 11
     pub fn redo(&mut self) -> Vec<Command> {
         self.gesture = None;
         let Some(edit) = self.redo.pop() else {

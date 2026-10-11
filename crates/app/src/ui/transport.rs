@@ -9,6 +9,8 @@ use eframe::egui;
 impl SidAcidApp {
     pub(crate) fn transport(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            self.file_menu(ui);
+            ui.separator();
             ui.heading(egui::RichText::new("SidAcid").color(theme::ACID).strong());
             ui.separator();
             let playing = self.status.playing;
@@ -63,7 +65,10 @@ impl SidAcidApp {
             } else {
                 ui.visuals().text_color()
             };
-            ui.label(egui::RichText::new(format!("CPU {cpu:.0}%")).color(colour));
+            let cpu_label = ui.label(egui::RichText::new(format!("CPU {cpu:.0}%")).color(colour));
+            if let Some(audio) = &self.audio {
+                cpu_label.on_hover_text(audio.device_name.as_str());
+            }
         });
     }
 }
