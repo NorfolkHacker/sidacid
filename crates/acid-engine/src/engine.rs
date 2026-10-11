@@ -193,6 +193,7 @@ impl Engine {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default pattern
 mod tests {
     use super::*;
     use crate::params::{ChannelParam, DrumParam, KitParam, MasterParam, SynthParam};

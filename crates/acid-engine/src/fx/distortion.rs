@@ -8,7 +8,7 @@ const BIAS: f32 = 0.15;
 /// DC blocker pole.
 const DC_R: f32 = 0.9995;
 /// Butterworth Q for the 2x-rate anti-imaging / anti-alias low-pass.
-const BUTTER_Q: f32 = 0.707_1;
+const BUTTER_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 pub struct Distortion {
     pub on: bool,

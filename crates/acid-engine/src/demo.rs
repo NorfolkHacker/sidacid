@@ -12,10 +12,7 @@ fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
 const REST: SynthStep = SynthStep { note: 0, octave: 0, gate: Gate::Off, accent: false, slide: false };
 
 pub fn demo_project() -> Project {
-    let mut p = Project::default();
-    p.name = "Demo".into();
-    p.bpm = 128.0;
-    p.swing = 0.15;
+    let mut p = Project { name: "Demo".into(), bpm: 128.0, swing: 0.15, ..Project::default() };
 
     let acid = [
         step(0, 0, false, false), step(0, 1, true, false), step(0, 0, false, true), step(3, 0, false, false),

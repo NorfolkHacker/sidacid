@@ -81,7 +81,7 @@ pub fn patch(inst: usize, tune: f32, decay: f32, tone: f32) -> DrumPatch {
                 tone_decay_s: d,
                 tone_level: 0.35,
                 osc2_mode: Osc2Mode::Ring,
-                osc2_ratio: 1.4142,
+                osc2_ratio: std::f32::consts::SQRT_2,
                 noise_level: 0.7,
                 noise_decay_s: d,
                 noise_filter_mode: FILTER_HP,

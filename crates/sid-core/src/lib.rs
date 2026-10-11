@@ -3,6 +3,9 @@
 //! Derived from the Acid OS synthesiser (`acid-synth`), MIT licence,
 //! Copyright (c) 2026 NorfolkHacker. See THIRD_PARTY_NOTICES.md.
 
+// DSP loops index several parallel per-voice arrays at once; iterators would obscure them.
+#![allow(clippy::needless_range_loop)]
+
 mod chip;
 mod env;
 mod osc;

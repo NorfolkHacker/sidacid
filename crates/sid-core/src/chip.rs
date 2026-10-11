@@ -211,6 +211,7 @@ impl SidChip {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_1_SQRT_2;
 
     const SR: f32 = 44_100.0;
 
@@ -268,7 +269,7 @@ mod tests {
         open_voice(&mut chip, 0, Waveform::Pulse, 100.0);
         let (l, r) = chip.render_frame();
         assert!((l - r).abs() < 1e-6);
-        assert!((l.abs() - 0.7071).abs() < 1e-3);
+        assert!((l.abs() - FRAC_1_SQRT_2).abs() < 1e-3);
     }
 
     #[test]
@@ -291,8 +292,8 @@ mod tests {
         chip.voice_mut(0).osc.phase = 0x2000_0000;
         chip.set_ring(0, true);
         let (ringed, _) = chip.render_frame();
-        assert!((plain + 0.5 * 0.7071).abs() < 1e-3, "plain = {plain}");
-        assert!((ringed - 0.5 * 0.7071).abs() < 1e-3, "ringed = {ringed}");
+        assert!((plain + 0.5 * FRAC_1_SQRT_2).abs() < 1e-3, "plain = {plain}");
+        assert!((ringed - 0.5 * FRAC_1_SQRT_2).abs() < 1e-3, "ringed = {ringed}");
     }
 
     #[test]
@@ -351,6 +352,6 @@ mod tests {
         open_voice(&mut chip, 0, Waveform::Pulse, 100.0);
         chip.set_level(0, 0.5);
         let (l, _) = chip.render_frame();
-        assert!((l.abs() - 0.5 * 0.7071).abs() < 1e-3);
+        assert!((l.abs() - 0.5 * FRAC_1_SQRT_2).abs() < 1e-3);
     }
 }

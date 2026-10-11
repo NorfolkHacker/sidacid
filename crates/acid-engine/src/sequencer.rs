@@ -84,7 +84,7 @@ impl Sequencer {
     fn step_len(&self, step: u64) -> f64 {
         let base = 60.0 / self.bpm as f64 / 4.0 * self.sample_rate as f64;
         let s = self.swing as f64 * 0.5;
-        if step % 2 == 0 { base * (1.0 + s) } else { base * (1.0 - s) }
+        if step.is_multiple_of(2) { base * (1.0 + s) } else { base * (1.0 - s) }
     }
 
     pub fn play(&mut self) {

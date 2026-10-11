@@ -1,6 +1,9 @@
 //! SidAcid sound engine: instruments, effects, sequencer and project data.
 //! No GUI or audio-device dependencies; everything renders offline.
 
+// DSP and sequencer loops index several parallel arrays; iterators would obscure them.
+#![allow(clippy::needless_range_loop)]
+
 pub mod demo;
 pub mod drums;
 pub mod engine;
