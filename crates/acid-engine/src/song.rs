@@ -2,7 +2,9 @@
 //! bar lengths, global step positions, automation lookup and editing.
 
 use crate::params::ParamId;
-use crate::project::{AutoLane, Bar, DrumPattern, PatternRef, Project, STEPS, Song, SynthPattern};
+use crate::project::{
+    AutoLane, Bar, DrumPattern, PATTERNS, PatternRef, Project, STEPS, Song, SynthPattern,
+};
 use std::collections::BTreeMap;
 
 pub const MAX_BARS: usize = 999;
@@ -71,8 +73,12 @@ pub fn is_automated(song: &Song, param: ParamId) -> bool {
 }
 
 /// Writes `value` at every step from `from` to `to` (inclusive, either order)
-/// in `param`'s lane, creating the lane if needed.
+/// in `param`'s lane, creating the lane if needed. A non-finite value is
+/// ignored.
 pub fn write_automation(song: &mut Song, param: ParamId, from: u32, to: u32, value: f32) {
+    if !value.is_finite() {
+        return;
+    }
     let value = value.clamp(0.0, 1.0);
     let (a, b) = (from.min(to), from.max(to));
     let index = match song.automation.iter().position(|l| l.param == param) {
@@ -96,7 +102,11 @@ pub fn clear_automation(song: &mut Song, param: ParamId) {
 
 /// A pattern change made while recording: sets `machine` to `slot` in `bar`
 /// and in the following bars that still held the bar's old reference.
+/// Out-of-range machines and slots are ignored.
 pub fn write_pattern_ref(song: &mut Song, bar: usize, machine: usize, slot: u8) {
+    if machine >= 4 || slot as usize >= PATTERNS {
+        return;
+    }
     let Some(old) = song.bars.get(bar).map(|b| b.patterns[machine]) else {
         return;
     };
@@ -171,6 +181,7 @@ pub fn delete_bars(
         lane.points.retain(|k, _| *k < start || *k >= end);
     }
     shift_automation(song, end, -((end - start) as i64));
+    song.automation.retain(|l| !l.points.is_empty());
     song.bars.drain(first..=last);
     let n = (last - first + 1) as u16;
     song.loop_range = song.loop_range.and_then(|(a, b)| {
@@ -215,12 +226,16 @@ pub fn duplicate_bars(
         .collect();
     let before = song.bars.len();
     insert_bars(song, last + 1, &copy, synths, drums);
-    if song.bars.len() == before {
+    let inserted = song.bars.len() - before;
+    if inserted == 0 {
         return;
     }
+    // At the bar cap only the first `inserted` bars were copied: their
+    // automation ends where the truncated copy ends.
+    let span = bar_start_step(song, first + inserted, synths, drums) - src_start;
     let dst = bar_start_step(song, last + 1, synths, drums);
     for (param, pts) in points {
-        for (offset, v) in pts {
+        for (offset, v) in pts.into_iter().filter(|(o, _)| *o < span) {
             write_automation(song, param, dst + offset, dst + offset, v);
         }
     }
@@ -378,6 +393,62 @@ mod tests {
         assert!(p.song.bars[2].mutes[2]);
         let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
         assert_eq!(keys, vec![18, 34]);
+    }
+
+    #[test]
+    fn duplicate_at_the_cap_copies_only_the_inserted_bars_automation() {
+        let (mut p, id) = sixteen_step_song(MAX_BARS - 1);
+        write_automation(&mut p.song, id, 5, 5, 0.1);
+        write_automation(&mut p.song, id, 20, 20, 0.2);
+        write_automation(&mut p.song, id, 36, 36, 0.3);
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        duplicate_bars(&mut p.song, 0, 1, s, d);
+        assert_eq!(p.song.bars.len(), MAX_BARS, "only bar 0 fit");
+        let points: Vec<(u32, f32)> = lane(&p.song, id)
+            .unwrap()
+            .points
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        assert_eq!(
+            points,
+            vec![(5, 0.1), (20, 0.2), (37, 0.1), (52, 0.3)],
+            "bar 1's point is not copied over the shifted bar 2"
+        );
+    }
+
+    #[test]
+    fn non_finite_automation_is_ignored() {
+        let mut song = Song::default();
+        let id = ParamId::Master(MasterParam::Level);
+        write_automation(&mut song, id, 0, 3, f32::NAN);
+        write_automation(&mut song, id, 0, 3, f32::INFINITY);
+        assert!(song.automation.is_empty());
+    }
+
+    #[test]
+    fn out_of_range_pattern_refs_are_ignored() {
+        let mut song = Song::default();
+        song.bars = vec![bar([Some(0); 4]); 2];
+        let before = song.clone();
+        write_pattern_ref(&mut song, 0, 4, 1);
+        write_pattern_ref(&mut song, 0, 0, PATTERNS as u8);
+        assert_eq!(song, before);
+    }
+
+    #[test]
+    fn deleting_all_of_a_lanes_points_removes_the_lane() {
+        let (mut p, id) = sixteen_step_song(3);
+        let other = ParamId::Synth(0, SynthParam::Cutoff);
+        write_automation(&mut p.song, id, 18, 20, 0.5);
+        write_automation(&mut p.song, other, 40, 40, 0.5);
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        delete_bars(&mut p.song, 1, 1, s, d);
+        assert!(lane(&p.song, id).is_none(), "empty lane pruned");
+        assert_eq!(p.song.automation.len(), 1);
+        assert!(is_automated(&p.song, other));
     }
 
     #[test]

@@ -25,29 +25,52 @@ pub fn render_patterns(project: &Project, bars: u32) -> (Vec<f32>, Vec<f32>) {
     let mut r = vec![0.0; total];
     engine.process(&mut l, &mut r);
     engine.stop();
-    render_tail(&mut engine, &mut l, &mut r);
+    let _ = render_tail(&mut engine, &mut |cl: &[f32], cr: &[f32]| {
+        l.extend_from_slice(cl);
+        r.extend_from_slice(cr);
+        Ok::<(), std::convert::Infallible>(())
+    });
     (l, r)
 }
 
-/// Appends FX tail audio after a stopped engine: up to `MAX_TAIL_SECONDS`,
-/// stopping early once a chunk is silent.
-fn render_tail(engine: &mut Engine, l: &mut Vec<f32>, r: &mut Vec<f32>) {
+/// Hands FX tail audio from a stopped engine to `sink`: up to
+/// `MAX_TAIL_SECONDS`, stopping early once a chunk is silent.
+fn render_tail<E>(
+    engine: &mut Engine,
+    sink: &mut impl FnMut(&[f32], &[f32]) -> Result<(), E>,
+) -> Result<(), E> {
     let mut cl = vec![0.0; CHUNK];
     let mut cr = vec![0.0; CHUNK];
     for _ in 0..(MAX_TAIL_SECONDS * EXPORT_SAMPLE_RATE as usize / CHUNK) {
         engine.process(&mut cl, &mut cr);
-        l.extend_from_slice(&cl);
-        r.extend_from_slice(&cr);
+        sink(&cl, &cr)?;
         if cl.iter().chain(cr.iter()).all(|v| v.abs() < SILENCE) {
             break;
         }
     }
+    Ok(())
 }
 
 /// Renders the whole song from bar 1 (the loop range is ignored so the
 /// export always ends), then lets FX tails ring out. `progress` gets
 /// 0..=1 and finishes with 1.0.
-pub fn render_song(project: &Project, mut progress: impl FnMut(f32)) -> (Vec<f32>, Vec<f32>) {
+pub fn render_song(project: &Project, progress: impl FnMut(f32)) -> (Vec<f32>, Vec<f32>) {
+    let (mut l, mut r) = (Vec::new(), Vec::new());
+    let _ = render_song_to(project, progress, |cl: &[f32], cr: &[f32]| {
+        l.extend_from_slice(cl);
+        r.extend_from_slice(cr);
+        Ok::<(), std::convert::Infallible>(())
+    });
+    (l, r)
+}
+
+/// The song render loop: hands each rendered chunk to `sink`, stopping
+/// at the first sink error.
+fn render_song_to<E>(
+    project: &Project,
+    mut progress: impl FnMut(f32),
+    mut sink: impl FnMut(&[f32], &[f32]) -> Result<(), E>,
+) -> Result<(), E> {
     let sr = EXPORT_SAMPLE_RATE as f32;
     let mut p = project.clone();
     p.song.loop_range = None;
@@ -60,43 +83,60 @@ pub fn render_song(project: &Project, mut progress: impl FnMut(f32)) -> (Vec<f32
     let step_samples = 60.0 / p.bpm.clamp(40.0, 300.0) as f64 / 4.0 * sr as f64;
     let expected = steps * step_samples;
     let cap = MAX_SONG_SECONDS * EXPORT_SAMPLE_RATE as usize;
-    let (mut l, mut r) = (Vec::new(), Vec::new());
+    let mut rendered = 0;
     let mut cl = vec![0.0; CHUNK];
     let mut cr = vec![0.0; CHUNK];
     progress(0.0);
-    while engine.is_playing() && l.len() < cap {
+    while engine.is_playing() && rendered < cap {
         engine.process(&mut cl, &mut cr);
-        l.extend_from_slice(&cl);
-        r.extend_from_slice(&cr);
-        progress((l.len() as f64 / expected).min(0.99) as f32);
+        sink(&cl, &cr)?;
+        rendered += CHUNK;
+        progress((rendered as f64 / expected).min(0.99) as f32);
     }
     engine.stop();
-    render_tail(&mut engine, &mut l, &mut r);
+    render_tail(&mut engine, &mut sink)?;
     progress(1.0);
-    (l, r)
+    Ok(())
 }
 
+/// Renders the song straight into a WAV file, chunk by chunk, so a long
+/// song is never held in memory whole.
 pub fn render_song_wav(
     project: &Project,
     path: &Path,
     progress: impl FnMut(f32),
 ) -> Result<(), hound::Error> {
-    let (l, r) = render_song(project, progress);
-    write_wav(path, &l, &r)
+    let mut w = hound::WavWriter::create(path, wav_spec())?;
+    render_song_to(project, progress, |l: &[f32], r: &[f32]| {
+        write_frames(&mut w, l, r)
+    })?;
+    w.finalize()
 }
 
-pub fn write_wav(path: &Path, l: &[f32], r: &[f32]) -> Result<(), hound::Error> {
-    let spec = hound::WavSpec {
+fn wav_spec() -> hound::WavSpec {
+    hound::WavSpec {
         channels: 2,
         sample_rate: EXPORT_SAMPLE_RATE,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
-    };
-    let mut w = hound::WavWriter::create(path, spec)?;
+    }
+}
+
+fn write_frames<W: std::io::Write + std::io::Seek>(
+    w: &mut hound::WavWriter<W>,
+    l: &[f32],
+    r: &[f32],
+) -> Result<(), hound::Error> {
     for (a, b) in l.iter().zip(r) {
         w.write_sample((a.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
         w.write_sample((b.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
+    Ok(())
+}
+
+pub fn write_wav(path: &Path, l: &[f32], r: &[f32]) -> Result<(), hound::Error> {
+    let mut w = hound::WavWriter::create(path, wav_spec())?;
+    write_frames(&mut w, l, r)?;
     w.finalize()
 }
 
@@ -160,6 +200,27 @@ mod tests {
     fn empty_song_renders_almost_nothing() {
         let (l, _) = render_song(&crate::demo::demo_project(), |_| {});
         assert!(l.len() <= 2 * EXPORT_SAMPLE_RATE as usize);
+    }
+
+    #[test]
+    fn streamed_song_wav_matches_the_buffered_render() {
+        let path = std::env::temp_dir().join(format!("sidacid-song-{}.wav", std::process::id()));
+        let p = two_bar_song();
+        let mut seen = Vec::new();
+        render_song_wav(&p, &path, |f| seen.push(f)).unwrap();
+        let (l, r) = render_song(&p, |_| {});
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec(), wav_spec());
+        let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(samples.len(), 2 * l.len());
+        let quantise = |v: f32| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        for (i, (a, b)) in l.iter().zip(&r).enumerate() {
+            assert_eq!(samples[2 * i], quantise(*a));
+            assert_eq!(samples[2 * i + 1], quantise(*b));
+        }
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]));
+        assert_eq!(seen.last().copied(), Some(1.0));
     }
 
     #[test]
