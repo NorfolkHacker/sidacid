@@ -2,6 +2,7 @@
 //! No GUI or audio-device dependencies; everything renders offline.
 
 pub mod params;
+pub mod project;
 
 #[cfg(test)]
 #[allow(dead_code)]
