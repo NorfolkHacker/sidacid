@@ -43,41 +43,43 @@ impl SidAcidApp {
                     let pattern = &self.doc.project.synths[synth].patterns[slot as usize];
                     let mut length = pattern.length;
                     let mut transpose = pattern.transpose;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut length)
-                                .range(1..=64)
-                                .prefix("Len "),
-                        )
-                        .changed()
-                    {
+                    let r = ui.add(
+                        egui::DragValue::new(&mut length)
+                            .range(1..=64)
+                            .prefix("Len "),
+                    );
+                    if r.changed() {
                         let cmds = self.doc.apply(
                             Edit::SynthLength {
                                 synth,
                                 slot,
                                 length,
                             },
-                            false,
+                            true,
                         );
                         self.send(cmds);
                     }
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut transpose)
-                                .range(-12..=12)
-                                .prefix("Trans "),
-                        )
-                        .changed()
-                    {
+                    if r.drag_stopped() || r.lost_focus() {
+                        self.doc.end_gesture();
+                    }
+                    let r2 = ui.add(
+                        egui::DragValue::new(&mut transpose)
+                            .range(-12..=12)
+                            .prefix("Trans "),
+                    );
+                    if r2.changed() {
                         let cmds = self.doc.apply(
                             Edit::SynthTranspose {
                                 synth,
                                 slot,
                                 transpose,
                             },
-                            false,
+                            true,
                         );
                         self.send(cmds);
+                    }
+                    if r2.drag_stopped() || r2.lost_focus() {
+                        self.doc.end_gesture();
                     }
                     if let Some(w) = self.view.writers[synth] {
                         ui.label(format!(

@@ -27,6 +27,10 @@ pub struct ViewState {
     pub bank: [u8; 4],
     /// Active 303 step-writer per synth.
     pub writers: [Option<step_edit::StepWriter>; 2],
+    /// Scroll distance accumulated per synth toward the next pitch notch.
+    pub scroll_accum: [f32; 2],
+    /// Whether a note cell of each synth was scrolled on the previous frame.
+    pub scrolling: [bool; 2],
 }
 
 pub struct SidAcidApp {

@@ -2,7 +2,8 @@
 //! octave down/up, accent, slide and gate.
 
 use super::step_edit::{
-    StepWriter, WriteAction, gate_label, key_to_write, nudge_note, step_label, toggle_row,
+    StepWriter, WriteAction, gate_label, key_to_write, nudge_note, scroll_notches, step_label,
+    toggle_row,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -21,6 +22,8 @@ impl SidAcidApp {
         let cursor = self.view.writers[synth].map(|w| w.cursor);
         let mut edits = Vec::new();
         let mut start_writer = None;
+        let mut scrolled = false;
+        let mut accum = self.view.scroll_accum[synth];
         egui::ScrollArea::horizontal().id_salt(("s303", synth)).show(ui, |ui| {
             egui::Grid::new(("grid303", synth)).spacing([2.0, 2.0]).show(ui, |ui| {
                 ui.label("");
@@ -57,15 +60,26 @@ impl SidAcidApp {
                                 start_writer = Some(i);
                             }
                             if r.secondary_clicked() {
-                                edits.push((i, toggle_row(5, *s)));
+                                edits.push((i, toggle_row(5, *s), false));
                             }
-                            let scroll = if r.hovered() { ui.input(|inp| inp.raw_scroll_delta.y) } else { 0.0 };
-                            if scroll != 0.0 {
-                                edits.push((i, nudge_note(*s, if scroll > 0.0 { 1 } else { -1 })));
+if r.hovered() {
+                                let d = ui.input_mut(|inp| {
+                                    let d = inp.raw_scroll_delta.y;
+                                    inp.raw_scroll_delta.y = 0.0;
+                                    inp.smooth_scroll_delta.y = 0.0;
+                                    d
+                                });
+                                if d != 0.0 {
+                                    scrolled = true;
+                                    let n = scroll_notches(&mut accum, d);
+                                    if n != 0 {
+                                        edits.push((i, nudge_note(*s, n), true));
+                                    }
+                                }
                             }
                             r.on_hover_text("Click: step-write from here  ·  Scroll: pitch  ·  Right-click: gate");
                         } else if r.clicked() {
-                            edits.push((i, toggle_row(row, *s)));
+                            edits.push((i, toggle_row(row, *s), false));
                         }
                     }
                     ui.end_row();
@@ -77,7 +91,15 @@ impl SidAcidApp {
             self.view.writers[1 - synth] = None;
             self.view.focus = synth;
         }
-        for (step, value) in edits {
+        if scrolled {
+            self.view.scrolling[synth] = true;
+            self.view.scroll_accum[synth] = accum;
+        } else if self.view.scrolling[synth] {
+            self.view.scrolling[synth] = false;
+            self.view.scroll_accum[synth] = 0.0;
+            self.doc.end_gesture();
+        }
+        for (step, value, merge) in edits {
             let cmds = self.doc.apply(
                 Edit::SynthStep {
                     synth,
@@ -85,7 +107,7 @@ impl SidAcidApp {
                     step,
                     value,
                 },
-                false,
+                merge,
             );
             self.send(cmds);
             self.view.focus = synth;
@@ -107,6 +129,7 @@ impl SidAcidApp {
                     egui::Event::Key {
                         key,
                         pressed: true,
+                        repeat: false,
                         modifiers,
                         ..
                     } if !modifiers.command => Some(*key),

@@ -43,6 +43,24 @@ pub fn nudge_note(step: SynthStep, delta: i32) -> SynthStep {
     }
 }
 
+/// Scroll distance (points) that makes one semitone step.
+pub const SCROLL_NOTCH: f32 = 40.0;
+
+/// Adds `delta` to `accum` and returns the whole notches passed, keeping the remainder.
+pub fn scroll_notches(accum: &mut f32, delta: f32) -> i32 {
+    *accum += delta;
+    let mut n = 0;
+    while *accum >= SCROLL_NOTCH {
+        *accum -= SCROLL_NOTCH;
+        n += 1;
+    }
+    while *accum <= -SCROLL_NOTCH {
+        *accum += SCROLL_NOTCH;
+        n -= 1;
+    }
+    n
+}
+
 /// Click behaviour of the 303 rows: 1 Down, 2 Up, 3 Accent, 4 Slide, 5 Gate.
 pub fn toggle_row(row: usize, step: SynthStep) -> SynthStep {
     match row {
@@ -245,6 +263,22 @@ mod tests {
             accent: false,
             slide: false,
         }
+    }
+
+    #[test]
+    fn scroll_accumulates_and_fires_notches() {
+        let mut a = 0.0;
+        assert_eq!(scroll_notches(&mut a, 15.0), 0);
+        assert_eq!(scroll_notches(&mut a, 15.0), 0);
+        assert_eq!(scroll_notches(&mut a, 15.0), 1);
+        assert_eq!(a, 5.0);
+        assert_eq!(scroll_notches(&mut a, 100.0), 2);
+        assert_eq!(a, 25.0);
+        assert_eq!(scroll_notches(&mut a, -25.0 - 85.0), -2);
+        assert_eq!(a, -25.0 + 25.0 - 85.0 + 80.0);
+        let mut b = 0.0;
+        assert_eq!(scroll_notches(&mut b, -50.0), -1);
+        assert_eq!(b, -10.0);
     }
 
     #[test]
