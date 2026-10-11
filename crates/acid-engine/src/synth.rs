@@ -194,6 +194,19 @@ impl BassSynth {
         self.control(false);
     }
 
+    /// Drops all sound and internal state (chip, filter envelope, accent
+    /// sweep, gate) but keeps the panel settings.
+    pub fn reset(&mut self) {
+        self.chip.reset();
+        self.gate = false;
+        self.accent = false;
+        self.filter_env = 0.0;
+        self.accent_cap = 0.0;
+        self.note_semis = self.target_semis;
+        self.control_counter = 0;
+        self.control(false);
+    }
+
     pub fn note_off(&mut self) {
         self.gate = false;
         for v in 0..SidChip::VOICES {
@@ -291,6 +304,22 @@ mod tests {
         assert!(!s.gate_open());
         render(&mut s, 0.1);
         assert!(peak(&render(&mut s, 0.05)) < 1e-4);
+    }
+
+    #[test]
+    fn reset_recovers_from_poisoned_state() {
+        let mut s = BassSynth::new(SR);
+        s.note_on(45, true, false);
+        render(&mut s, 0.05);
+        s.filter_env = f32::NAN;
+        s.accent_cap = f32::NAN;
+        assert!(!all_finite(&render(&mut s, 0.01)), "state is poisoned");
+        s.reset();
+        assert!(!s.gate_open());
+        assert_eq!(peak(&render(&mut s, 0.05)), 0.0, "silent after reset");
+        s.note_on(45, false, false);
+        let out = render(&mut s, 0.1);
+        assert!(all_finite(&out) && rms(&out) > 0.01);
     }
 
     #[test]

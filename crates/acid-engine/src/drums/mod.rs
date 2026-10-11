@@ -212,10 +212,11 @@ impl DrumVoice {
         let tone = raw_tone * self.tone_amp * p.tone_level;
         self.tone_amp *= self.tone_coef;
 
-        let burst_total = p.bursts as f32 * p.burst_spacing_s;
+        let spacing = p.burst_spacing_s.max(1.0e-4);
+        let burst_total = p.bursts as f32 * spacing;
         let noise_env = if self.t < burst_total {
-            let phase = self.t % p.burst_spacing_s;
-            (-phase / (p.burst_spacing_s / 3.0)).exp()
+            let phase = self.t % spacing;
+            (-phase / (spacing / 3.0)).exp()
         } else {
             let a = self.noise_amp;
             self.noise_amp *= self.noise_coef;
@@ -294,6 +295,15 @@ impl DrumKit {
         self.voices[idx].start(inst, patch, gain, self.age);
     }
 
+    /// Deactivates every voice and clears their filters.
+    pub fn reset(&mut self) {
+        for v in &mut self.voices {
+            v.active = false;
+            v.choking = false;
+            v.filter.reset();
+        }
+    }
+
     pub fn active_voices(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }
@@ -329,6 +339,30 @@ mod tests {
         let mut r = vec![0.0; n];
         k.render(&mut l, &mut r);
         l
+    }
+
+    #[test]
+    fn reset_silences_and_recovers_from_poison() {
+        let mut k = DrumKit::new(KitKind::K808, SR);
+        k.trigger(CH, false);
+        k.voices[0].gain = f32::NAN;
+        assert!(!all_finite(&render(&mut k, 0.05)));
+        k.reset();
+        assert_eq!(k.active_voices(), 0);
+        assert_eq!(peak(&render(&mut k, 0.05)), 0.0);
+        k.trigger(BD, false);
+        let out = render(&mut k, 0.1);
+        assert!(all_finite(&out) && peak(&out) > 0.01);
+    }
+
+    #[test]
+    fn zero_burst_spacing_is_safe() {
+        let mut v = DrumVoice::new(SR, 1);
+        let patch = DrumPatch { bursts: 3, burst_spacing_s: 0.0, noise_level: 1.0, ..DrumPatch::default() };
+        v.start(CP, patch, 1.0, 1);
+        for _ in 0..2000 {
+            assert!(v.tick().is_finite());
+        }
     }
 
     #[test]

@@ -139,7 +139,11 @@ impl Mixer {
         }
     }
 
-    pub fn process(&mut self, chans: &mut [StereoBuf; 4], n: usize, out_l: &mut [f32], out_r: &mut [f32]) {
+    /// Mixes `n` samples of the channel buffers into `out_l`/`out_r`.
+    /// Precondition: `n` is at most the `max_block` given to `Mixer::new`
+    /// and no longer than any buffer passed in. Returns true when the NaN
+    /// guard fired (output was silenced and effect state reset).
+    pub fn process(&mut self, chans: &mut [StereoBuf; 4], n: usize, out_l: &mut [f32], out_r: &mut [f32]) -> bool {
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         out_l.fill(0.0);
         out_r.fill(0.0);
@@ -197,11 +201,12 @@ impl Mixer {
                 s.comp.reset();
                 s.dist.reset();
             }
-            return;
+            return true;
         }
         for v in out_l.iter_mut().chain(out_r.iter_mut()) {
             *v = v.clamp(-1.0, 1.0);
         }
+        false
     }
 }
 
@@ -225,6 +230,12 @@ mod tests {
         let mut r = vec![0.0; N];
         m.process(chans, N, &mut l, &mut r);
         (l, r)
+    }
+
+    fn guard_fired(m: &mut Mixer, chans: &mut [StereoBuf; 4]) -> bool {
+        let mut l = vec![0.0; N];
+        let mut r = vec![0.0; N];
+        m.process(chans, N, &mut l, &mut r)
     }
 
     fn quiet_mixer() -> Mixer {
@@ -294,6 +305,14 @@ mod tests {
         let (l, r) = run(&mut m, &mut chans);
         assert!(all_finite(&l) && all_finite(&r));
         assert!(peak(&l) <= 1.0);
+    }
+
+    #[test]
+    fn guard_reports_nan_only() {
+        let mut m = quiet_mixer();
+        assert!(!guard_fired(&mut m, &mut chans_with(0, 0.25)));
+        assert!(guard_fired(&mut m, &mut chans_with(0, f32::NAN)));
+        assert!(!guard_fired(&mut m, &mut chans_with(0, 0.25)));
     }
 
     #[test]

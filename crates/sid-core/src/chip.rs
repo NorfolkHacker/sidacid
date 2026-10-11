@@ -144,6 +144,20 @@ impl SidChip {
         }
     }
 
+    /// Silences the chip and clears all filter and oscillator state
+    /// (settings are kept). Used to recover from a poisoned (NaN) state.
+    pub fn reset(&mut self) {
+        for v in &mut self.voices {
+            v.env.stage = EnvStage::Off;
+            v.env.level = 0.0;
+            v.osc.reset_phase();
+            v.master.reset_phase();
+        }
+        for f in &mut self.filters {
+            f.reset();
+        }
+    }
+
     pub fn is_silent(&self) -> bool {
         self.voices.iter().all(|v| v.env.stage == EnvStage::Off)
     }

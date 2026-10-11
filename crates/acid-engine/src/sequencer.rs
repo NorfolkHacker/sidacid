@@ -1,3 +1,4 @@
+//! Pattern-mode sequencer. Sample-accurate: the engine asks how many
 //! samples until the next tick, renders that many, then calls tick().
 //! Each 16th step has a start tick (notes, drums, param lane) and a mid
 //! tick (gate off unless sliding/tied into the next step).
@@ -59,7 +60,15 @@ impl Sequencer {
     }
 
     pub fn set_bpm(&mut self, bpm: f32) {
-        self.bpm = bpm.clamp(40.0, 300.0);
+        if bpm.is_finite() {
+            self.bpm = bpm.clamp(40.0, 300.0);
+        }
+    }
+
+    /// Test hook: makes the tick clock NaN, as a broken tempo would.
+    #[cfg(test)]
+    pub(crate) fn poison_clock(&mut self) {
+        self.samples_to_next = f64::NAN;
     }
 
     pub fn bpm(&self) -> f32 {
@@ -67,7 +76,9 @@ impl Sequencer {
     }
 
     pub fn set_swing(&mut self, swing: f32) {
-        self.swing = swing.clamp(0.0, 0.75);
+        if swing.is_finite() {
+            self.swing = swing.clamp(0.0, 0.75);
+        }
     }
 
     fn step_len(&self, step: u64) -> f64 {
@@ -173,10 +184,10 @@ impl Sequencer {
                         }
                     }
                     t.prev_slide = step.slide && step.gate != Gate::Off;
-                    if let Some(lane) = &pat.param_lane {
-                        if let Some(value) = lane.values[t.step] {
-                            out.push(SeqEvent::Param { id: lane.param, value });
-                        }
+                    if let Some(lane) = &pat.param_lane
+                        && let Some(Some(value)) = lane.values.get(t.step)
+                    {
+                        out.push(SeqEvent::Param { id: lane.param, value: *value });
                     }
                 }
                 for k in 0..2 {
@@ -239,6 +250,18 @@ mod tests {
     use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, SynthStep};
 
     const SR: f32 = 44_100.0;
+
+    #[test]
+    fn non_finite_tempo_is_ignored() {
+        let mut seq = Sequencer::new(SR);
+        seq.set_bpm(140.0);
+        seq.set_swing(0.3);
+        seq.set_bpm(f32::NAN);
+        seq.set_bpm(f32::INFINITY);
+        seq.set_swing(f32::NAN);
+        assert_eq!(seq.bpm(), 140.0);
+        assert_eq!(seq.swing, 0.3);
+    }
 
     struct Fixture {
         synths: [Vec<SynthPattern>; 2],

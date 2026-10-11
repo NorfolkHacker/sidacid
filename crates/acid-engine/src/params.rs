@@ -152,6 +152,17 @@ impl ParamId {
         }
     }
 
+    /// True when every index is within the machine counts.
+    pub fn is_valid(self) -> bool {
+        match self {
+            ParamId::Synth(s, _) => (s as usize) < SYNTHS,
+            ParamId::Drum(k, i, _) => (k as usize) < KITS && (i as usize) < DRUM_INSTRUMENTS,
+            ParamId::Kit(k, _) => (k as usize) < KITS,
+            ParamId::Channel(c, _) => (c as usize) < CHANNELS,
+            ParamId::Fx(_) | ParamId::Master(_) => true,
+        }
+    }
+
     pub fn all() -> Vec<ParamId> {
         let mut v = Vec::new();
         for s in 0..SYNTHS as u8 {
@@ -214,6 +225,16 @@ mod tests {
             assert!((0.0..=1.0).contains(&info.default), "{id:?}");
             assert!(!info.name.is_empty());
         }
+    }
+
+    #[test]
+    fn index_validity() {
+        assert!(ParamId::all().iter().all(|id| id.is_valid()));
+        assert!(!ParamId::Synth(2, SynthParam::Tune).is_valid());
+        assert!(!ParamId::Drum(0, 8, DrumParam::Tune).is_valid());
+        assert!(!ParamId::Drum(2, 0, DrumParam::Tune).is_valid());
+        assert!(!ParamId::Kit(2, KitParam::Volume).is_valid());
+        assert!(!ParamId::Channel(4, ChannelParam::Level).is_valid());
     }
 
     #[test]

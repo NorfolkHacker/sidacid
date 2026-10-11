@@ -2,7 +2,7 @@
 //! counter-line on synth 2, an 808 beat and 909 hats.
 
 use crate::drums::{BD, CH, CP, OH, SD};
-use crate::params::{ChannelParam, FxParam, ParamId, SynthParam};
+use crate::params::{ChannelParam, FxParam, MasterParam, ParamId, SynthParam};
 use crate::project::{DrumHit, Gate, Project, SynthStep};
 
 fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
@@ -70,6 +70,7 @@ pub fn demo_project() -> Project {
     set(&mut p, ParamId::Channel(2, ChannelParam::ReverbSend), 0.1);
     set(&mut p, ParamId::Channel(3, ChannelParam::Level), 0.55);
     set(&mut p, ParamId::Fx(FxParam::DelayFeedback), 0.45);
+    set(&mut p, ParamId::Master(MasterParam::Level), 0.7);
     p
 }
 
@@ -83,5 +84,12 @@ mod tests {
         p.validate().unwrap();
         assert!(p.synths[0].patterns[0].steps.iter().any(|s| s.slide));
         assert!(p.synths[0].patterns[0].steps.iter().any(|s| s.accent));
+    }
+
+    #[test]
+    fn demo_render_stays_below_full_scale() {
+        let (l, r) = crate::render::render_patterns(&demo_project(), 8);
+        let peak = l.iter().chain(&r).fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak < 0.99, "peak = {peak}");
     }
 }

@@ -9,6 +9,10 @@ use crate::project::{DrumPattern, Project, SynthPattern, PATTERNS};
 use crate::sequencer::{SeqEvent, Sequencer};
 use crate::synth::BassSynth;
 
+/// Upper bound on sequencer ticks fired without time advancing; guards
+/// against a sequencer that never moves forward.
+const MAX_TICKS_PER_POSITION: usize = 64;
+
 pub struct Engine {
     synths: [BassSynth; 2],
     kits: [DrumKit; 2],
@@ -53,7 +57,13 @@ impl Engine {
         }
     }
 
+    /// Out-of-range ids and non-finite values are ignored; values are
+    /// clamped to 0..=1.
     pub fn set_param(&mut self, id: ParamId, v: f32) {
+        if !id.is_valid() || !v.is_finite() {
+            return;
+        }
+        let v = v.clamp(0.0, 1.0);
         match id {
             ParamId::Synth(s, p) => self.synths[s as usize].set_param(p, v),
             ParamId::Drum(k, i, p) => self.kits[k as usize].set_param(i as usize, p, v),
@@ -86,15 +96,26 @@ impl Engine {
         self.seq.is_playing()
     }
 
+    /// Ignores `machine >= 4` and `slot >= 128`.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) {
-        self.seq.select(machine, slot);
+        if machine < 4 && (slot as usize) < PATTERNS {
+            self.seq.select(machine, slot);
+        }
     }
 
+    /// Stores `p` and returns the old pattern. An invalid target or a
+    /// malformed pattern is not stored: `p` is handed back unchanged.
     pub fn set_synth_pattern(&mut self, synth: usize, slot: u8, p: SynthPattern) -> SynthPattern {
+        if synth >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+            return p;
+        }
         std::mem::replace(&mut self.synth_patterns[synth][slot as usize], p)
     }
 
     pub fn set_drum_pattern(&mut self, kit: usize, slot: u8, p: DrumPattern) -> DrumPattern {
+        if kit >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+            return p;
+        }
         std::mem::replace(&mut self.drum_patterns[kit][slot as usize], p)
     }
 
@@ -107,10 +128,11 @@ impl Engine {
     }
 
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        assert_eq!(out_l.len(), out_r.len());
+        debug_assert_eq!(out_l.len(), out_r.len());
+        let total = out_l.len().min(out_r.len());
         let mut offset = 0;
-        while offset < out_l.len() {
-            let n = (out_l.len() - offset).min(Self::MAX_BLOCK);
+        while offset < total {
+            let n = (total - offset).min(Self::MAX_BLOCK);
             self.process_block(&mut out_l[offset..offset + n], &mut out_r[offset..offset + n]);
             offset += n;
         }
@@ -123,9 +145,11 @@ impl Engine {
             c.r[..n].fill(0.0);
         }
         let mut pos = 0;
+        let mut ticks_here = 0;
         while pos < n {
             let until = self.seq.samples_to_next_tick();
-            if until == 0 {
+            if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
+                ticks_here += 1;
                 self.events.clear();
                 self.seq.tick(
                     [&self.synth_patterns[0], &self.synth_patterns[1]],
@@ -142,7 +166,9 @@ impl Engine {
                 }
                 continue;
             }
-            let run = until.min(n - pos);
+            // Past the tick bound (a broken tempo) just render on.
+            ticks_here = 0;
+            let run = if until == 0 { n - pos } else { until.min(n - pos) };
             let span = pos..pos + run;
             for s in 0..2 {
                 let c = &mut self.chans[s];
@@ -155,14 +181,21 @@ impl Engine {
             self.seq.advance(run);
             pos += run;
         }
-        self.mixer.process(&mut self.chans, n, out_l, out_r);
+        if self.mixer.process(&mut self.chans, n, out_l, out_r) {
+            for s in &mut self.synths {
+                s.reset();
+            }
+            for k in &mut self.kits {
+                k.reset();
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{ChannelParam, MasterParam};
+    use crate::params::{ChannelParam, DrumParam, KitParam, MasterParam, SynthParam};
     use crate::testutil::{all_finite, peak, rms};
 
     const SR: f32 = 44_100.0;
@@ -251,6 +284,75 @@ mod tests {
         assert!(old.steps.iter().any(|s| s.gate != crate::project::Gate::Off));
         let old_drums = e.set_drum_pattern(0, 0, DrumPattern::default());
         assert!(old_drums.steps.iter().flatten().any(|h| *h != crate::project::DrumHit::Off));
+    }
+
+    #[test]
+    fn nan_tempo_cannot_hang_or_poison() {
+        let mut e = demo_engine();
+        e.set_bpm(f32::NAN);
+        e.set_swing(f32::NAN);
+        e.play();
+        let (l, r) = render(&mut e, 0.5);
+        assert!(all_finite(&l) && all_finite(&r));
+    }
+
+    #[test]
+    fn broken_clock_cannot_hang_process() {
+        let mut e = demo_engine();
+        e.play();
+        e.seq.poison_clock();
+        let (l, r) = render(&mut e, 0.2);
+        assert_eq!(l.len(), r.len());
+        assert!(all_finite(&l) && all_finite(&r));
+    }
+
+    #[test]
+    fn out_of_range_indices_are_ignored() {
+        let mut e = demo_engine();
+        e.play();
+        e.select_pattern(0, 200);
+        e.select_pattern(9, 0);
+        e.set_param(ParamId::Drum(0, 9, DrumParam::Tune), 0.5);
+        e.set_param(ParamId::Synth(7, SynthParam::Cutoff), 0.5);
+        e.set_param(ParamId::Channel(4, ChannelParam::Level), 0.5);
+        e.set_param(ParamId::Kit(2, KitParam::Volume), 0.5);
+        let (l, _) = render(&mut e, 0.5);
+        assert!(all_finite(&l));
+        assert_eq!(e.current_patterns(), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn malformed_or_misplaced_patterns_are_rejected() {
+        let mut e = demo_engine();
+        e.play();
+        let mut short = SynthPattern::default();
+        short.steps.truncate(3);
+        let back = e.set_synth_pattern(0, 0, short.clone());
+        assert_eq!(back, short);
+        let mut zero = DrumPattern::default();
+        zero.length = 0;
+        assert_eq!(e.set_drum_pattern(0, 0, zero.clone()), zero);
+        let mut lane = SynthPattern::default();
+        lane.param_lane = Some(crate::project::ParamLane { param: ParamId::Fx(crate::params::FxParam::DelayMs), values: vec![None; 2] });
+        assert_eq!(e.set_synth_pattern(0, 0, lane.clone()), lane);
+        assert_eq!(e.set_synth_pattern(2, 0, SynthPattern::default()), SynthPattern::default());
+        assert_eq!(e.set_drum_pattern(0, 200, DrumPattern::default()), DrumPattern::default());
+        let (l, _) = render(&mut e, 1.0);
+        assert!(all_finite(&l) && rms(&l) > 0.02, "still playing the demo");
+    }
+
+    #[test]
+    fn non_finite_param_is_dropped_and_values_clamped() {
+        let mut e = demo_engine();
+        e.set_param(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
+        e.set_param(ParamId::Channel(0, ChannelParam::Level), 50.0);
+        e.play();
+        let (l, _) = render(&mut e, 0.1);
+        assert!(all_finite(&l));
+        e.set_param(ParamId::Synth(0, SynthParam::Cutoff), 0.5);
+        let (l, _) = render(&mut e, 3.0);
+        assert!(all_finite(&l) && peak(&l) > 0.01);
+        assert!(peak(&l) <= 1.0);
     }
 
     #[test]

@@ -101,6 +101,11 @@ impl Delay {
             let dr = self.buf[1][read];
             self.lp[0] += (dl - self.lp[0]) * self.tone_coef;
             self.lp[1] += (dr - self.lp[1]) * self.tone_coef;
+            for lp in &mut self.lp {
+                if lp.abs() < 1.0e-20 {
+                    *lp = 0.0;
+                }
+            }
             let fb_l = self.lp[0] * self.feedback;
             let fb_r = self.lp[1] * self.feedback;
             if self.ping_pong {

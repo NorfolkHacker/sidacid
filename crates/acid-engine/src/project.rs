@@ -53,6 +53,15 @@ pub struct SynthPattern {
     pub param_lane: Option<ParamLane>,
 }
 
+impl SynthPattern {
+    /// Shape the engine relies on: 64 steps, length 1..=64, a full-size lane.
+    pub fn is_well_formed(&self) -> bool {
+        self.steps.len() == STEPS
+            && (1..=STEPS as u8).contains(&self.length)
+            && self.param_lane.as_ref().is_none_or(|l| l.values.len() == STEPS)
+    }
+}
+
 impl Default for SynthPattern {
     fn default() -> Self {
         Self { steps: vec![SynthStep::default(); STEPS], length: 16, transpose: 0, param_lane: None }
@@ -71,6 +80,12 @@ pub enum DrumHit {
 pub struct DrumPattern {
     pub steps: Vec<[DrumHit; DRUM_INSTRUMENTS]>,
     pub length: u8,
+}
+
+impl DrumPattern {
+    pub fn is_well_formed(&self) -> bool {
+        self.steps.len() == STEPS && (1..=STEPS as u8).contains(&self.length)
+    }
 }
 
 impl Default for DrumPattern {
@@ -209,18 +224,24 @@ impl Project {
 
     pub fn validate(&self) -> Result<(), ProjectError> {
         let bad = |m: String| Err(ProjectError::Invalid(m));
+        if !self.bpm.is_finite() || !self.swing.is_finite() {
+            return bad("bpm or swing is not a number".into());
+        }
+        if self.params.iter().any(|(id, v)| !id.is_valid() || !v.is_finite()) {
+            return bad("invalid parameter value".into());
+        }
         for (i, m) in self.synths.iter().enumerate() {
             if m.patterns.len() != PATTERNS {
                 return bad(format!("synth {} has {} patterns", i + 1, m.patterns.len()));
             }
             for (j, p) in m.patterns.iter().enumerate() {
-                if p.steps.len() != STEPS || !(1..=STEPS as u8).contains(&p.length) {
+                if !p.is_well_formed() {
                     return bad(format!("synth {} pattern {}", i + 1, PatternRef(j as u8).label()));
                 }
-                if let Some(lane) = &p.param_lane {
-                    if lane.values.len() != STEPS {
-                        return bad(format!("synth {} pattern {} param lane", i + 1, PatternRef(j as u8).label()));
-                    }
+                if let Some(lane) = &p.param_lane
+                    && (!lane.param.is_valid() || lane.values.iter().flatten().any(|v| !v.is_finite()))
+                {
+                    return bad(format!("synth {} pattern {} param lane", i + 1, PatternRef(j as u8).label()));
                 }
             }
         }
@@ -229,7 +250,7 @@ impl Project {
                 return bad(format!("drum machine {} has {} patterns", i + 1, m.patterns.len()));
             }
             for (j, p) in m.patterns.iter().enumerate() {
-                if p.steps.len() != STEPS || !(1..=STEPS as u8).contains(&p.length) {
+                if !p.is_well_formed() {
                     return bad(format!("drum machine {} pattern {}", i + 1, PatternRef(j as u8).label()));
                 }
             }
@@ -350,6 +371,30 @@ mod tests {
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
         p.selected[2] = 200;
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+    }
+
+    #[test]
+    fn non_finite_and_bad_index_values_are_rejected() {
+        let mut p = Project::default();
+        p.bpm = f32::NAN;
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let mut p = Project::default();
+        p.swing = f32::INFINITY;
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let mut p = Project::default();
+        p.params.insert(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let mut p = Project::default();
+        p.params.insert(ParamId::Synth(5, SynthParam::Cutoff), 0.5);
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let mut p = Project::default();
+        let mut lane = ParamLane { param: ParamId::Drum(0, 9, crate::params::DrumParam::Tune), values: vec![None; STEPS] };
+        p.synths[0].patterns[0].param_lane = Some(lane.clone());
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        lane.param = ParamId::Synth(0, SynthParam::Cutoff);
+        lane.values[3] = Some(f32::NAN);
+        p.synths[0].patterns[0].param_lane = Some(lane);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
     }
 
