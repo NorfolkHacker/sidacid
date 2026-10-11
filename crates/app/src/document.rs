@@ -1,7 +1,6 @@
 //! The editable project plus undo/redo. Every change is an `Edit`;
 //! applying one returns the engine `Command`s that bring the audio
 //! thread in line. Undo stores the inverse edit.
-#![allow(dead_code)] // wired up by the UI in Task 6
 
 use acid_engine::host::Command;
 use acid_engine::params::ParamId;
@@ -12,6 +11,7 @@ use std::path::PathBuf;
 
 pub const UNDO_LIMIT: usize = 200;
 
+#[allow(dead_code)] // Edit variants are used by Tasks 7-10
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
     Param {
@@ -106,6 +106,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
 
 pub struct Document {
     pub project: Project,
+    #[allow(dead_code)] // used by Task 11
     pub path: Option<PathBuf>,
     pub dirty: bool,
     undo: Vec<Edit>,
@@ -150,14 +151,17 @@ impl Document {
         self.gesture = None;
     }
 
+    #[allow(dead_code)] // used by Task 11
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
+    #[allow(dead_code)] // used by Task 11
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
 
+    #[allow(dead_code)] // used by Task 11
     pub fn undo(&mut self) -> Vec<Command> {
         self.gesture = None;
         let Some(edit) = self.undo.pop() else {
@@ -170,6 +174,7 @@ impl Document {
         cmds
     }
 
+    #[allow(dead_code)] // used by Task 11
     pub fn redo(&mut self) -> Vec<Command> {
         self.gesture = None;
         let Some(edit) = self.redo.pop() else {
@@ -182,6 +187,7 @@ impl Document {
         cmds
     }
 
+    #[allow(dead_code)] // used by Task 8
     /// Selecting a pattern is a transport action: saved, not undoable.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
         self.project.selected[machine] = slot;
