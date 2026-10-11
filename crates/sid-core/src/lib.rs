@@ -5,6 +5,8 @@
 
 mod env;
 mod osc;
+mod svf;
 
 pub use env::{EnvStage, Envelope};
 pub use osc::{Oscillator, Waveform};
+pub use svf::{Svf, FILTER_BP, FILTER_HP, FILTER_LP};
