@@ -111,8 +111,7 @@ where
                     host.set_cpu_load(started.elapsed().as_secs_f32() / budget);
                 }
             },
-            move |err| {
-                eprintln!("audio stream error: {err}");
+            move |_err| {
                 failed.store(true, Ordering::Relaxed);
             },
             None,
@@ -168,10 +167,19 @@ mod tests {
     fn stereo_interleaves_across_chunks() {
         let mut l = vec![0.0; RENDER_CHUNK];
         let mut r = vec![0.0; RENDER_CHUNK];
-        let mut data = vec![0.0f32; 2 * (RENDER_CHUNK * 2 + 17)];
-        fill_interleaved(&mut constant, &mut l, &mut r, &mut data, 2);
-        for frame in data.chunks(2) {
-            assert_eq!(frame, &[0.5, -0.25]);
+        let frames = RENDER_CHUNK * 3 + 17;
+        let mut data = vec![0.0f32; 2 * frames];
+        let mut n = 0.0f32;
+        let mut ramp = |l: &mut [f32], r: &mut [f32]| {
+            for i in 0..l.len() {
+                l[i] = n;
+                r[i] = -n;
+                n += 1.0;
+            }
+        };
+        fill_interleaved(&mut ramp, &mut l, &mut r, &mut data, 2);
+        for (k, frame) in data.chunks(2).enumerate() {
+            assert_eq!(frame, &[k as f32, -(k as f32)], "frame {k}");
         }
     }
 
