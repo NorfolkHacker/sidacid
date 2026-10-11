@@ -8,7 +8,8 @@ use eframe::egui;
 
 impl SidAcidApp {
     pub(crate) fn transport(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // Wraps onto a second row instead of clipping in narrow windows.
+        ui.horizontal_wrapped(|ui| {
             self.file_menu(ui);
             ui.separator();
             ui.heading(egui::RichText::new("SidAcid").color(theme::ACID).strong());
@@ -102,9 +103,8 @@ impl SidAcidApp {
                 cpu_label.on_hover_text(audio.device_name.as_str());
             }
             if let Some(line) = &self.view.status_line {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(line).small());
-                });
+                ui.separator();
+                ui.label(egui::RichText::new(line).small());
             }
         });
     }
