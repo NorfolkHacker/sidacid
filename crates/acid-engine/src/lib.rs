@@ -12,6 +12,7 @@ pub mod host;
 pub mod mixer;
 pub mod params;
 pub mod project;
+pub mod random;
 pub mod render;
 pub mod sequencer;
 pub mod song;

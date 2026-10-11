@@ -10,3 +10,5 @@ serde.workspace = true
 ron.workspace = true
 hound.workspace = true
 rtrb.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
