@@ -3,6 +3,7 @@
 
 pub mod drums;
 pub mod fx;
+pub mod mixer;
 pub mod params;
 pub mod project;
 pub mod synth;
