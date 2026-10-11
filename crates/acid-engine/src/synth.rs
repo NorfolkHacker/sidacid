@@ -2,8 +2,8 @@
 //! and Decay, accent (level + short decay + the "accent wow" sweep that
 //! builds over consecutive accents), slide, and 3-voice detuned unison.
 
-use crate::params::{exp, lin, on, step_index, ParamId, SynthParam};
-use sid_core::{SidChip, SyncMode, Waveform, FILTER_BP, FILTER_HP, FILTER_LP};
+use crate::params::{ParamId, SynthParam, exp, lin, on, step_index};
+use sid_core::{FILTER_BP, FILTER_HP, FILTER_LP, SidChip, SyncMode, Waveform};
 
 /// Pitch, cutoff and envelope update every this many samples.
 const CONTROL_BLOCK: usize = 16;
@@ -107,7 +107,11 @@ impl BassSynth {
             SynthParam::Decay => self.decay_s = exp(v, 0.03, 2.5),
             SynthParam::Accent => self.accent_amt = v.clamp(0.0, 1.0),
             SynthParam::Wave => {
-                self.wave = if step_index(v, 2) == 0 { Waveform::Saw } else { Waveform::Pulse };
+                self.wave = if step_index(v, 2) == 0 {
+                    Waveform::Saw
+                } else {
+                    Waveform::Pulse
+                };
                 self.apply_voice_setup();
             }
             SynthParam::PulseWidth => {
@@ -150,9 +154,20 @@ impl BassSynth {
             self.chip.set_waveform(v, self.wave);
             self.chip.set_pulse_width(v, self.pulse_width);
             self.chip.set_filter_route(v, true);
-            self.chip.set_sync(v, if self.sync { SyncMode::Hidden } else { SyncMode::Off });
+            self.chip.set_sync(
+                v,
+                if self.sync {
+                    SyncMode::Hidden
+                } else {
+                    SyncMode::Off
+                },
+            );
             self.chip.set_adsr(v, 0.003, 0.0, 1.0, 0.012);
-            let pan = if self.unison { [-self.spread, 0.0, self.spread][v] } else { 0.0 };
+            let pan = if self.unison {
+                [-self.spread, 0.0, self.spread][v]
+            } else {
+                0.0
+            };
             self.chip.set_pan(v, pan);
             if self.gate {
                 if v < count {
@@ -166,11 +181,17 @@ impl BassSynth {
     }
 
     fn update_levels(&mut self) {
-        let accent_gain = if self.accent { 1.0 + self.accent_amt } else { 1.0 };
-        let per_voice = BASE_LEVEL * self.volume * accent_gain / if self.unison { 1.6 } else { 1.0 };
+        let accent_gain = if self.accent {
+            1.0 + self.accent_amt
+        } else {
+            1.0
+        };
+        let per_voice =
+            BASE_LEVEL * self.volume * accent_gain / if self.unison { 1.6 } else { 1.0 };
         let count = self.voice_count();
         for v in 0..SidChip::VOICES {
-            self.chip.set_level(v, if v < count { per_voice } else { 0.0 });
+            self.chip
+                .set_level(v, if v < count { per_voice } else { 0.0 });
         }
     }
 
@@ -222,22 +243,40 @@ impl BassSynth {
             let sr = self.sample_rate;
             let glide_k = 1.0 - (-n / (SLIDE_TAU_S * sr)).exp();
             self.note_semis += (self.target_semis - self.note_semis) * glide_k;
-            let decay = if self.accent { ACCENT_DECAY_S } else { self.decay_s };
+            let decay = if self.accent {
+                ACCENT_DECAY_S
+            } else {
+                self.decay_s
+            };
             self.filter_env *= (LN_MINUS_60_DB * n / (decay * sr)).exp();
-            let input = if self.accent && self.gate { self.filter_env } else { 0.0 };
-            let tau = if input > self.accent_cap { ACCENT_CHARGE_TAU_S } else { ACCENT_DISCHARGE_TAU_S };
+            let input = if self.accent && self.gate {
+                self.filter_env
+            } else {
+                0.0
+            };
+            let tau = if input > self.accent_cap {
+                ACCENT_CHARGE_TAU_S
+            } else {
+                ACCENT_DISCHARGE_TAU_S
+            };
             self.accent_cap += (input - self.accent_cap) * (1.0 - (-n / (tau * sr)).exp());
         }
-        let octaves = self.env_mod * self.filter_env * ENV_MOD_OCTAVES + self.accent_amt * self.accent_cap * ACCENT_OCTAVES;
+        let octaves = self.env_mod * self.filter_env * ENV_MOD_OCTAVES
+            + self.accent_amt * self.accent_cap * ACCENT_OCTAVES;
         let cutoff = (self.cutoff_hz * 2f32.powf(octaves)).clamp(20.0, 18_000.0);
         self.chip.set_filter(cutoff, self.resonance);
         let base = self.note_semis + self.tune;
         for v in 0..self.voice_count() {
-            let detune = if self.unison { [-1.0, 0.0, 1.0][v] * self.detune_cents / 100.0 } else { 0.0 };
+            let detune = if self.unison {
+                [-1.0, 0.0, 1.0][v] * self.detune_cents / 100.0
+            } else {
+                0.0
+            };
             let hz = midi_to_hz(base + detune);
             if self.sync {
                 self.chip.set_sync_master_hz(v, hz);
-                self.chip.set_freq_hz(v, hz * 2f32.powf(self.sync_semis / 12.0));
+                self.chip
+                    .set_freq_hz(v, hz * 2f32.powf(self.sync_semis / 12.0));
             } else {
                 self.chip.set_freq_hz(v, hz);
             }

@@ -133,7 +133,9 @@ mod tests {
     const SR: f32 = 44_100.0;
 
     fn sine(amp: f32) -> Vec<f32> {
-        (0..4410).map(|i| amp * (TAU * 110.0 * i as f32 / SR).sin()).collect()
+        (0..4410)
+            .map(|i| amp * (TAU * 110.0 * i as f32 / SR).sin())
+            .collect()
     }
 
     #[test]
@@ -185,7 +187,9 @@ mod tests {
         d.set_drive(1.0);
         d.set_tone(1.0);
         d.set_mix(1.0);
-        let mut l: Vec<f32> = (0..44_100).map(|i| (TAU * 110.0 * i as f32 / SR).sin()).collect();
+        let mut l: Vec<f32> = (0..44_100)
+            .map(|i| (TAU * 110.0 * i as f32 / SR).sin())
+            .collect();
         let mut r = l.clone();
         d.process(&mut l, &mut r);
         let tail = &l[22_050..];

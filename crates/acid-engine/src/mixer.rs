@@ -3,7 +3,7 @@
 //! master level, optional lo-fi, final clip and NaN guard.
 
 use crate::fx::{Compressor, Delay, Distortion, LoFi, Reverb};
-use crate::params::{exp, on, step_index, ChannelParam, FxParam, MasterParam, ParamId, CHANNELS};
+use crate::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId, exp, on, step_index};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 
 pub struct StereoBuf {
@@ -13,7 +13,10 @@ pub struct StereoBuf {
 
 impl StereoBuf {
     pub fn new(len: usize) -> Self {
-        Self { l: vec![0.0; len], r: vec![0.0; len] }
+        Self {
+            l: vec![0.0; len],
+            r: vec![0.0; len],
+        }
     }
 }
 
@@ -87,7 +90,9 @@ pub struct Mixer {
 impl Mixer {
     pub fn new(sample_rate: f32, max_block: usize) -> Self {
         let mut m = Self {
-            strips: (0..CHANNELS).map(|_| ChannelStrip::new(sample_rate)).collect(),
+            strips: (0..CHANNELS)
+                .map(|_| ChannelStrip::new(sample_rate))
+                .collect(),
             delay: Delay::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             master_comp: Compressor::new(sample_rate),
@@ -143,7 +148,13 @@ impl Mixer {
     /// Precondition: `n` is at most the `max_block` given to `Mixer::new`
     /// and no longer than any buffer passed in. Returns true when the NaN
     /// guard fired (output was silenced and effect state reset).
-    pub fn process(&mut self, chans: &mut [StereoBuf; 4], n: usize, out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+    pub fn process(
+        &mut self,
+        chans: &mut [StereoBuf; 4],
+        n: usize,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) -> bool {
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         out_l.fill(0.0);
         out_r.fill(0.0);
@@ -173,14 +184,24 @@ impl Mixer {
         }
         self.wet.l[..n].fill(0.0);
         self.wet.r[..n].fill(0.0);
-        self.delay.process(&self.delay_send.l[..n], &self.delay_send.r[..n], &mut self.wet.l[..n], &mut self.wet.r[..n]);
+        self.delay.process(
+            &self.delay_send.l[..n],
+            &self.delay_send.r[..n],
+            &mut self.wet.l[..n],
+            &mut self.wet.r[..n],
+        );
         for i in 0..n {
             out_l[i] += self.wet.l[i] * self.delay_return;
             out_r[i] += self.wet.r[i] * self.delay_return;
         }
         self.wet.l[..n].fill(0.0);
         self.wet.r[..n].fill(0.0);
-        self.reverb.process(&self.reverb_send.l[..n], &self.reverb_send.r[..n], &mut self.wet.l[..n], &mut self.wet.r[..n]);
+        self.reverb.process(
+            &self.reverb_send.l[..n],
+            &self.reverb_send.r[..n],
+            &mut self.wet.l[..n],
+            &mut self.wet.r[..n],
+        );
         for i in 0..n {
             out_l[i] += self.wet.l[i] * self.reverb_return;
             out_r[i] += self.wet.r[i] * self.reverb_return;

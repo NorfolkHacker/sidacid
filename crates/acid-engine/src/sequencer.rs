@@ -8,10 +8,24 @@ use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeqEvent {
-    Note { synth: usize, midi: u8, accent: bool, legato: bool },
-    NoteOff { synth: usize },
-    Drum { kit: usize, inst: usize, accent: bool },
-    Param { id: ParamId, value: f32 },
+    Note {
+        synth: usize,
+        midi: u8,
+        accent: bool,
+        legato: bool,
+    },
+    NoteOff {
+        synth: usize,
+    },
+    Drum {
+        kit: usize,
+        inst: usize,
+        accent: bool,
+    },
+    Param {
+        id: ParamId,
+        value: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +98,11 @@ impl Sequencer {
     fn step_len(&self, step: u64) -> f64 {
         let base = 60.0 / self.bpm as f64 / 4.0 * self.sample_rate as f64;
         let s = self.swing as f64 * 0.5;
-        if step.is_multiple_of(2) { base * (1.0 + s) } else { base * (1.0 - s) }
+        if step.is_multiple_of(2) {
+            base * (1.0 + s)
+        } else {
+            base * (1.0 - s)
+        }
     }
 
     pub fn play(&mut self) {
@@ -150,7 +168,12 @@ impl Sequencer {
         }
     }
 
-    pub fn tick(&mut self, synths: [&[SynthPattern]; 2], drums: [&[DrumPattern]; 2], out: &mut Vec<SeqEvent>) {
+    pub fn tick(
+        &mut self,
+        synths: [&[SynthPattern]; 2],
+        drums: [&[DrumPattern]; 2],
+        out: &mut Vec<SeqEvent>,
+    ) {
         if !self.playing {
             return;
         }
@@ -167,12 +190,22 @@ impl Sequencer {
                     match step.gate {
                         Gate::On => {
                             let legato = t.prev_slide && t.gate_open;
-                            out.push(SeqEvent::Note { synth: s, midi: step.midi(pat.transpose), accent: step.accent, legato });
+                            out.push(SeqEvent::Note {
+                                synth: s,
+                                midi: step.midi(pat.transpose),
+                                accent: step.accent,
+                                legato,
+                            });
                             t.gate_open = true;
                         }
                         Gate::Tie => {
                             if !t.gate_open {
-                                out.push(SeqEvent::Note { synth: s, midi: step.midi(pat.transpose), accent: step.accent, legato: false });
+                                out.push(SeqEvent::Note {
+                                    synth: s,
+                                    midi: step.midi(pat.transpose),
+                                    accent: step.accent,
+                                    legato: false,
+                                });
                                 t.gate_open = true;
                             }
                         }
@@ -187,7 +220,10 @@ impl Sequencer {
                     if let Some(lane) = &pat.param_lane
                         && let Some(Some(value)) = lane.values.get(t.step)
                     {
-                        out.push(SeqEvent::Param { id: lane.param, value: *value });
+                        out.push(SeqEvent::Param {
+                            id: lane.param,
+                            value: *value,
+                        });
                     }
                 }
                 for k in 0..2 {
@@ -199,8 +235,16 @@ impl Sequencer {
                     for (inst, hit) in pat.steps[t.step].iter().enumerate() {
                         match hit {
                             DrumHit::Off => {}
-                            DrumHit::On => out.push(SeqEvent::Drum { kit: k, inst, accent: false }),
-                            DrumHit::Accent => out.push(SeqEvent::Drum { kit: k, inst, accent: true }),
+                            DrumHit::On => out.push(SeqEvent::Drum {
+                                kit: k,
+                                inst,
+                                accent: false,
+                            }),
+                            DrumHit::Accent => out.push(SeqEvent::Drum {
+                                kit: k,
+                                inst,
+                                accent: true,
+                            }),
                         }
                     }
                 }
@@ -270,7 +314,16 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            Self { synths: [vec![SynthPattern::default(); 4], vec![SynthPattern::default(); 4]], drums: [vec![DrumPattern::default(); 4], vec![DrumPattern::default(); 4]] }
+            Self {
+                synths: [
+                    vec![SynthPattern::default(); 4],
+                    vec![SynthPattern::default(); 4],
+                ],
+                drums: [
+                    vec![DrumPattern::default(); 4],
+                    vec![DrumPattern::default(); 4],
+                ],
+            }
         }
 
         fn run(&self, seq: &mut Sequencer, total: usize) -> Vec<(usize, SeqEvent)> {
@@ -281,7 +334,11 @@ mod tests {
                 let n = seq.samples_to_next_tick().min(total - pos);
                 if n == 0 {
                     buf.clear();
-                    seq.tick([&self.synths[0], &self.synths[1]], [&self.drums[0], &self.drums[1]], &mut buf);
+                    seq.tick(
+                        [&self.synths[0], &self.synths[1]],
+                        [&self.drums[0], &self.drums[1]],
+                        &mut buf,
+                    );
                     out.extend(buf.iter().map(|e| (pos, *e)));
                     continue;
                 }
@@ -293,7 +350,13 @@ mod tests {
     }
 
     fn on(note: u8) -> SynthStep {
-        SynthStep { note, octave: 0, gate: Gate::On, accent: false, slide: false }
+        SynthStep {
+            note,
+            octave: 0,
+            gate: Gate::On,
+            accent: false,
+            slide: false,
+        }
     }
 
     fn new_seq() -> Sequencer {
@@ -317,7 +380,20 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 88_200);
-        let kicks: Vec<usize> = ev.iter().filter(|(_, e)| matches!(e, SeqEvent::Drum { kit: 0, inst: 0, .. })).map(|(p, _)| *p).collect();
+        let kicks: Vec<usize> = ev
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    SeqEvent::Drum {
+                        kit: 0,
+                        inst: 0,
+                        ..
+                    }
+                )
+            })
+            .map(|(p, _)| *p)
+            .collect();
         assert_eq!(kicks, vec![0, 22_050, 44_100, 66_150]);
     }
 
@@ -328,7 +404,17 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 11_000);
-        assert_eq!(ev, vec![(5513, SeqEvent::Drum { kit: 1, inst: 6, accent: true })]);
+        assert_eq!(
+            ev,
+            vec![(
+                5513,
+                SeqEvent::Drum {
+                    kit: 1,
+                    inst: 6,
+                    accent: true
+                }
+            )]
+        );
     }
 
     #[test]
@@ -351,45 +437,95 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 5000);
-        assert_eq!(ev, vec![
-            (0, SeqEvent::Note { synth: 0, midi: 36, accent: false, legato: false }),
-            (2757, SeqEvent::NoteOff { synth: 0 }),
-        ]);
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    0,
+                    SeqEvent::Note {
+                        synth: 0,
+                        midi: 36,
+                        accent: false,
+                        legato: false
+                    }
+                ),
+                (2757, SeqEvent::NoteOff { synth: 0 }),
+            ]
+        );
     }
 
     #[test]
     fn slide_holds_gate_and_marks_next_note_legato() {
         let mut f = Fixture::new();
-        f.synths[1][0].steps[0] = SynthStep { slide: true, ..on(0) };
+        f.synths[1][0].steps[0] = SynthStep {
+            slide: true,
+            ..on(0)
+        };
         f.synths[1][0].steps[1] = on(7);
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 11_000);
-        assert_eq!(ev, vec![
-            (0, SeqEvent::Note { synth: 1, midi: 36, accent: false, legato: false }),
-            (5513, SeqEvent::Note { synth: 1, midi: 43, accent: false, legato: true }),
-            (8269, SeqEvent::NoteOff { synth: 1 }),
-        ]);
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    0,
+                    SeqEvent::Note {
+                        synth: 1,
+                        midi: 36,
+                        accent: false,
+                        legato: false
+                    }
+                ),
+                (
+                    5513,
+                    SeqEvent::Note {
+                        synth: 1,
+                        midi: 43,
+                        accent: false,
+                        legato: true
+                    }
+                ),
+                (8269, SeqEvent::NoteOff { synth: 1 }),
+            ]
+        );
     }
 
     #[test]
     fn tie_extends_without_retrigger() {
         let mut f = Fixture::new();
         f.synths[0][0].steps[0] = on(5);
-        f.synths[0][0].steps[1] = SynthStep { gate: Gate::Tie, ..on(9) };
+        f.synths[0][0].steps[1] = SynthStep {
+            gate: Gate::Tie,
+            ..on(9)
+        };
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 11_000);
-        assert_eq!(ev, vec![
-            (0, SeqEvent::Note { synth: 0, midi: 41, accent: false, legato: false }),
-            (8269, SeqEvent::NoteOff { synth: 0 }),
-        ]);
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    0,
+                    SeqEvent::Note {
+                        synth: 0,
+                        midi: 41,
+                        accent: false,
+                        legato: false
+                    }
+                ),
+                (8269, SeqEvent::NoteOff { synth: 0 }),
+            ]
+        );
     }
 
     #[test]
     fn slide_into_rest_releases_at_half_step() {
         let mut f = Fixture::new();
-        f.synths[0][0].steps[0] = SynthStep { slide: true, ..on(0) };
+        f.synths[0][0].steps[0] = SynthStep {
+            slide: true,
+            ..on(0)
+        };
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 5000);
@@ -399,12 +535,24 @@ mod tests {
     #[test]
     fn accent_and_transpose_pass_through() {
         let mut f = Fixture::new();
-        f.synths[0][0].steps[0] = SynthStep { accent: true, octave: 1, ..on(2) };
+        f.synths[0][0].steps[0] = SynthStep {
+            accent: true,
+            octave: 1,
+            ..on(2)
+        };
         f.synths[0][0].transpose = -3;
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 10);
-        assert_eq!(ev[0].1, SeqEvent::Note { synth: 0, midi: 36 + 12 + 2 - 3, accent: true, legato: false });
+        assert_eq!(
+            ev[0].1,
+            SeqEvent::Note {
+                synth: 0,
+                midi: 36 + 12 + 2 - 3,
+                accent: true,
+                legato: false
+            }
+        );
     }
 
     #[test]
@@ -417,8 +565,14 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let ev = f.run(&mut s, 12 * 5512); // steps 0..=11 (step 12 starts at 66 150)
-        let notes = ev.iter().filter(|(_, e)| matches!(e, SeqEvent::Note { .. })).count();
-        let kicks = ev.iter().filter(|(_, e)| matches!(e, SeqEvent::Drum { .. })).count();
+        let notes = ev
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Note { .. }))
+            .count();
+        let kicks = ev
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Drum { .. }))
+            .count();
         assert_eq!(notes, 4); // steps 0, 3, 6, 9
         assert_eq!(kicks, 3); // steps 0, 4, 8
     }
@@ -434,7 +588,9 @@ mod tests {
         assert_eq!(s.current_pattern(2), 0);
         assert_eq!(s.queued_pattern(2), Some(1));
         let ev = f.run(&mut s, 14 * 5513);
-        let snare = ev.iter().find(|(_, e)| matches!(e, SeqEvent::Drum { inst: 1, .. }));
+        let snare = ev
+            .iter()
+            .find(|(_, e)| matches!(e, SeqEvent::Drum { inst: 1, .. }));
         assert!(snare.is_some());
         assert_eq!(s.current_pattern(2), 1);
     }

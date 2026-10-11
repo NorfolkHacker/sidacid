@@ -3,7 +3,7 @@
 //! every voice can be synced at once), constant-power panning, and one
 //! multimode filter run as a stereo pair with shared settings.
 
-use crate::{EnvStage, Envelope, Oscillator, Svf, Waveform, FILTER_LP};
+use crate::{EnvStage, Envelope, FILTER_LP, Oscillator, Svf, Waveform};
 use std::f32::consts::FRAC_PI_4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,7 +59,11 @@ impl SidChip {
         for f in &mut filters {
             f.mode = FILTER_LP;
         }
-        Self { sample_rate, voices: std::array::from_fn(Voice::new), filters }
+        Self {
+            sample_rate,
+            voices: std::array::from_fn(Voice::new),
+            filters,
+        }
     }
 
     pub fn sample_rate(&self) -> f32 {
@@ -91,9 +95,18 @@ impl SidChip {
         self.voices[v].osc.set_pulse_width(width);
     }
 
-    pub fn set_adsr(&mut self, v: usize, attack_s: f32, decay_s: f32, sustain: f32, release_s: f32) {
+    pub fn set_adsr(
+        &mut self,
+        v: usize,
+        attack_s: f32,
+        decay_s: f32,
+        sustain: f32,
+        release_s: f32,
+    ) {
         let sr = self.sample_rate;
-        self.voices[v].env.set_adsr(attack_s, decay_s, sustain, release_s, sr);
+        self.voices[v]
+            .env
+            .set_adsr(attack_s, decay_s, sustain, release_s, sr);
     }
 
     pub fn gate_on(&mut self, v: usize) {
@@ -163,7 +176,11 @@ impl SidChip {
     }
 
     pub fn render_frame(&mut self) -> (f32, f32) {
-        let msbs = [self.voices[0].osc.msb(), self.voices[1].osc.msb(), self.voices[2].osc.msb()];
+        let msbs = [
+            self.voices[0].osc.msb(),
+            self.voices[1].osc.msb(),
+            self.voices[2].osc.msb(),
+        ];
         let (mut fl, mut fr, mut dl, mut dr) = (0.0, 0.0, 0.0, 0.0);
         for v in 0..3 {
             let voice = &mut self.voices[v];
@@ -196,7 +213,10 @@ impl SidChip {
                 }
             }
         }
-        (self.filters[0].process(fl) + dl, self.filters[1].process(fr) + dr)
+        (
+            self.filters[0].process(fl) + dl,
+            self.filters[1].process(fr) + dr,
+        )
     }
 
     pub fn render_add(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -292,8 +312,14 @@ mod tests {
         chip.voice_mut(0).osc.phase = 0x2000_0000;
         chip.set_ring(0, true);
         let (ringed, _) = chip.render_frame();
-        assert!((plain + 0.5 * FRAC_1_SQRT_2).abs() < 1e-3, "plain = {plain}");
-        assert!((ringed - 0.5 * FRAC_1_SQRT_2).abs() < 1e-3, "ringed = {ringed}");
+        assert!(
+            (plain + 0.5 * FRAC_1_SQRT_2).abs() < 1e-3,
+            "plain = {plain}"
+        );
+        assert!(
+            (ringed - 0.5 * FRAC_1_SQRT_2).abs() < 1e-3,
+            "ringed = {ringed}"
+        );
     }
 
     #[test]

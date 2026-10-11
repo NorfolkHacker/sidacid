@@ -13,7 +13,12 @@ fn quantise(x: f32) -> f32 {
 
 impl LoFi {
     pub fn new(sample_rate: f32) -> Self {
-        Self { on: false, step: (TARGET_RATE / sample_rate).min(1.0), phase: 1.0, held: [0.0; 2] }
+        Self {
+            on: false,
+            step: (TARGET_RATE / sample_rate).min(1.0),
+            phase: 1.0,
+            held: [0.0; 2],
+        }
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {

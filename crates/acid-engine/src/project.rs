@@ -2,7 +2,7 @@
 //! as RON (`.sidacid`). Fixed-size arrays are Vecs of exact length, checked
 //! by `validate` on load.
 
-use crate::params::{ParamId, DRUM_INSTRUMENTS};
+use crate::params::{DRUM_INSTRUMENTS, ParamId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -35,7 +35,8 @@ pub struct SynthStep {
 
 impl SynthStep {
     pub fn midi(&self, transpose: i8) -> u8 {
-        (BASE_MIDI + 12 * self.octave as i32 + self.note as i32 + transpose as i32).clamp(0, 127) as u8
+        (BASE_MIDI + 12 * self.octave as i32 + self.note as i32 + transpose as i32).clamp(0, 127)
+            as u8
     }
 }
 
@@ -58,13 +59,21 @@ impl SynthPattern {
     pub fn is_well_formed(&self) -> bool {
         self.steps.len() == STEPS
             && (1..=STEPS as u8).contains(&self.length)
-            && self.param_lane.as_ref().is_none_or(|l| l.values.len() == STEPS)
+            && self
+                .param_lane
+                .as_ref()
+                .is_none_or(|l| l.values.len() == STEPS)
     }
 }
 
 impl Default for SynthPattern {
     fn default() -> Self {
-        Self { steps: vec![SynthStep::default(); STEPS], length: 16, transpose: 0, param_lane: None }
+        Self {
+            steps: vec![SynthStep::default(); STEPS],
+            length: 16,
+            transpose: 0,
+            param_lane: None,
+        }
     }
 }
 
@@ -90,7 +99,10 @@ impl DrumPattern {
 
 impl Default for DrumPattern {
     fn default() -> Self {
-        Self { steps: vec![[DrumHit::Off; DRUM_INSTRUMENTS]; STEPS], length: 16 }
+        Self {
+            steps: vec![[DrumHit::Off; DRUM_INSTRUMENTS]; STEPS],
+            length: 16,
+        }
     }
 }
 
@@ -109,7 +121,10 @@ pub struct SynthMachine {
 
 impl Default for SynthMachine {
     fn default() -> Self {
-        Self { patterns: vec![SynthPattern::default(); PATTERNS], view: SeqView::Step303 }
+        Self {
+            patterns: vec![SynthPattern::default(); PATTERNS],
+            view: SeqView::Step303,
+        }
     }
 }
 
@@ -120,7 +135,9 @@ pub struct DrumMachine {
 
 impl Default for DrumMachine {
     fn default() -> Self {
-        Self { patterns: vec![DrumPattern::default(); PATTERNS] }
+        Self {
+            patterns: vec![DrumPattern::default(); PATTERNS],
+        }
     }
 }
 
@@ -178,7 +195,10 @@ impl Default for Project {
             swing: 0.0,
             synths: Default::default(),
             drums: Default::default(),
-            params: ParamId::all().into_iter().map(|id| (id, id.info().default)).collect(),
+            params: ParamId::all()
+                .into_iter()
+                .map(|id| (id, id.info().default))
+                .collect(),
             selected: [0; 4],
             song: Song::default(),
         }
@@ -198,7 +218,10 @@ impl fmt::Display for ProjectError {
         match self {
             ProjectError::Io(e) => write!(f, "file error: {e}"),
             ProjectError::Parse(e) => write!(f, "not a valid SidAcid project: {e}"),
-            ProjectError::TooNew(v) => write!(f, "project version {v} is newer than this SidAcid ({PROJECT_VERSION})"),
+            ProjectError::TooNew(v) => write!(
+                f,
+                "project version {v} is newer than this SidAcid ({PROJECT_VERSION})"
+            ),
             ProjectError::Invalid(e) => write!(f, "project is damaged: {e}"),
         }
     }
@@ -227,7 +250,11 @@ impl Project {
         if !self.bpm.is_finite() || !self.swing.is_finite() {
             return bad("bpm or swing is not a number".into());
         }
-        if self.params.iter().any(|(id, v)| !id.is_valid() || !v.is_finite()) {
+        if self
+            .params
+            .iter()
+            .any(|(id, v)| !id.is_valid() || !v.is_finite())
+        {
             return bad("invalid parameter value".into());
         }
         for (i, m) in self.synths.iter().enumerate() {
@@ -236,40 +263,66 @@ impl Project {
             }
             for (j, p) in m.patterns.iter().enumerate() {
                 if !p.is_well_formed() {
-                    return bad(format!("synth {} pattern {}", i + 1, PatternRef(j as u8).label()));
+                    return bad(format!(
+                        "synth {} pattern {}",
+                        i + 1,
+                        PatternRef(j as u8).label()
+                    ));
                 }
                 if let Some(lane) = &p.param_lane
-                    && (!lane.param.is_valid() || lane.values.iter().flatten().any(|v| !v.is_finite()))
+                    && (!lane.param.is_valid()
+                        || lane.values.iter().flatten().any(|v| !v.is_finite()))
                 {
-                    return bad(format!("synth {} pattern {} param lane", i + 1, PatternRef(j as u8).label()));
+                    return bad(format!(
+                        "synth {} pattern {} param lane",
+                        i + 1,
+                        PatternRef(j as u8).label()
+                    ));
                 }
             }
         }
         for (i, m) in self.drums.iter().enumerate() {
             if m.patterns.len() != PATTERNS {
-                return bad(format!("drum machine {} has {} patterns", i + 1, m.patterns.len()));
+                return bad(format!(
+                    "drum machine {} has {} patterns",
+                    i + 1,
+                    m.patterns.len()
+                ));
             }
             for (j, p) in m.patterns.iter().enumerate() {
                 if !p.is_well_formed() {
-                    return bad(format!("drum machine {} pattern {}", i + 1, PatternRef(j as u8).label()));
+                    return bad(format!(
+                        "drum machine {} pattern {}",
+                        i + 1,
+                        PatternRef(j as u8).label()
+                    ));
                 }
             }
         }
         if self.selected.iter().any(|&s| s as usize >= PATTERNS) {
             return bad("selected pattern out of range".into());
         }
-        if self.song.bars.iter().flat_map(|b| b.patterns).flatten().any(|r| r.0 as usize >= PATTERNS) {
+        if self
+            .song
+            .bars
+            .iter()
+            .flat_map(|b| b.patterns)
+            .flatten()
+            .any(|r| r.0 as usize >= PATTERNS)
+        {
             return bad("song references a pattern out of range".into());
         }
         Ok(())
     }
 
     pub fn to_ron(&self) -> String {
-        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).expect("project serialises")
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .expect("project serialises")
     }
 
     pub fn from_ron(text: &str) -> Result<Project, ProjectError> {
-        let head: VersionOnly = ron::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
+        let head: VersionOnly =
+            ron::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
         if head.version > PROJECT_VERSION {
             return Err(ProjectError::TooNew(head.version));
         }
@@ -313,10 +366,20 @@ mod tests {
 
     #[test]
     fn step_midi_uses_octave_note_and_transpose() {
-        let s = SynthStep { note: 3, octave: 1, gate: Gate::On, accent: false, slide: false };
+        let s = SynthStep {
+            note: 3,
+            octave: 1,
+            gate: Gate::On,
+            accent: false,
+            slide: false,
+        };
         assert_eq!(s.midi(0), 36 + 12 + 3);
         assert_eq!(s.midi(-2), 36 + 12 + 1);
-        let low = SynthStep { note: 0, octave: -1, ..s };
+        let low = SynthStep {
+            note: 0,
+            octave: -1,
+            ..s
+        };
         assert_eq!(low.midi(0), 24);
     }
 
@@ -342,10 +405,21 @@ mod tests {
         let mut p = Project::default();
         p.name = "Test".into();
         p.bpm = 133.0;
-        p.synths[1].patterns[5].steps[3] = SynthStep { note: 7, octave: -1, gate: Gate::On, accent: true, slide: true };
+        p.synths[1].patterns[5].steps[3] = SynthStep {
+            note: 7,
+            octave: -1,
+            gate: Gate::On,
+            accent: true,
+            slide: true,
+        };
         p.drums[0].patterns[2].steps[4][0] = DrumHit::Accent;
-        p.params.insert(ParamId::Synth(0, SynthParam::Resonance), 0.95);
-        p.song.bars.push(Bar { patterns: [Some(PatternRef(5)), None, Some(PatternRef(2)), None], mutes: [false, true, false, false], transpose: [0, 3] });
+        p.params
+            .insert(ParamId::Synth(0, SynthParam::Resonance), 0.95);
+        p.song.bars.push(Bar {
+            patterns: [Some(PatternRef(5)), None, Some(PatternRef(2)), None],
+            mutes: [false, true, false, false],
+            transpose: [0, 3],
+        });
         let text = p.to_ron();
         let back = Project::from_ron(&text).unwrap();
         assert_eq!(back, p);
@@ -384,13 +458,17 @@ mod tests {
         p.swing = f32::INFINITY;
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
-        p.params.insert(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
+        p.params
+            .insert(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
         p.params.insert(ParamId::Synth(5, SynthParam::Cutoff), 0.5);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
-        let mut lane = ParamLane { param: ParamId::Drum(0, 9, crate::params::DrumParam::Tune), values: vec![None; STEPS] };
+        let mut lane = ParamLane {
+            param: ParamId::Drum(0, 9, crate::params::DrumParam::Tune),
+            values: vec![None; STEPS],
+        };
         p.synths[0].patterns[0].param_lane = Some(lane.clone());
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         lane.param = ParamId::Synth(0, SynthParam::Cutoff);
@@ -401,7 +479,10 @@ mod tests {
 
     #[test]
     fn garbage_is_a_parse_error() {
-        assert!(matches!(Project::from_ron("not ron"), Err(ProjectError::Parse(_))));
+        assert!(matches!(
+            Project::from_ron("not ron"),
+            Err(ProjectError::Parse(_))
+        ));
     }
 
     #[test]

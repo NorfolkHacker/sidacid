@@ -6,27 +6,68 @@ use crate::params::{ChannelParam, FxParam, MasterParam, ParamId, SynthParam};
 use crate::project::{DrumHit, Gate, Project, SynthStep};
 
 fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
-    SynthStep { note, octave, gate: Gate::On, accent, slide }
+    SynthStep {
+        note,
+        octave,
+        gate: Gate::On,
+        accent,
+        slide,
+    }
 }
 
-const REST: SynthStep = SynthStep { note: 0, octave: 0, gate: Gate::Off, accent: false, slide: false };
+const REST: SynthStep = SynthStep {
+    note: 0,
+    octave: 0,
+    gate: Gate::Off,
+    accent: false,
+    slide: false,
+};
 
 pub fn demo_project() -> Project {
-    let mut p = Project { name: "Demo".into(), bpm: 128.0, swing: 0.15, ..Project::default() };
+    let mut p = Project {
+        name: "Demo".into(),
+        bpm: 128.0,
+        swing: 0.15,
+        ..Project::default()
+    };
 
     let acid = [
-        step(0, 0, false, false), step(0, 1, true, false), step(0, 0, false, true), step(3, 0, false, false),
-        step(0, 0, true, false), step(10, -1, false, true), REST, step(7, 0, true, false),
-        step(0, 0, false, false), step(0, 1, false, true), step(0, 1, true, false), step(3, 0, false, false),
-        step(5, 0, false, true), step(3, 0, true, false), REST, step(10, -1, false, false),
+        step(0, 0, false, false),
+        step(0, 1, true, false),
+        step(0, 0, false, true),
+        step(3, 0, false, false),
+        step(0, 0, true, false),
+        step(10, -1, false, true),
+        REST,
+        step(7, 0, true, false),
+        step(0, 0, false, false),
+        step(0, 1, false, true),
+        step(0, 1, true, false),
+        step(3, 0, false, false),
+        step(5, 0, false, true),
+        step(3, 0, true, false),
+        REST,
+        step(10, -1, false, false),
     ];
     p.synths[0].patterns[0].steps[..16].copy_from_slice(&acid);
 
     let counter = [
-        step(7, 1, false, false), REST, REST, step(10, 1, true, true),
-        step(7, 1, false, false), REST, step(3, 1, false, false), REST,
-        step(7, 1, true, false), REST, REST, step(5, 1, false, true),
-        step(3, 1, false, false), REST, step(0, 1, true, false), REST,
+        step(7, 1, false, false),
+        REST,
+        REST,
+        step(10, 1, true, true),
+        step(7, 1, false, false),
+        REST,
+        step(3, 1, false, false),
+        REST,
+        step(7, 1, true, false),
+        REST,
+        REST,
+        step(5, 1, false, true),
+        step(3, 1, false, false),
+        REST,
+        step(0, 1, true, false),
+        REST,
     ];
     p.synths[1].patterns[0].steps[..16].copy_from_slice(&counter);
 
@@ -40,7 +81,11 @@ pub fn demo_project() -> Project {
 
     let kit909 = &mut p.drums[1].patterns[0];
     for s in 0..16 {
-        kit909.steps[s][CH] = if s % 4 == 2 { DrumHit::Accent } else { DrumHit::On };
+        kit909.steps[s][CH] = if s % 4 == 2 {
+            DrumHit::Accent
+        } else {
+            DrumHit::On
+        };
     }
     for s in [2, 6, 10, 14] {
         kit909.steps[s][OH] = DrumHit::On;

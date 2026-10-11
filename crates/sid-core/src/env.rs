@@ -34,16 +34,38 @@ impl Default for Envelope {
 
 /// Per-sample multiplier that falls 60 dB in `seconds` (0 = instant).
 fn fall_coef(seconds: f32, sample_rate: f32) -> f32 {
-    if seconds <= 0.0 { 0.0 } else { (LN_MINUS_60_DB / (seconds * sample_rate)).exp() }
+    if seconds <= 0.0 {
+        0.0
+    } else {
+        (LN_MINUS_60_DB / (seconds * sample_rate)).exp()
+    }
 }
 
 impl Envelope {
     pub fn new() -> Self {
-        Self { stage: EnvStage::Off, level: 0.0, attack_step: 1.0, decay_coef: 0.0, sustain: 1.0, release_coef: 0.0 }
+        Self {
+            stage: EnvStage::Off,
+            level: 0.0,
+            attack_step: 1.0,
+            decay_coef: 0.0,
+            sustain: 1.0,
+            release_coef: 0.0,
+        }
     }
 
-    pub fn set_adsr(&mut self, attack_s: f32, decay_s: f32, sustain: f32, release_s: f32, sample_rate: f32) {
-        self.attack_step = if attack_s <= 0.0 { 1.0 } else { 1.0 / (attack_s * sample_rate) };
+    pub fn set_adsr(
+        &mut self,
+        attack_s: f32,
+        decay_s: f32,
+        sustain: f32,
+        release_s: f32,
+        sample_rate: f32,
+    ) {
+        self.attack_step = if attack_s <= 0.0 {
+            1.0
+        } else {
+            1.0 / (attack_s * sample_rate)
+        };
         self.decay_coef = fall_coef(decay_s, sample_rate);
         self.sustain = sustain.clamp(0.0, 1.0);
         self.release_coef = fall_coef(release_s, sample_rate);

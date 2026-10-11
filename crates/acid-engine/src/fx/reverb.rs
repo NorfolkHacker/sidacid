@@ -13,7 +13,11 @@ struct Comb {
 
 impl Comb {
     fn new(len: usize) -> Self {
-        Self { buf: vec![0.0; len.max(1)], idx: 0, store: 0.0 }
+        Self {
+            buf: vec![0.0; len.max(1)],
+            idx: 0,
+            store: 0.0,
+        }
     }
 
     fn process(&mut self, input: f32, feedback: f32, damp1: f32, damp2: f32) -> f32 {
@@ -35,7 +39,10 @@ struct Allpass {
 
 impl Allpass {
     fn new(len: usize) -> Self {
-        Self { buf: vec![0.0; len.max(1)], idx: 0 }
+        Self {
+            buf: vec![0.0; len.max(1)],
+            idx: 0,
+        }
     }
 
     fn process(&mut self, input: f32) -> f32 {
@@ -63,13 +70,27 @@ impl Reverb {
         let sized = |n: usize, spread: usize| ((n + spread) as f32 * scale) as usize;
         let side = |spread: usize| {
             (
-                COMB_TUNING.iter().map(|&n| Comb::new(sized(n, spread))).collect::<Vec<_>>(),
-                ALLPASS_TUNING.iter().map(|&n| Allpass::new(sized(n, spread))).collect::<Vec<_>>(),
+                COMB_TUNING
+                    .iter()
+                    .map(|&n| Comb::new(sized(n, spread)))
+                    .collect::<Vec<_>>(),
+                ALLPASS_TUNING
+                    .iter()
+                    .map(|&n| Allpass::new(sized(n, spread)))
+                    .collect::<Vec<_>>(),
             )
         };
         let (cl, al) = side(0);
         let (cr, ar) = side(STEREO_SPREAD);
-        let mut r = Self { combs: [cl, cr], allpasses: [al, ar], feedback: 0.84, damp1: 0.2, damp2: 0.8, wet1: 1.0, wet2: 0.0 };
+        let mut r = Self {
+            combs: [cl, cr],
+            allpasses: [al, ar],
+            feedback: 0.84,
+            damp1: 0.2,
+            damp2: 0.8,
+            wet1: 1.0,
+            wet2: 0.0,
+        };
         r.set_size(0.6);
         r.set_damping(0.5);
         r.set_width(1.0);

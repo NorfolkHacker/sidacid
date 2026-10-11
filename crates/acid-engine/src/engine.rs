@@ -5,7 +5,7 @@
 use crate::drums::{DrumKit, KitKind};
 use crate::mixer::{Mixer, StereoBuf};
 use crate::params::ParamId;
-use crate::project::{DrumPattern, Project, SynthPattern, PATTERNS};
+use crate::project::{DrumPattern, PATTERNS, Project, SynthPattern};
 use crate::sequencer::{SeqEvent, Sequencer};
 use crate::synth::BassSynth;
 
@@ -30,11 +30,20 @@ impl Engine {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             synths: [BassSynth::new(sample_rate), BassSynth::new(sample_rate)],
-            kits: [DrumKit::new(KitKind::K808, sample_rate), DrumKit::new(KitKind::K909, sample_rate)],
+            kits: [
+                DrumKit::new(KitKind::K808, sample_rate),
+                DrumKit::new(KitKind::K909, sample_rate),
+            ],
             mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
             seq: Sequencer::new(sample_rate),
-            synth_patterns: [vec![SynthPattern::default(); PATTERNS], vec![SynthPattern::default(); PATTERNS]],
-            drum_patterns: [vec![DrumPattern::default(); PATTERNS], vec![DrumPattern::default(); PATTERNS]],
+            synth_patterns: [
+                vec![SynthPattern::default(); PATTERNS],
+                vec![SynthPattern::default(); PATTERNS],
+            ],
+            drum_patterns: [
+                vec![DrumPattern::default(); PATTERNS],
+                vec![DrumPattern::default(); PATTERNS],
+            ],
             chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
             events: Vec::with_capacity(64),
         }
@@ -133,7 +142,10 @@ impl Engine {
         let mut offset = 0;
         while offset < total {
             let n = (total - offset).min(Self::MAX_BLOCK);
-            self.process_block(&mut out_l[offset..offset + n], &mut out_r[offset..offset + n]);
+            self.process_block(
+                &mut out_l[offset..offset + n],
+                &mut out_r[offset..offset + n],
+            );
             offset += n;
         }
     }
@@ -158,9 +170,16 @@ impl Engine {
                 );
                 for i in 0..self.events.len() {
                     match self.events[i] {
-                        SeqEvent::Note { synth, midi, accent, legato } => self.synths[synth].note_on(midi, accent, legato),
+                        SeqEvent::Note {
+                            synth,
+                            midi,
+                            accent,
+                            legato,
+                        } => self.synths[synth].note_on(midi, accent, legato),
                         SeqEvent::NoteOff { synth } => self.synths[synth].note_off(),
-                        SeqEvent::Drum { kit, inst, accent } => self.kits[kit].trigger(inst, accent),
+                        SeqEvent::Drum { kit, inst, accent } => {
+                            self.kits[kit].trigger(inst, accent)
+                        }
                         SeqEvent::Param { id, value } => self.set_param(id, value),
                     }
                 }
@@ -168,7 +187,11 @@ impl Engine {
             }
             // Past the tick bound (a broken tempo) just render on.
             ticks_here = 0;
-            let run = if until == 0 { n - pos } else { until.min(n - pos) };
+            let run = if until == 0 {
+                n - pos
+            } else {
+                until.min(n - pos)
+            };
             let span = pos..pos + run;
             for s in 0..2 {
                 let c = &mut self.chans[s];
@@ -282,9 +305,19 @@ mod tests {
     fn pattern_replacement_returns_old_pattern() {
         let mut e = demo_engine();
         let old = e.set_synth_pattern(0, 0, SynthPattern::default());
-        assert!(old.steps.iter().any(|s| s.gate != crate::project::Gate::Off));
+        assert!(
+            old.steps
+                .iter()
+                .any(|s| s.gate != crate::project::Gate::Off)
+        );
         let old_drums = e.set_drum_pattern(0, 0, DrumPattern::default());
-        assert!(old_drums.steps.iter().flatten().any(|h| *h != crate::project::DrumHit::Off));
+        assert!(
+            old_drums
+                .steps
+                .iter()
+                .flatten()
+                .any(|h| *h != crate::project::DrumHit::Off)
+        );
     }
 
     #[test]
@@ -334,10 +367,19 @@ mod tests {
         zero.length = 0;
         assert_eq!(e.set_drum_pattern(0, 0, zero.clone()), zero);
         let mut lane = SynthPattern::default();
-        lane.param_lane = Some(crate::project::ParamLane { param: ParamId::Fx(crate::params::FxParam::DelayMs), values: vec![None; 2] });
+        lane.param_lane = Some(crate::project::ParamLane {
+            param: ParamId::Fx(crate::params::FxParam::DelayMs),
+            values: vec![None; 2],
+        });
         assert_eq!(e.set_synth_pattern(0, 0, lane.clone()), lane);
-        assert_eq!(e.set_synth_pattern(2, 0, SynthPattern::default()), SynthPattern::default());
-        assert_eq!(e.set_drum_pattern(0, 200, DrumPattern::default()), DrumPattern::default());
+        assert_eq!(
+            e.set_synth_pattern(2, 0, SynthPattern::default()),
+            SynthPattern::default()
+        );
+        assert_eq!(
+            e.set_drum_pattern(0, 200, DrumPattern::default()),
+            DrumPattern::default()
+        );
         let (l, _) = render(&mut e, 1.0);
         assert!(all_finite(&l) && rms(&l) > 0.02, "still playing the demo");
     }

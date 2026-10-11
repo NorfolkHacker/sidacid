@@ -14,4 +14,4 @@ mod svf;
 pub use chip::{SidChip, SyncMode, Voice};
 pub use env::{EnvStage, Envelope};
 pub use osc::{Oscillator, Waveform};
-pub use svf::{Svf, FILTER_BP, FILTER_HP, FILTER_LP};
+pub use svf::{FILTER_BP, FILTER_HP, FILTER_LP, Svf};

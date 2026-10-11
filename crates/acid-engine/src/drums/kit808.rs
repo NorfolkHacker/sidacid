@@ -1,8 +1,8 @@
 //! 808-flavoured SID drum patches: long triangle booms, two-tone snare,
 //! burst clap, noise hats. Knobs are normalised 0..1.
 
-use super::{DrumPatch, Osc2Mode, BD, CH, CP, HT, LT, OH, RS, SD};
-use sid_core::{Waveform, FILTER_BP, FILTER_HP};
+use super::{BD, CH, CP, DrumPatch, HT, LT, OH, Osc2Mode, RS, SD};
+use sid_core::{FILTER_BP, FILTER_HP, Waveform};
 
 /// Tune knob: one octave down to one octave up.
 fn tune_factor(tune: f32) -> f32 {
@@ -75,7 +75,11 @@ pub fn patch(inst: usize, tune: f32, decay: f32, tone: f32) -> DrumPatch {
         CH | OH => DrumPatch {
             tone_level: 0.0,
             noise_level: 0.7,
-            noise_decay_s: if inst == CH { 0.03 + decay * 0.08 } else { 0.25 + decay * 0.8 },
+            noise_decay_s: if inst == CH {
+                0.03 + decay * 0.08
+            } else {
+                0.25 + decay * 0.8
+            },
             noise_filter_mode: FILTER_HP,
             noise_cutoff_hz: (6000.0 + tone * 5000.0) * tf.sqrt(),
             noise_res: 0.1,

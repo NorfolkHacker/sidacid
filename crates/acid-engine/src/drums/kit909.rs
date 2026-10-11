@@ -1,8 +1,8 @@
 //! 909-flavoured SID drum patches: pulse-click punchy kick, snappy snare,
 //! tighter clap, ring-mod rimshot and metallic ring-mod hats.
 
-use super::{DrumPatch, Osc2Mode, BD, CH, CP, HT, LT, OH, RS, SD};
-use sid_core::{Waveform, FILTER_BP, FILTER_HP};
+use super::{BD, CH, CP, DrumPatch, HT, LT, OH, Osc2Mode, RS, SD};
+use sid_core::{FILTER_BP, FILTER_HP, Waveform};
 
 fn tune_factor(tune: f32) -> f32 {
     2f32.powf((tune - 0.5) * 2.0)
@@ -73,7 +73,11 @@ pub fn patch(inst: usize, tune: f32, decay: f32, tone: f32) -> DrumPatch {
             ..base
         },
         CH | OH => {
-            let d = if inst == CH { 0.04 + decay * 0.1 } else { 0.2 + decay * 0.7 };
+            let d = if inst == CH {
+                0.04 + decay * 0.1
+            } else {
+                0.2 + decay * 0.7
+            };
             DrumPatch {
                 tone_wave: Waveform::Triangle,
                 tone_start_hz: 3000.0 * tf,
@@ -96,7 +100,7 @@ pub fn patch(inst: usize, tune: f32, decay: f32, tone: f32) -> DrumPatch {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{kit808, Osc2Mode, BD, CH, CP, RS, SD};
+    use super::super::{BD, CH, CP, Osc2Mode, RS, SD, kit808};
     use super::*;
     use sid_core::Waveform;
 

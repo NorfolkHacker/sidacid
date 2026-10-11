@@ -8,8 +8,8 @@
 pub mod kit808;
 pub mod kit909;
 
-use crate::params::{DrumParam, KitParam, DRUM_INSTRUMENTS};
-use sid_core::{Oscillator, Svf, Waveform, FILTER_HP};
+use crate::params::{DRUM_INSTRUMENTS, DrumParam, KitParam};
+use sid_core::{FILTER_HP, Oscillator, Svf, Waveform};
 
 pub const BD: usize = 0;
 pub const SD: usize = 1;
@@ -176,7 +176,8 @@ impl DrumVoice {
         self.osc1.set_pulse_width(patch.pulse_width);
         self.osc2.set_pulse_width(patch.pulse_width);
         self.osc2.waveform = patch.tone_wave;
-        self.noise.set_freq(patch.noise_rate.clamp(0.0, 1.0) * sr / 16.0, sr);
+        self.noise
+            .set_freq(patch.noise_rate.clamp(0.0, 1.0) * sr / 16.0, sr);
         self.filter.reset();
         self.filter.mode = patch.noise_filter_mode;
         self.filter.set(patch.noise_cutoff_hz, patch.noise_res);
@@ -255,7 +256,9 @@ impl DrumKit {
     pub fn new(kind: KitKind, sample_rate: f32) -> Self {
         Self {
             kind,
-            voices: (0..POOL_SIZE as u32).map(|i| DrumVoice::new(sample_rate, i * 3)).collect(),
+            voices: (0..POOL_SIZE as u32)
+                .map(|i| DrumVoice::new(sample_rate, i * 3))
+                .collect(),
             knobs: [[0.5, 0.5, 0.5, 0.8]; DRUM_INSTRUMENTS],
             volume: 0.7,
             accent_amt: 0.5,
@@ -286,7 +289,9 @@ impl DrumKit {
             .position(|v| v.active && v.inst == inst)
             .or_else(|| self.voices.iter().position(|v| !v.active))
             .unwrap_or_else(|| {
-                (0..self.voices.len()).min_by_key(|&i| self.voices[i].age).expect("pool is not empty")
+                (0..self.voices.len())
+                    .min_by_key(|&i| self.voices[i].age)
+                    .expect("pool is not empty")
             });
         let [tune, decay, tone, level] = self.knobs[inst];
         let patch = self.kind.patch(inst, tune, decay, tone);
@@ -358,7 +363,12 @@ mod tests {
     #[test]
     fn zero_burst_spacing_is_safe() {
         let mut v = DrumVoice::new(SR, 1);
-        let patch = DrumPatch { bursts: 3, burst_spacing_s: 0.0, noise_level: 1.0, ..DrumPatch::default() };
+        let patch = DrumPatch {
+            bursts: 3,
+            burst_spacing_s: 0.0,
+            noise_level: 1.0,
+            ..DrumPatch::default()
+        };
         v.start(CP, patch, 1.0, 1);
         for _ in 0..2000 {
             assert!(v.tick().is_finite());

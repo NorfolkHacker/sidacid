@@ -85,7 +85,11 @@ impl Compressor {
         for (a, b) in l.iter_mut().zip(r.iter_mut()) {
             let peak = a.abs().max(b.abs()).max(1.0e-6);
             let target = self.target_gr_db(20.0 * peak.log10());
-            let coef = if target < self.gr_db { self.attack_coef } else { self.release_coef };
+            let coef = if target < self.gr_db {
+                self.attack_coef
+            } else {
+                self.release_coef
+            };
             self.gr_db = target + (self.gr_db - target) * coef;
             let g = db_to_gain(self.gr_db) * self.makeup;
             *a *= g;
@@ -103,7 +107,9 @@ mod tests {
     const SR: f32 = 44_100.0;
 
     fn sine(amp: f32, n: usize) -> Vec<f32> {
-        (0..n).map(|i| amp * (TAU * 220.0 * i as f32 / SR).sin()).collect()
+        (0..n)
+            .map(|i| amp * (TAU * 220.0 * i as f32 / SR).sin())
+            .collect()
     }
 
     fn comp(threshold: f32, ratio: f32) -> Compressor {

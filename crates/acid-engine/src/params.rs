@@ -67,11 +67,19 @@ pub struct ParamInfo {
 }
 
 const fn cont(name: &'static str, default: f32) -> ParamInfo {
-    ParamInfo { name, default, steps: 0 }
+    ParamInfo {
+        name,
+        default,
+        steps: 0,
+    }
 }
 
 const fn disc(name: &'static str, default: f32, steps: u8) -> ParamInfo {
-    ParamInfo { name, default, steps }
+    ParamInfo {
+        name,
+        default,
+        steps,
+    }
 }
 
 impl ParamId {
@@ -203,7 +211,6 @@ pub fn on(v: f32) -> bool {
 pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
-
 
 #[cfg(test)]
 mod tests {

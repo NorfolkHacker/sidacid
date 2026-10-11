@@ -66,7 +66,11 @@ impl Oscillator {
                 (tri >> 8) as f32 * TO_UNIT - 1.0
             }
             Waveform::Pulse => {
-                if self.phase < self.pulse_threshold { 1.0 } else { -1.0 }
+                if self.phase < self.pulse_threshold {
+                    1.0
+                } else {
+                    -1.0
+                }
             }
             Waveform::Noise => self.noise_out,
         }
@@ -106,7 +110,6 @@ fn noise_advance(lfsr: &mut u32) {
     }
     *lfsr = v;
 }
-
 
 #[cfg(test)]
 mod tests {
