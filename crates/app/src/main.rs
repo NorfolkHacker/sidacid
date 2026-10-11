@@ -1,6 +1,7 @@
 //! SidAcid. Plan 1 ships only the offline demo renderer; the GUI arrives
 //! in Plan 2.
 
+mod audio;
 mod document;
 
 use std::path::Path;
