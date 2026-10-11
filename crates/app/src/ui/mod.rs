@@ -3,7 +3,11 @@
 //! to the audio thread as `Command`s through `AudioLink`.
 
 pub mod knob;
+mod pads;
 mod params_ui;
+mod step303;
+mod step_edit;
+mod synth_panel;
 pub mod theme;
 mod transport;
 
@@ -15,11 +19,14 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct ViewState {
-    #[allow(dead_code)] // used by Task 7
     /// Machine that keyboard shortcuts act on (0..4).
     pub focus: usize,
     #[allow(dead_code)] // used by Task 7
     pub message: Option<String>,
+    /// Bank shown on each machine's pads (0..8).
+    pub bank: [u8; 4],
+    /// Active 303 step-writer per synth.
+    pub writers: [Option<step_edit::StepWriter>; 2],
 }
 
 pub struct SidAcidApp {
@@ -28,7 +35,6 @@ pub struct SidAcidApp {
     pub(crate) audio_error: Option<String>,
     pub(crate) status: Status,
     pub(crate) pending: Vec<Command>,
-    #[allow(dead_code)] // used by Task 7
     pub(crate) view: ViewState,
 }
 
@@ -114,6 +120,7 @@ impl SidAcidApp {
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.pump();
+        self.handle_step_write(ctx);
         egui::TopBottomPanel::top("transport").show(ctx, |ui| self.transport(ui));
         if let Some(err) = self.audio_error.clone() {
             egui::TopBottomPanel::top("audio_banner").show(ctx, |ui| {
@@ -136,7 +143,10 @@ impl SidAcidApp {
     }
 
     fn rack(&mut self, ui: &mut egui::Ui) {
-        ui.label("Machines appear here.");
+        for synth in 0..2 {
+            self.synth_panel(ui, synth);
+            ui.add_space(6.0);
+        }
     }
 }
 
