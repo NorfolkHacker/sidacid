@@ -2,6 +2,7 @@
 //! panels below. The UI owns the project (`Document`); every change goes
 //! to the audio thread as `Command`s through `AudioLink`.
 
+mod drum_panel;
 pub mod knob;
 mod pads;
 mod params_ui;
@@ -153,6 +154,10 @@ impl SidAcidApp {
     fn rack(&mut self, ui: &mut egui::Ui) {
         for synth in 0..2 {
             self.synth_panel(ui, synth);
+            ui.add_space(6.0);
+        }
+        for kit in 0..2 {
+            self.drum_panel(ui, kit);
             ui.add_space(6.0);
         }
     }
