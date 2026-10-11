@@ -34,6 +34,23 @@ pub fn shortcut(key: Key, modifiers: Modifiers, step_writing: bool) -> Option<Sh
     (key == Key::Space && !step_writing).then_some(Shortcut::PlayStop)
 }
 
+/// The shortcut an input event triggers, if any. Key auto-repeat is ignored.
+fn event_shortcut(e: &egui::Event, step_writing: bool) -> Option<Shortcut> {
+    match e {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } => shortcut(*key, *modifiers, step_writing),
+        // Some platforms deliver Ctrl+C / Ctrl+V as clipboard events.
+        egui::Event::Copy => Some(Shortcut::Copy),
+        egui::Event::Paste(_) => Some(Shortcut::Paste),
+        _ => None,
+    }
+}
+
 impl SidAcidApp {
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.wants_keyboard_input() || self.view.confirm.is_some() || self.view.message.is_some()
@@ -44,18 +61,7 @@ impl SidAcidApp {
         let pressed: Vec<Shortcut> = ctx.input(|i| {
             i.events
                 .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => shortcut(*key, *modifiers, step_writing),
-                    // Some platforms deliver Ctrl+C / Ctrl+V as clipboard events.
-                    egui::Event::Copy => Some(Shortcut::Copy),
-                    egui::Event::Paste(_) => Some(Shortcut::Paste),
-                    _ => None,
-                })
+                .filter_map(|e| event_shortcut(e, step_writing))
                 .collect()
         });
         let (mut copied, mut pasted) = (false, false);
@@ -124,5 +130,21 @@ mod tests {
         );
         assert_eq!(shortcut(Key::Space, Modifiers::NONE, true), None);
         assert_eq!(shortcut(Key::Z, Modifiers::NONE, false), None);
+    }
+
+    #[test]
+    fn key_repeat_is_ignored() {
+        let space = |repeat| egui::Event::Key {
+            key: Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers: Modifiers::NONE,
+        };
+        assert_eq!(
+            event_shortcut(&space(false), false),
+            Some(Shortcut::PlayStop)
+        );
+        assert_eq!(event_shortcut(&space(true), false), None);
     }
 }
