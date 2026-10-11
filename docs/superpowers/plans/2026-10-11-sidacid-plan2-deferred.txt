@@ -1,0 +1,13 @@
+Task 1: minor (deferred): no test for lane param changing between patterns or both synths' lanes on same param
+Task 2: minor (deferred): muted channels meter 0 (undocumented); meter test skips ch 1/3; no positive guard test
+Task 3: minor (deferred): status cadence quantised to block size (~43/s at 512); host state not reset on ReplaceEngine; statuses share ring with disposals (UI must drain each frame); thin command-path tests
+Task 4: minor (deferred): no index preconditions documented; SynthPattern/DrumPattern edits not clamped; no-op edits recorded/dirty stays after undo-to-saved
+Task 5: minor (deferred): partial trailing frame untouched if data.len() % channels != 0
+Task 6: minor (deferred, FINAL-REVIEW ATTENTION): non-integer stored swing (e.g. 0.153) would be snapped by Slider max_decimals(0) on first redraw → spurious dirty edit; prefer applying only on real interaction
+Task 6: minor (deferred): scroll/double-click knob edits never close gesture (plan-mandated); SetParam coalescing can reorder around other cmds; pump failure paths untested; allow attrs above doc comments; swing no lost_focus end_gesture
+Task 7: minor (deferred): Space may re-activate focused note button (unverified); writer stays active across pattern select; stale clone for two edits same frame
+Task 7: minor (deferred): scroll end_gesture fires on first idle frame (wheel clicks while playing = separate undo entries; no debounce); misindented `if r.hovered()` line in step303.rs
+Task 8: minor (deferred): lane click in key column toggles step 0 (clamped x); drag across other notes erases them within gesture (undo restores); no undo-depth test for roll drag
+Task 9: minor (deferred): thin tests (only cycle_hit); Len edit doesn't set focus
+Task 10: minor (deferred): fault label lacks repaint-after for expiry; meter_fraction(NaN) passes NaN; fault_until untested
+Task 11: minor (deferred): save only adds .sidacid when no extension; no guard against concurrent exports; load_document doesn't reset focus/bank/scroll; dialog name parsed from title string; no tests for save/load/dialog paths
