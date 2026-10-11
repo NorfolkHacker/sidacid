@@ -3,6 +3,7 @@
 
 pub mod params;
 pub mod project;
+pub mod synth;
 
 #[cfg(test)]
 #[allow(dead_code)]
