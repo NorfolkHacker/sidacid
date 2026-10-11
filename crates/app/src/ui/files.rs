@@ -131,6 +131,7 @@ impl SidAcidApp {
         self.view.rec_last = None;
         self.view.record = false;
         self.view.song_cursor = 0;
+        self.view.song_sel_end = None;
         for m in 0..4 {
             self.view.bank[m] = self.doc.project.selected[m] / BANK_SIZE as u8;
         }

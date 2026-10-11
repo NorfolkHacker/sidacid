@@ -108,6 +108,124 @@ pub fn write_pattern_ref(song: &mut Song, bar: usize, machine: usize, slot: u8) 
     }
 }
 
+/// Moves every automation point at or after `from` by `delta` steps.
+fn shift_automation(song: &mut Song, from: u32, delta: i64) {
+    for lane in &mut song.automation {
+        let moved: Vec<(u32, f32)> = lane.points.range(from..).map(|(k, v)| (*k, *v)).collect();
+        for (k, _) in &moved {
+            lane.points.remove(k);
+        }
+        for (k, v) in moved {
+            let to = k as i64 + delta;
+            if to >= 0 {
+                lane.points.insert(to as u32, v);
+            }
+        }
+    }
+}
+
+pub fn insert_bars(
+    song: &mut Song,
+    at: usize,
+    bars: &[Bar],
+    synths: SynthBanks<'_>,
+    drums: DrumBanks<'_>,
+) {
+    let at = at.min(song.bars.len());
+    let room = MAX_BARS.saturating_sub(song.bars.len());
+    let bars = &bars[..bars.len().min(room)];
+    if bars.is_empty() {
+        return;
+    }
+    let start = bar_start_step(song, at, synths, drums);
+    let added: u32 = bars
+        .iter()
+        .map(|b| bar_steps(b, synths, drums) as u32)
+        .sum();
+    shift_automation(song, start, added as i64);
+    song.bars.splice(at..at, bars.iter().copied());
+    if let Some((a, b)) = song.loop_range {
+        let n = bars.len() as u16;
+        let bump = |i: u16| if i as usize >= at { i + n } else { i };
+        song.loop_range = Some((bump(a), bump(b)));
+    }
+}
+
+pub fn delete_bars(
+    song: &mut Song,
+    first: usize,
+    last: usize,
+    synths: SynthBanks<'_>,
+    drums: DrumBanks<'_>,
+) {
+    if song.bars.is_empty() {
+        return;
+    }
+    let last = last.min(song.bars.len() - 1);
+    if first > last {
+        return;
+    }
+    let start = bar_start_step(song, first, synths, drums);
+    let end = bar_start_step(song, last + 1, synths, drums);
+    for lane in &mut song.automation {
+        lane.points.retain(|k, _| *k < start || *k >= end);
+    }
+    shift_automation(song, end, -((end - start) as i64));
+    song.bars.drain(first..=last);
+    let n = (last - first + 1) as u16;
+    song.loop_range = song.loop_range.and_then(|(a, b)| {
+        let map = |i: u16| -> Option<u16> {
+            if (i as usize) < first {
+                Some(i)
+            } else if i as usize > last {
+                Some(i - n)
+            } else {
+                None
+            }
+        };
+        Some((map(a)?, map(b)?))
+    });
+}
+
+pub fn duplicate_bars(
+    song: &mut Song,
+    first: usize,
+    last: usize,
+    synths: SynthBanks<'_>,
+    drums: DrumBanks<'_>,
+) {
+    if first > last || last >= song.bars.len() {
+        return;
+    }
+    let copy: Vec<Bar> = song.bars[first..=last].to_vec();
+    let src_start = bar_start_step(song, first, synths, drums);
+    let src_end = bar_start_step(song, last + 1, synths, drums);
+    let points: Vec<(ParamId, Vec<(u32, f32)>)> = song
+        .automation
+        .iter()
+        .map(|l| {
+            (
+                l.param,
+                l.points
+                    .range(src_start..src_end)
+                    .map(|(k, v)| (k - src_start, *v))
+                    .collect(),
+            )
+        })
+        .collect();
+    let before = song.bars.len();
+    insert_bars(song, last + 1, &copy, synths, drums);
+    if song.bars.len() == before {
+        return;
+    }
+    let dst = bar_start_step(song, last + 1, synths, drums);
+    for (param, pts) in points {
+        for (offset, v) in pts {
+            write_automation(song, param, dst + offset, dst + offset, v);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)] // tests set one field of a default song
 mod tests {
@@ -203,5 +321,71 @@ mod tests {
         assert_eq!(refs, vec![0, 9, 9, 5, 0]);
         write_pattern_ref(&mut song, 99, 0, 1);
         assert_eq!(song.bars.len(), 5, "out-of-range bar is ignored");
+    }
+
+    fn sixteen_step_song(n: usize) -> (Project, ParamId) {
+        let mut p = Project::default();
+        p.song.bars = vec![Bar::default(); n];
+        (p, ParamId::Master(MasterParam::Level))
+    }
+
+    #[test]
+    fn insert_shifts_automation_and_loop() {
+        let (mut p, id) = sixteen_step_song(3);
+        write_automation(&mut p.song, id, 5, 5, 0.1);
+        write_automation(&mut p.song, id, 20, 20, 0.2);
+        p.song.loop_range = Some((1, 2));
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        insert_bars(&mut p.song, 1, &[Bar::default(), Bar::default()], s, d);
+        assert_eq!(p.song.bars.len(), 5);
+        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
+        assert_eq!(keys, vec![5, 52], "points from bar 1 on move by 32 steps");
+        assert_eq!(p.song.loop_range, Some((3, 4)));
+    }
+
+    #[test]
+    fn delete_removes_and_shifts_automation_and_clears_a_broken_loop() {
+        let (mut p, id) = sixteen_step_song(4);
+        write_automation(&mut p.song, id, 5, 5, 0.1);
+        write_automation(&mut p.song, id, 20, 20, 0.2);
+        write_automation(&mut p.song, id, 40, 40, 0.3);
+        p.song.loop_range = Some((2, 3));
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        delete_bars(&mut p.song, 1, 1, s, d);
+        assert_eq!(p.song.bars.len(), 3);
+        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
+        assert_eq!(keys, vec![5, 24]);
+        assert_eq!(
+            p.song.loop_range,
+            Some((1, 2)),
+            "loop after the cut moves back"
+        );
+        delete_bars(&mut p.song, 2, 2, s, d);
+        assert_eq!(p.song.loop_range, None, "loop endpoint deleted");
+    }
+
+    #[test]
+    fn duplicate_copies_bars_and_their_automation() {
+        let (mut p, id) = sixteen_step_song(2);
+        p.song.bars[1].mutes[2] = true;
+        write_automation(&mut p.song, id, 18, 18, 0.6);
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        duplicate_bars(&mut p.song, 1, 1, s, d);
+        assert_eq!(p.song.bars.len(), 3);
+        assert!(p.song.bars[2].mutes[2]);
+        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
+        assert_eq!(keys, vec![18, 34]);
+    }
+
+    #[test]
+    fn bar_count_is_capped() {
+        let (mut p, _) = sixteen_step_song(MAX_BARS - 1);
+        let snapshot = p.clone();
+        let (s, d) = banks(&snapshot);
+        insert_bars(&mut p.song, 0, &[Bar::default(); 5], s, d);
+        assert_eq!(p.song.bars.len(), MAX_BARS);
     }
 }

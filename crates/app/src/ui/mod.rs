@@ -12,6 +12,7 @@ mod params_ui;
 mod pianoroll;
 mod record;
 mod roll_edit;
+mod song_panel;
 mod step303;
 mod step_edit;
 mod synth_panel;
@@ -65,6 +66,10 @@ pub struct ViewState {
     pub record: bool,
     /// Song bar playback starts from, and the bar the song editor shows.
     pub song_cursor: usize,
+    /// Shift-click end of the song bar selection.
+    pub song_sel_end: Option<usize>,
+    /// Bars copied in the song editor.
+    pub song_clip: Option<Vec<acid_engine::project::Bar>>,
     /// Knob values heard while recording (saved knobs stay unchanged).
     pub live: std::collections::HashMap<acid_engine::params::ParamId, f32>,
     /// Last step recorded for the held knob.
@@ -250,6 +255,7 @@ impl SidAcidApp {
             ui.add_space(6.0);
         }
         self.mixer_panel(ui);
+        self.song_panel(ui);
     }
 }
 
@@ -553,5 +559,20 @@ mod tests {
         app.view.writers[1] = Some(step_edit::StepWriter::new(0));
         run_frames(&mut app, 1);
         assert!(app.view.writers[1].is_none());
+    }
+
+    #[test]
+    fn song_panel_draws_and_bar_ops_are_undoable() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        run_frames(&mut app, 2);
+        let mut song = app.doc.project.song.clone();
+        song.bars = vec![acid_engine::project::Bar::default(); 3];
+        app.apply_song(song, false);
+        app.view.song_cursor = 0;
+        app.view.song_sel_end = Some(1);
+        assert_eq!(app.song_selection(), Some((0, 1)));
+        run_frames(&mut app, 2);
+        app.doc.undo();
+        assert!(app.doc.project.song.bars.is_empty());
     }
 }

@@ -17,7 +17,6 @@ pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
 }
 
 /// "Synth 1 Cutoff", "808 BD Tune", "909 Volume", "Synth 2 Level", "Feedback", "Master Ratio".
-#[allow(dead_code)] // used by the song editor (later task)
 pub fn param_label(id: ParamId) -> String {
     const KITS: [&str; 2] = ["808", "909"];
     let pick = |names: &[&'static str], i: u8| names.get(i as usize).copied().unwrap_or("?");
