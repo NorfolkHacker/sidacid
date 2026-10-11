@@ -14,6 +14,18 @@ impl SidAcidApp {
         self.view.record && self.view.mode == Mode::Song && self.status.playing
     }
 
+    /// A fresh engine (after loading a document or restarting audio)
+    /// starts stopped in Pattern mode: make the transport view match.
+    pub(crate) fn reset_transport_view(&mut self) {
+        self.doc.end_gesture();
+        self.view.mode = Mode::Pattern;
+        self.view.record = false;
+        self.view.touched_knob = None;
+        self.view.live.clear();
+        self.view.rec_last = None;
+        self.view.was_playing = false;
+    }
+
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         if self.view.mode == mode {
             return;
@@ -43,6 +55,8 @@ impl SidAcidApp {
 
     pub(crate) fn play(&mut self) {
         if self.view.mode == Mode::Song {
+            let last = self.doc.project.song.bars.len().saturating_sub(1);
+            self.view.song_cursor = self.view.song_cursor.min(last);
             self.send(vec![Command::SetSongStart(self.view.song_cursor as u16)]);
         }
         self.send(vec![Command::Play]);

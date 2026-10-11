@@ -13,6 +13,18 @@ use eframe::egui;
 
 const MACHINES: [&str; 4] = ["Synth 1", "Synth 2", "808", "909"];
 
+/// A song-toolbar click, collected while drawing and applied afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SongAction {
+    Add,
+    Insert,
+    Duplicate(usize, usize),
+    Delete(usize, usize),
+    Loop(usize, usize),
+    Paste,
+    NoLoop,
+}
+
 impl SidAcidApp {
     /// Selected bar range (first, last), clamped to the song.
     pub(crate) fn song_selection(&self) -> Option<(usize, usize)> {
@@ -56,75 +68,88 @@ impl SidAcidApp {
     }
 
     fn song_toolbar(&mut self, ui: &mut egui::Ui) {
-        let project = self.doc.project.clone();
-        let (synths, drums) = song::banks(&project);
         let sel = self.song_selection();
+        let looped = self.doc.project.song.loop_range.is_some();
+        let clip_len = self.view.song_clip.as_ref().map(Vec::len);
+        let mut action = None;
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button("Add bar")
                 .on_hover_text("Append a bar using each machine's selected pattern")
                 .clicked()
             {
-                let mut s = project.song.clone();
-                let at = s.bars.len();
-                song::insert_bars(
-                    &mut s,
-                    at,
-                    &[self.bar_from_selected_patterns()],
-                    synths,
-                    drums,
-                );
-                self.view.song_cursor = at;
-                self.view.song_sel_end = None;
-                self.apply_song(s, false);
+                action = Some(SongAction::Add);
             }
             if ui.button("Insert").clicked() {
-                let mut s = project.song.clone();
-                let at = sel.map_or(s.bars.len(), |(a, _)| a);
-                let bar = sel.map_or_else(|| self.bar_from_selected_patterns(), |(a, _)| s.bars[a]);
-                song::insert_bars(&mut s, at, &[bar], synths, drums);
-                self.apply_song(s, false);
+                action = Some(SongAction::Insert);
             }
             if let Some((a, b)) = sel {
                 if ui.button("Duplicate").clicked() {
-                    let mut s = project.song.clone();
-                    song::duplicate_bars(&mut s, a, b, synths, drums);
-                    self.apply_song(s, false);
+                    action = Some(SongAction::Duplicate(a, b));
                 }
                 if ui.button("Delete").clicked() {
-                    let mut s = project.song.clone();
-                    song::delete_bars(&mut s, a, b, synths, drums);
-                    self.view.song_cursor = a.min(s.bars.len().saturating_sub(1));
-                    self.view.song_sel_end = None;
-                    self.apply_song(s, false);
+                    action = Some(SongAction::Delete(a, b));
                 }
                 if ui.button("Copy").clicked() {
-                    self.view.song_clip = Some(project.song.bars[a..=b].to_vec());
+                    self.view.song_clip = Some(self.doc.project.song.bars[a..=b].to_vec());
                 }
                 if ui.button("Loop selection").clicked() {
-                    let mut s = project.song.clone();
-                    s.loop_range = Some((a as u16, b as u16));
-                    self.apply_song(s, false);
+                    action = Some(SongAction::Loop(a, b));
                 }
             }
-            if let Some(clip) = self.view.song_clip.clone()
-                && ui.button(format!("Paste {} bars", clip.len())).clicked()
+            if let Some(n) = clip_len
+                && ui.button(format!("Paste {n} bars")).clicked()
             {
-                let mut s = project.song.clone();
-                let at = sel.map_or(s.bars.len(), |(_, b)| b + 1);
-                song::insert_bars(&mut s, at, &clip, synths, drums);
-                self.apply_song(s, false);
+                action = Some(SongAction::Paste);
             }
-            if project.song.loop_range.is_some() && ui.button("No loop").clicked() {
-                let mut s = project.song.clone();
-                s.loop_range = None;
-                self.apply_song(s, false);
+            if looped && ui.button("No loop").clicked() {
+                action = Some(SongAction::NoLoop);
             }
         });
+        if let Some(action) = action {
+            self.song_action(action, sel);
+        }
+    }
+
+    /// Applies a toolbar click. The song is cloned only here, never per frame.
+    pub(crate) fn song_action(&mut self, action: SongAction, sel: Option<(usize, usize)>) {
+        let new_bar = self.bar_from_selected_patterns();
+        let clip = match action {
+            SongAction::Paste => self.view.song_clip.clone().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let mut s = self.doc.project.song.clone();
+        let (synths, drums) = song::banks(&self.doc.project);
+        match action {
+            SongAction::Add => {
+                let at = s.bars.len();
+                song::insert_bars(&mut s, at, &[new_bar], synths, drums);
+                self.view.song_cursor = at;
+                self.view.song_sel_end = None;
+            }
+            SongAction::Insert => {
+                let at = sel.map_or(s.bars.len(), |(a, _)| a);
+                let bar = sel.map_or(new_bar, |(a, _)| s.bars[a]);
+                song::insert_bars(&mut s, at, &[bar], synths, drums);
+            }
+            SongAction::Duplicate(a, b) => song::duplicate_bars(&mut s, a, b, synths, drums),
+            SongAction::Delete(a, b) => {
+                song::delete_bars(&mut s, a, b, synths, drums);
+                self.view.song_cursor = a.min(s.bars.len().saturating_sub(1));
+                self.view.song_sel_end = None;
+            }
+            SongAction::Loop(a, b) => s.loop_range = Some((a as u16, b as u16)),
+            SongAction::Paste => {
+                let at = sel.map_or(s.bars.len(), |(_, b)| b + 1);
+                song::insert_bars(&mut s, at, &clip, synths, drums);
+            }
+            SongAction::NoLoop => s.loop_range = None,
+        }
+        self.apply_song(s, false);
     }
 
     fn song_timeline(&mut self, ui: &mut egui::Ui) {
-        let bars = self.doc.project.song.bars.clone();
+        let bars = &self.doc.project.song.bars;
         let loop_range = self.doc.project.song.loop_range;
         let sel = self.song_selection();
         let playing_bar = (self.status.playing && self.view.mode == Mode::Song)
@@ -190,6 +215,9 @@ impl SidAcidApp {
         };
         let mut bar = self.doc.project.song.bars[a];
         let selected = self.doc.project.selected;
+        // A record pass owns the open gesture: transpose edits made during
+        // it neither merge into it nor close it.
+        let recording = self.recording();
         let mut changed = false;
         let mut merge = false;
         let mut finished = false;
@@ -220,9 +248,9 @@ impl SidAcidApp {
                     );
                     if r.changed() {
                         changed = true;
-                        merge = true;
+                        merge = !recording && r.dragged();
                     }
-                    finished |= r.drag_stopped() || r.lost_focus();
+                    finished |= !recording && (r.drag_stopped() || r.lost_focus());
                 }
                 ui.end_row();
             }
@@ -238,32 +266,35 @@ impl SidAcidApp {
     }
 
     fn automation_list(&mut self, ui: &mut egui::Ui) {
-        let lanes: Vec<_> = self
-            .doc
-            .project
-            .song
-            .automation
-            .iter()
-            .map(|l| (l.param, l.points.len()))
-            .collect();
+        let lanes = &self.doc.project.song.automation;
         if lanes.is_empty() {
             return;
         }
+        // None = clear all; Some(param) = clear one lane.
+        let mut clear = None;
         ui.separator();
         ui.label(egui::RichText::new("Automation").strong());
-        for (param, points) in lanes {
+        for l in lanes {
             ui.horizontal(|ui| {
-                ui.label(format!("{}  ({points} steps)", param_label(param)));
+                ui.label(format!(
+                    "{}  ({} steps)",
+                    param_label(l.param),
+                    l.points.len()
+                ));
                 if ui.button("Clear").clicked() {
-                    let mut s = self.doc.project.song.clone();
-                    song::clear_automation(&mut s, param);
-                    self.apply_song(s, false);
+                    clear = Some(Some(l.param));
                 }
             });
         }
         if ui.button("Clear all automation").clicked() {
+            clear = Some(None);
+        }
+        if let Some(which) = clear {
             let mut s = self.doc.project.song.clone();
-            s.automation.clear();
+            match which {
+                Some(param) => song::clear_automation(&mut s, param),
+                None => s.automation.clear(),
+            }
             self.apply_song(s, false);
         }
     }

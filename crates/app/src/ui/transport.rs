@@ -48,7 +48,9 @@ impl SidAcidApp {
                 let bar = if self.status.playing {
                     self.status.song_bar as usize
                 } else {
-                    self.view.song_cursor
+                    // The bar playback will start from (see `play`).
+                    let last = self.doc.project.song.bars.len().saturating_sub(1);
+                    self.view.song_cursor.min(last)
                 };
                 ui.label(format!("Bar {}", bar + 1));
             }

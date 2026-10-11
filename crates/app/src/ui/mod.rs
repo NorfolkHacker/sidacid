@@ -111,6 +111,8 @@ impl SidAcidApp {
 
     pub(crate) fn start_audio(&mut self) {
         self.pending.clear();
+        // Whatever happens, the next engine is a fresh one.
+        self.reset_transport_view();
         match AudioLink::start(&self.doc.project) {
             Ok(link) => {
                 self.audio = Some(link);
@@ -245,6 +247,9 @@ impl SidAcidApp {
         if self.audio.is_some() {
             let ms = if self.status.playing { 16 } else { 150 };
             ctx.request_repaint_after(Duration::from_millis(ms));
+        } else if self.view.export_rx.is_some() {
+            // Keep the export progress moving even without audio.
+            ctx.request_repaint_after(Duration::from_millis(150));
         }
     }
 
@@ -403,6 +408,57 @@ mod tests {
         app.doc.project.song.loop_range = None;
         app.stop();
         assert_eq!(app.view.song_cursor, 0);
+    }
+
+    #[test]
+    fn loading_a_document_returns_the_transport_to_pattern_mode() {
+        let mut app = recording_app();
+        app.view.was_playing = true;
+        app.view.touched_knob = Some(acid_engine::params::ParamId::Master(
+            acid_engine::params::MasterParam::Level,
+        ));
+        app.view.rec_last = Some((
+            acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
+            3,
+        ));
+        app.load_document(Document::new(acid_engine::project::Project::default()));
+        assert_eq!(app.view.mode, acid_engine::sequencer::Mode::Pattern);
+        assert!(!app.view.record);
+        assert!(app.view.touched_knob.is_none() && app.view.rec_last.is_none());
+        assert!(!app.view.was_playing);
+    }
+
+    #[test]
+    fn transport_reset_closes_an_open_record_pass() {
+        let mut app = recording_app();
+        let mut song = app.doc.project.song.clone();
+        song.bars.pop();
+        app.apply_song(song.clone(), true);
+        app.view.live.insert(
+            acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
+            0.5,
+        );
+        app.reset_transport_view();
+        assert!(app.view.live.is_empty());
+        assert_eq!(app.view.mode, acid_engine::sequencer::Mode::Pattern);
+        song.bars.pop();
+        app.apply_song(song, true);
+        app.doc.undo();
+        assert_eq!(app.doc.project.song.bars.len(), 3, "separate undo steps");
+    }
+
+    #[test]
+    fn song_play_clamps_the_start_bar_to_the_song() {
+        let mut app = recording_app();
+        app.status.playing = false;
+        app.view.song_cursor = 9;
+        app.pending.clear();
+        app.play();
+        assert_eq!(app.view.song_cursor, 3);
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Command::SetSongStart(3), Command::Play]
+        ));
     }
 
     #[test]
@@ -590,6 +646,37 @@ mod tests {
         app.view.writers[1] = Some(step_edit::StepWriter::new(0));
         run_frames(&mut app, 1);
         assert!(app.view.writers[1].is_none());
+    }
+
+    #[test]
+    fn song_toolbar_actions_edit_the_song_as_undo_steps() {
+        use song_panel::SongAction;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.song_action(SongAction::Add, None);
+        app.song_action(SongAction::Add, None);
+        assert_eq!(app.doc.project.song.bars.len(), 2);
+        assert_eq!(app.view.song_cursor, 1);
+        app.song_action(SongAction::Loop(0, 1), Some((0, 1)));
+        assert_eq!(app.doc.project.song.loop_range, Some((0, 1)));
+        app.song_action(SongAction::Duplicate(0, 1), Some((0, 1)));
+        assert_eq!(app.doc.project.song.bars.len(), 4);
+        app.song_action(SongAction::Delete(1, 3), Some((1, 3)));
+        assert_eq!(app.doc.project.song.bars.len(), 1);
+        assert_eq!(app.view.song_cursor, 0);
+        let mut song = app.doc.project.song.clone();
+        acid_engine::song::write_automation(
+            &mut song,
+            acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
+            0,
+            3,
+            0.5,
+        );
+        app.apply_song(song, false);
+        run_frames(&mut app, 2);
+        for _ in 0..6 {
+            app.doc.undo();
+        }
+        assert!(app.doc.project.song.bars.is_empty());
     }
 
     #[test]

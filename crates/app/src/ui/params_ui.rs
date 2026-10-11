@@ -75,6 +75,12 @@ impl SidAcidApp {
             }
         );
         let out = knob::knob(ui, label, value, info.default, &tip, automated);
+        self.knob_gesture(id, out, recording);
+    }
+
+    /// Applies one frame of knob interaction: a new value, and the touch
+    /// that keeps automation off the knob while it is held.
+    pub(crate) fn knob_gesture(&mut self, id: ParamId, out: knob::KnobOutput, recording: bool) {
         if let Some(v) = out.value {
             if recording {
                 self.view.live.insert(id, v);
@@ -84,7 +90,9 @@ impl SidAcidApp {
                 self.send(cmds);
             }
         }
-        if out.touched {
+        // While recording, any edit (a scroll notch, a double-click reset)
+        // holds the knob for this frame so the value is written.
+        if out.touched || (recording && out.value.is_some()) {
             if self.view.touched_knob != Some(id) && recording {
                 self.send(vec![Command::Touch(id, true)]);
             }
@@ -101,6 +109,43 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_without_a_drag_counts_as_a_touch_while_recording() {
+        use crate::document::Document;
+        use acid_engine::params::MasterParam;
+        let id = ParamId::Master(MasterParam::Level);
+        let mut doc = Document::new(acid_engine::demo::demo_project());
+        doc.project.song.bars = vec![acid_engine::project::Bar::default(); 2];
+        let mut app = SidAcidApp::headless(doc);
+        app.view.mode = acid_engine::sequencer::Mode::Song;
+        app.view.record = true;
+        app.status.playing = true;
+        app.status.song_step = 5;
+        let edit = knob::KnobOutput {
+            value: Some(0.25),
+            released: false,
+            touched: false,
+        };
+        app.knob_gesture(id, edit, true);
+        assert_eq!(app.view.touched_knob, Some(id));
+        assert!(
+            app.pending
+                .iter()
+                .any(|c| matches!(c, Command::Touch(t, true) if *t == id))
+        );
+        app.record_automation();
+        let lane = acid_engine::song::lane(&app.doc.project.song, id).unwrap();
+        assert_eq!(lane.points.get(&5), Some(&0.25));
+        let idle = knob::KnobOutput {
+            value: None,
+            released: false,
+            touched: false,
+        };
+        app.knob_gesture(id, idle, true);
+        assert_eq!(app.view.touched_knob, None, "released on the next frame");
+        assert!(matches!(app.pending.last(), Some(Command::Touch(t, false)) if *t == id));
+    }
 
     #[test]
     fn param_labels_name_the_machine() {

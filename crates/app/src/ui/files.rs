@@ -134,10 +134,7 @@ impl SidAcidApp {
         self.view.roll_drag = [None; 2];
         self.view.scroll_accum = [0.0; 2];
         self.view.scrolling = [false; 2];
-        self.view.touched_knob = None;
-        self.view.live.clear();
-        self.view.rec_last = None;
-        self.view.record = false;
+        self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
         for m in 0..4 {
