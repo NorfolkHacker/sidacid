@@ -1,0 +1,9 @@
+Task 1: minor (deferred, fix in final wave): write_automation NaN passes clamp; write_pattern_ref panics on machine>=4 / no slot check; unbounded range loop; test gaps (bar_steps bad slot/len, pattern_ref from None)
+Task 2: minor (deferred): test gaps (song-end NoteOff, silent-track lane restore, loop-jump auto_sync, select ignored in song); slide/tie can hold across bar boundary (untested)
+Task 3: minor (deferred): no host tests for Touch/SetParamLive routing; rejected song swap silent to UI
+Task 4: minor (deferred): range clamp after leap-fold allows leaps up to 11 st at range edges (spec says 7); leap test asserts ≤12; test gaps (slide-only accent rule, octave die, short groove wrap)
+Task 5: minor (deferred): evolve can waste edits on open-hat steps; thin tests (style variety, short lengths, single-seed empty test); open_mutes_closed scans beyond len
+Task 6: minor (deferred): empty-song render test weak; MAX_SONG_SECONDS cap untested
+Task 7: minor (deferred): non-song edits (switches, BPM) during a pass split the undo step (plan-mandated); stop_recording doesn't clear touched_knob (dup Touch(false), no re-touch after re-arm); stale status.playing on fast stop-stop; test gaps (touch sequence, dedupe)
+Task 8: minor (deferred): empty lanes left after delete; per-frame project clone in song_toolbar; thin tests; loop semantics on insert inside loop unspecified
+Task 9: minor (deferred): no repaint during export without audio device; evolve undo test doesn't check change; groove pairing untested
