@@ -1,0 +1,8 @@
+[package]
+name = "acid-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sid-core = { path = "../sid-core" }

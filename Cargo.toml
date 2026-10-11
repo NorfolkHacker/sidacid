@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/sid-core", "crates/acid-engine", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+hound = "3.5"
+
+# Audio tests render seconds of sound; unoptimised builds are too slow.
+[profile.dev]
+opt-level = 2
