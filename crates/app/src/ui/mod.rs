@@ -4,6 +4,7 @@
 
 mod drum_panel;
 pub mod knob;
+mod mixer_panel;
 mod pads;
 mod params_ui;
 mod pianoroll;
@@ -36,6 +37,8 @@ pub struct ViewState {
     pub scrolling: [bool; 2],
     /// Mouse drag in progress in each synth's piano roll.
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
+    /// Egui time until which the "audio fault recovered" label shows.
+    pub fault_until: f64,
 }
 
 pub struct SidAcidApp {
@@ -100,7 +103,7 @@ impl SidAcidApp {
 
     /// Sends queued commands and reads events. Without audio, commands are
     /// dropped: the engine is rebuilt from the project when audio starts.
-    fn pump(&mut self) {
+    fn pump(&mut self, now: f64) {
         let Some(audio) = self.audio.as_mut() else {
             self.pending.clear();
             return;
@@ -116,6 +119,9 @@ impl SidAcidApp {
         self.pending = unsent;
         while let Some(event) = audio.poll() {
             if let Event::Status(status) = event {
+                if status.guard_fired {
+                    self.view.fault_until = now + 3.0;
+                }
                 self.status = status;
             }
             // Dispose events drop here, on the UI thread.
@@ -128,7 +134,7 @@ impl SidAcidApp {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
-        self.pump();
+        self.pump(ctx.input(|i| i.time));
         self.handle_step_write(ctx);
         egui::TopBottomPanel::top("transport").show(ctx, |ui| self.transport(ui));
         if let Some(err) = self.audio_error.clone() {
@@ -160,6 +166,7 @@ impl SidAcidApp {
             self.drum_panel(ui, kit);
             ui.add_space(6.0);
         }
+        self.mixer_panel(ui);
     }
 }
 
