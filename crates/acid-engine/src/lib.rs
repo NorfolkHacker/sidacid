@@ -8,6 +8,7 @@ pub mod demo;
 pub mod drums;
 pub mod engine;
 pub mod fx;
+pub mod host;
 pub mod mixer;
 pub mod params;
 pub mod project;

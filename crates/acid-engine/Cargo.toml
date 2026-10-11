@@ -9,3 +9,4 @@ sid-core = { path = "../sid-core" }
 serde.workspace = true
 ron.workspace = true
 hound.workspace = true
+rtrb.workspace = true
