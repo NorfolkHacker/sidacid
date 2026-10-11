@@ -12,6 +12,9 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 pub const COMMAND_CAPACITY: usize = 4096;
 pub const EVENT_CAPACITY: usize = 1024;
 const STATUS_RATE_HZ: f32 = 60.0;
+/// Event slots kept free for disposals: statuses never use the last ones,
+/// so a stalled UI cannot make replaced boxes leak.
+const DISPOSAL_RESERVE: usize = 256;
 /// Weight of the newest CPU-load sample in the smoothed value.
 const CPU_SMOOTHING: f32 = 0.1;
 
@@ -171,7 +174,8 @@ impl EngineHost {
             cpu: self.cpu,
             guard_fired: self.guard_fired,
         };
-        if self.events.push(Event::Status(status)).is_ok() {
+        if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
+        {
             self.meters = [0.0; 5];
             self.guard_fired = false;
         }
@@ -277,5 +281,21 @@ mod tests {
             .unwrap();
         }
         run(&mut host, 512);
+    }
+
+    #[test]
+    fn disposals_land_even_when_the_ui_never_reads_events() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        run(&mut host, SR as usize * 60);
+        tx.push(Command::SynthPattern {
+            synth: 0,
+            slot: 0,
+            pattern: Box::new(SynthPattern::default()),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        let disposed = std::iter::from_fn(|| rx.pop().ok())
+            .any(|e| matches!(e, Event::DisposeSynthPattern(_)));
+        assert!(disposed);
     }
 }
