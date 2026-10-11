@@ -78,6 +78,21 @@ impl SidAcidApp {
                             if r.drag_stopped() || r.lost_focus() {
                                 self.doc.end_gesture();
                             }
+                            ui.separator();
+                            if ui
+                                .button("Template")
+                                .on_hover_text("Replace with a fresh groove (undoable)")
+                                .clicked()
+                            {
+                                self.drum_template(kit);
+                            }
+                            if ui
+                                .button("Evolve")
+                                .on_hover_text("Small random changes (undoable)")
+                                .clicked()
+                            {
+                                self.evolve_drums(kit);
+                            }
                         });
                     });
                 self.drum_grid(ui, kit, slot);

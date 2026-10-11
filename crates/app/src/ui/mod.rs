@@ -48,6 +48,9 @@ pub struct ViewState {
     pub clipboard: Option<files::Clip>,
     pub export_open: bool,
     pub export_bars: u32,
+    pub export_song: bool,
+    pub export_progress: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    pub seed_counter: u64,
     pub export_rx: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub last_title: String,
     /// Text to place on the OS clipboard so Ctrl+V reaches the app.
@@ -276,6 +279,34 @@ pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dice_and_drum_buttons_are_single_undo_steps() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let before = app.doc.project.clone();
+        app.randomise_synth(0, acid_engine::random::Dice::ALL);
+        assert_ne!(
+            app.doc.project.synths[0].patterns[0],
+            before.synths[0].patterns[0]
+        );
+        app.doc.undo();
+        assert_eq!(app.doc.project, before);
+        app.drum_template(1);
+        assert_ne!(
+            app.doc.project.drums[1].patterns[0],
+            before.drums[1].patterns[0]
+        );
+        app.doc.undo();
+        app.evolve_drums(0);
+        app.doc.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn seeds_differ_between_clicks() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert_ne!(app.next_seed(), app.next_seed());
+    }
 
     fn recording_app() -> SidAcidApp {
         let mut doc = Document::new(acid_engine::demo::demo_project());

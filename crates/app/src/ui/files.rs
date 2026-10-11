@@ -27,6 +27,14 @@ fn project_dialog() -> rfd::FileDialog {
     rfd::FileDialog::new().add_filter("SidAcid project", &[EXTENSION])
 }
 
+pub fn export_status(song: bool, bars: u32, progress: Option<f32>) -> String {
+    match (song, progress) {
+        (true, Some(p)) => format!("Exporting song {:.0}%…", (p * 100.0).floor()),
+        (true, None) => "Exporting song…".to_string(),
+        (false, _) => format!("Exporting {bars} bars…"),
+    }
+}
+
 impl SidAcidApp {
     pub(crate) fn file_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
@@ -47,7 +55,7 @@ impl SidAcidApp {
                 self.save(true);
             }
             ui.separator();
-            if ui.button("Export loop to WAV…").clicked() {
+            if ui.button("Export to WAV…").clicked() {
                 ui.close_menu();
                 if self.view.export_bars == 0 {
                     self.view.export_bars = DEFAULT_EXPORT_BARS;
@@ -233,9 +241,11 @@ impl SidAcidApp {
     }
 
     pub(crate) fn start_export(&mut self) {
+        let song = self.view.export_song;
+        let kind = if song { "song" } else { "loop" };
         let Some(path) = rfd::FileDialog::new()
             .add_filter("WAV audio", &["wav"])
-            .set_file_name(format!("{}-loop.wav", self.doc.project.name))
+            .set_file_name(format!("{}-{kind}.wav", self.doc.project.name))
             .save_file()
         else {
             return;
@@ -243,22 +253,45 @@ impl SidAcidApp {
         let project = self.doc.project.clone();
         let bars = self.view.export_bars.clamp(1, 64);
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = acid_engine::render::render_patterns_wav(&project, bars, &path)
+        if song {
+            let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let shared = progress.clone();
+            std::thread::spawn(move || {
+                let result = acid_engine::render::render_song_wav(&project, &path, |f| {
+                    shared.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                })
                 .map(|()| path)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(result);
-        });
+                let _ = tx.send(result);
+            });
+            self.view.export_progress = Some(progress);
+            self.view.status_line = Some(export_status(true, 0, Some(0.0)));
+        } else {
+            std::thread::spawn(move || {
+                let result = acid_engine::render::render_patterns_wav(&project, bars, &path)
+                    .map(|()| path)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+            self.view.status_line = Some(export_status(false, bars, None));
+        }
         self.view.export_rx = Some(rx);
-        self.view.status_line = Some(format!("Exporting {bars} bars…"));
     }
 
     pub(crate) fn poll_export(&mut self) {
+        if self.view.export_rx.is_none() {
+            return;
+        }
+        if let Some(p) = &self.view.export_progress {
+            let f = f32::from_bits(p.load(std::sync::atomic::Ordering::Relaxed));
+            self.view.status_line = Some(export_status(true, 0, Some(f)));
+        }
         let Some(rx) = &self.view.export_rx else {
             return;
         };
         if let Ok(result) = rx.try_recv() {
             self.view.export_rx = None;
+            self.view.export_progress = None;
             self.view.status_line = None;
             self.view.message = Some(match result {
                 Ok(path) => format!("Exported {}", path.display()),
@@ -295,17 +328,30 @@ impl SidAcidApp {
         }
         if self.view.export_open {
             let mut open = true;
-            egui::Window::new("Export loop")
+            egui::Window::new("Export to WAV")
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.label("Renders the selected pattern of every machine.");
-                    ui.add(
-                        egui::DragValue::new(&mut self.view.export_bars)
-                            .range(1..=64)
-                            .suffix(" bars"),
+                    let has_song = !self.doc.project.song.bars.is_empty();
+                    if !has_song {
+                        self.view.export_song = false;
+                    }
+                    ui.radio_value(
+                        &mut self.view.export_song,
+                        false,
+                        "Loop of the selected patterns",
                     );
+                    ui.add_enabled_ui(has_song, |ui| {
+                        ui.radio_value(&mut self.view.export_song, true, "Whole song");
+                    });
+                    if !self.view.export_song {
+                        ui.add(
+                            egui::DragValue::new(&mut self.view.export_bars)
+                                .range(1..=64)
+                                .suffix(" bars"),
+                        );
+                    }
                     if ui.button("Export…").clicked() {
                         self.view.export_open = false;
                         self.start_export();
@@ -326,5 +372,17 @@ impl SidAcidApp {
                     }
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_status_text() {
+        assert_eq!(export_status(false, 8, None), "Exporting 8 bars…");
+        assert_eq!(export_status(true, 0, Some(0.425)), "Exporting song 42%…");
+        assert_eq!(export_status(true, 0, None), "Exporting song…");
     }
 }

@@ -105,10 +105,132 @@ impl SidAcidApp {
                             }
                         });
                     });
+                ui.horizontal(|ui| {
+                    use acid_engine::random::Dice;
+                    ui.label("Dice");
+                    let dice = [
+                        (
+                            "Notes",
+                            Dice {
+                                notes: true,
+                                ..Dice::default()
+                            },
+                        ),
+                        (
+                            "Accent",
+                            Dice {
+                                accent: true,
+                                ..Dice::default()
+                            },
+                        ),
+                        (
+                            "Slide",
+                            Dice {
+                                slide: true,
+                                ..Dice::default()
+                            },
+                        ),
+                        (
+                            "Rest",
+                            Dice {
+                                rest: true,
+                                ..Dice::default()
+                            },
+                        ),
+                        (
+                            "Octave",
+                            Dice {
+                                octave: true,
+                                ..Dice::default()
+                            },
+                        ),
+                        ("All", Dice::ALL),
+                    ];
+                    for (label, d) in dice {
+                        if ui
+                            .button(label)
+                            .on_hover_text("Randomise the selected pattern (undoable)")
+                            .clicked()
+                        {
+                            self.randomise_synth(synth, d);
+                        }
+                    }
+                });
                 match self.doc.project.synths[synth].view {
                     SeqView::Step303 => self.step303(ui, synth),
                     SeqView::PianoRoll => self.piano_roll(ui, synth),
                 }
             });
+    }
+}
+
+impl SidAcidApp {
+    /// A fresh seed per click (time mixed with a counter).
+    pub(crate) fn next_seed(&mut self) -> u64 {
+        self.view.seed_counter = self.view.seed_counter.wrapping_add(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        nanos ^ self.view.seed_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
+    pub(crate) fn randomise_synth(&mut self, synth: usize, dice: acid_engine::random::Dice) {
+        let seed = self.next_seed();
+        let p = &self.doc.project;
+        let slot = p.selected[synth];
+        let groove = &p.drums[synth].patterns[p.selected[2 + synth] as usize];
+        let pattern = acid_engine::random::randomise_synth(
+            &p.synths[synth].patterns[slot as usize],
+            dice,
+            groove,
+            seed,
+        );
+        let cmds = self.doc.apply(
+            crate::document::Edit::SynthPattern {
+                synth,
+                slot,
+                pattern: Box::new(pattern),
+            },
+            false,
+        );
+        self.send(cmds);
+        self.view.focus = synth;
+    }
+
+    pub(crate) fn drum_template(&mut self, kit: usize) {
+        let seed = self.next_seed();
+        let slot = self.doc.project.selected[2 + kit];
+        let length = self.doc.project.drums[kit].patterns[slot as usize].length;
+        let pattern = acid_engine::random::drum_template(seed, length);
+        let cmds = self.doc.apply(
+            crate::document::Edit::DrumPattern {
+                kit,
+                slot,
+                pattern: Box::new(pattern),
+            },
+            false,
+        );
+        self.send(cmds);
+        self.view.focus = 2 + kit;
+    }
+
+    pub(crate) fn evolve_drums(&mut self, kit: usize) {
+        let seed = self.next_seed();
+        let slot = self.doc.project.selected[2 + kit];
+        let pattern = acid_engine::random::evolve_drums(
+            &self.doc.project.drums[kit].patterns[slot as usize],
+            seed,
+        );
+        let cmds = self.doc.apply(
+            crate::document::Edit::DrumPattern {
+                kit,
+                slot,
+                pattern: Box::new(pattern),
+            },
+            false,
+        );
+        self.send(cmds);
+        self.view.focus = 2 + kit;
     }
 }
