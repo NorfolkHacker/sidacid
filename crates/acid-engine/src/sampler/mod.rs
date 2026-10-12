@@ -5,9 +5,11 @@
 // DSP loops index parallel arrays.
 #![allow(clippy::needless_range_loop)]
 
+pub mod decode;
 pub mod machine;
 pub mod sample;
 pub mod settings;
+pub mod slicing;
 pub mod slot;
 pub mod voice;
 
