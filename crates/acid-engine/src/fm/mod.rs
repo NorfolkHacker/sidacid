@@ -7,6 +7,9 @@
 
 pub mod algorithms;
 pub mod env;
+pub mod modulation;
+pub mod patch;
+pub mod sine;
 
 /// Operators per voice.
 pub const OPS: usize = crate::params::FM_OPS;
