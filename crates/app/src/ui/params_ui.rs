@@ -36,6 +36,8 @@ pub fn param_label(id: ParamId) -> String {
         ),
         ParamId::Fx(p) => p.name().to_string(),
         ParamId::Master(p) => format!("Master {}", p.name()),
+        ParamId::Fm(p) => format!("FM {}", p.name()),
+        ParamId::Sampler(p) => format!("Sampler {}", p.name()),
     }
 }
 
@@ -161,6 +163,17 @@ mod tests {
         assert_eq!(
             param_label(ParamId::Master(MasterParam::CompRatio)),
             "Master Ratio"
+        );
+        assert_eq!(
+            param_label(ParamId::Fm(acid_engine::params::FmParam::Volume)),
+            "FM Volume"
+        );
+        assert_eq!(
+            param_label(ParamId::Channel(
+                5,
+                acid_engine::params::ChannelParam::Level
+            )),
+            "Sampler Level"
         );
     }
 

@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 
 pub const SYNTHS: usize = 2;
 pub const KITS: usize = 2;
-pub const CHANNELS: usize = 4;
+pub const CHANNELS: usize = 6;
 pub const DRUM_INSTRUMENTS: usize = 8;
 /// Number of entries in `ParamId::all()`.
-pub const PARAM_COUNT: usize = 181;
+pub const PARAM_COUNT: usize = 215;
 
 macro_rules! param_enum {
     ($name:ident { $($var:ident => $label:literal),+ $(,)? }) => {
@@ -44,6 +44,8 @@ param_enum!(FxParam {
     DelayReturn => "Delay Return", ReverbSize => "Size", ReverbDamping => "Damping",
     ReverbWidth => "Width", ReverbReturn => "Reverb Return",
 });
+param_enum!(FmParam { Volume => "Volume" });
+param_enum!(SamplerParam { Volume => "Volume" });
 param_enum!(MasterParam {
     CompOn => "Comp On", CompThreshold => "Threshold", CompRatio => "Ratio",
     CompAttack => "Attack", CompRelease => "Release", CompMakeup => "Makeup",
@@ -58,6 +60,8 @@ pub enum ParamId {
     Channel(u8, ChannelParam),
     Fx(FxParam),
     Master(MasterParam),
+    Fm(FmParam),
+    Sampler(SamplerParam),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -146,6 +150,8 @@ impl ParamId {
                     F::ReverbReturn => cont(n, 0.6),
                 }
             }
+            ParamId::Fm(p) => cont(p.name(), 0.7),
+            ParamId::Sampler(p) => cont(p.name(), 0.7),
             ParamId::Master(p) => {
                 let n = p.name();
                 match p {
@@ -169,7 +175,7 @@ impl ParamId {
             ParamId::Drum(k, i, _) => (k as usize) < KITS && (i as usize) < DRUM_INSTRUMENTS,
             ParamId::Kit(k, _) => (k as usize) < KITS,
             ParamId::Channel(c, _) => (c as usize) < CHANNELS,
-            ParamId::Fx(_) | ParamId::Master(_) => true,
+            ParamId::Fm(_) | ParamId::Sampler(_) | ParamId::Fx(_) | ParamId::Master(_) => true,
         }
     }
 
@@ -185,6 +191,8 @@ impl ParamId {
         let channel_base = kit_base + KITS * per_kit;
         let fx_base = channel_base + CHANNELS * ChannelParam::ALL.len();
         let master_base = fx_base + FxParam::ALL.len();
+        let fm_base = master_base + MasterParam::ALL.len();
+        let sampler_base = fm_base + FmParam::ALL.len();
         Some(match self {
             ParamId::Synth(s, p) => s as usize * synth_n + p as usize,
             ParamId::Drum(k, i, p) => {
@@ -198,6 +206,8 @@ impl ParamId {
             }
             ParamId::Fx(p) => fx_base + p as usize,
             ParamId::Master(p) => master_base + p as usize,
+            ParamId::Fm(p) => fm_base + p as usize,
+            ParamId::Sampler(p) => sampler_base + p as usize,
         })
     }
 
@@ -217,6 +227,8 @@ impl ParamId {
         }
         v.extend(FxParam::ALL.iter().map(|&p| ParamId::Fx(p)));
         v.extend(MasterParam::ALL.iter().map(|&p| ParamId::Master(p)));
+        v.extend(FmParam::ALL.iter().map(|&p| ParamId::Fm(p)));
+        v.extend(SamplerParam::ALL.iter().map(|&p| ParamId::Sampler(p)));
         v
     }
 }
@@ -250,9 +262,21 @@ mod tests {
     #[test]
     fn registry_has_every_param_once() {
         let all = ParamId::all();
-        assert_eq!(all.len(), 2 * 15 + 2 * 8 * 4 + 2 * 2 + 4 * 16 + 11 + 8);
+        assert_eq!(
+            all.len(),
+            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 1 + 1
+        );
         let unique: HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
+    }
+
+    #[test]
+    fn fm_and_sampler_params_come_last() {
+        let all = ParamId::all();
+        assert_eq!(all[all.len() - 2], ParamId::Fm(FmParam::Volume));
+        assert_eq!(all[all.len() - 1], ParamId::Sampler(SamplerParam::Volume));
+        assert_eq!(ParamId::Fm(FmParam::Volume).info().default, 0.7);
+        assert!(ParamId::Channel(5, ChannelParam::Level).is_valid());
     }
 
     #[test]
@@ -271,7 +295,7 @@ mod tests {
         assert!(!ParamId::Drum(0, 8, DrumParam::Tune).is_valid());
         assert!(!ParamId::Drum(2, 0, DrumParam::Tune).is_valid());
         assert!(!ParamId::Kit(2, KitParam::Volume).is_valid());
-        assert!(!ParamId::Channel(4, ChannelParam::Level).is_valid());
+        assert!(!ParamId::Channel(6, ChannelParam::Level).is_valid());
     }
 
     #[test]

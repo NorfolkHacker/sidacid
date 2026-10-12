@@ -5,7 +5,7 @@
 //! freed on the UI thread, never on the audio thread.
 
 use crate::engine::Engine;
-use crate::params::ParamId;
+use crate::params::{CHANNELS, ParamId};
 use crate::project::{DrumPattern, Song, SynthPattern};
 use crate::sequencer::Mode;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
@@ -56,7 +56,7 @@ pub struct Status {
     pub patterns: [u8; 4],
     pub queued: [Option<u8>; 4],
     /// Peaks since the previous status: channels 0..4, then master.
-    pub meters: [f32; 5],
+    pub meters: [f32; CHANNELS + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
     pub guard_fired: bool,
@@ -80,7 +80,7 @@ pub struct EngineHost {
     events: Producer<Event>,
     status_every: usize,
     since_status: usize,
-    meters: [f32; 5],
+    meters: [f32; CHANNELS + 1],
     guard_fired: bool,
     cpu: f32,
 }
@@ -97,7 +97,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         events: event_tx,
         status_every,
         since_status: 0,
-        meters: [0.0; 5],
+        meters: [0.0; CHANNELS + 1],
         guard_fired: false,
         cpu: 0.0,
     };
@@ -200,7 +200,7 @@ impl EngineHost {
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
-            self.meters = [0.0; 5];
+            self.meters = [0.0; CHANNELS + 1];
             self.guard_fired = false;
         }
     }
@@ -276,7 +276,7 @@ mod tests {
         assert!((40..=61).contains(&statuses.len()), "{}", statuses.len());
         let last = statuses.last().unwrap();
         assert!(last.playing);
-        assert!(last.meters[4] > 0.0);
+        assert!(last.meters[CHANNELS] > 0.0);
     }
 
     #[test]

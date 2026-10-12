@@ -1,10 +1,10 @@
 //! Mixer strips, delay and reverb returns, master compressor, meters.
 
 use super::{SidAcidApp, theme};
-use acid_engine::params::{ChannelParam, FxParam, MasterParam, ParamId};
+use acid_engine::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId};
 use eframe::egui::{self, Sense, vec2};
 
-pub const CHANNEL_NAMES: [&str; 4] = ["Synth 1", "Synth 2", "808", "909"];
+pub const CHANNEL_NAMES: [&str; CHANNELS] = ["Synth 1", "Synth 2", "808", "909", "FM", "Sampler"];
 const METER_FLOOR_DB: f32 = -48.0;
 
 const STRIP: [(ChannelParam, &str); 16] = [
@@ -85,7 +85,7 @@ impl SidAcidApp {
                     .id_salt("mixer_row")
                     .show(ui, |ui| {
                         ui.horizontal_top(|ui| {
-                            for ch in 0..4u8 {
+                            for ch in 0..CHANNELS as u8 {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.strong(CHANNEL_NAMES[ch as usize]);
@@ -135,7 +135,7 @@ impl SidAcidApp {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.strong("Master");
-                                    meter(ui, self.status.meters[4]);
+                                    meter(ui, self.status.meters[CHANNELS]);
                                 });
                                 egui::Grid::new("master")
                                     .spacing([0.0, 0.0])

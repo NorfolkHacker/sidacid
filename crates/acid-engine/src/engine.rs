@@ -4,7 +4,7 @@
 
 use crate::drums::{DrumKit, KitKind};
 use crate::mixer::{Mixer, StereoBuf};
-use crate::params::{PARAM_COUNT, ParamId};
+use crate::params::{CHANNELS, PARAM_COUNT, ParamId};
 use crate::project::{DrumPattern, PATTERNS, Project, Song, SynthPattern};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
 use crate::song::MAX_BARS;
@@ -24,7 +24,7 @@ pub struct Engine {
     seq: Sequencer,
     synth_patterns: [Vec<SynthPattern>; 2],
     drum_patterns: [Vec<DrumPattern>; 2],
-    chans: [StereoBuf; 4],
+    chans: [StereoBuf; CHANNELS],
     events: Vec<SeqEvent>,
     /// Knob values set through `set_param`, indexed by `ParamId::index`.
     knobs: Vec<f32>,
@@ -292,7 +292,7 @@ impl Engine {
     }
 
     /// See `Mixer::take_meters`.
-    pub fn take_meters(&mut self) -> [f32; 5] {
+    pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
         self.mixer.take_meters()
     }
 
@@ -529,7 +529,7 @@ mod tests {
         e.select_pattern(9, 0);
         e.set_param(ParamId::Drum(0, 9, DrumParam::Tune), 0.5);
         e.set_param(ParamId::Synth(7, SynthParam::Cutoff), 0.5);
-        e.set_param(ParamId::Channel(4, ChannelParam::Level), 0.5);
+        e.set_param(ParamId::Channel(6, ChannelParam::Level), 0.5);
         e.set_param(ParamId::Kit(2, KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
@@ -646,8 +646,8 @@ mod tests {
         e.play();
         render(&mut e, 0.5);
         let m = e.take_meters();
-        assert!(m[0] > 0.01 && m[2] > 0.01 && m[4] > 0.01, "{m:?}");
-        assert!(m[4] <= 1.0 + 1e-6, "master is post-clip");
+        assert!(m[0] > 0.01 && m[2] > 0.01 && m[CHANNELS] > 0.01, "{m:?}");
+        assert!(m[CHANNELS] <= 1.0 + 1e-6, "master is post-clip");
         e.stop();
         render(&mut e, 5.0);
         e.take_meters();

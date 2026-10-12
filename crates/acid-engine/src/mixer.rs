@@ -85,7 +85,7 @@ pub struct Mixer {
     delay_send: StereoBuf,
     reverb_send: StereoBuf,
     wet: StereoBuf,
-    meters: [f32; 5],
+    meters: [f32; CHANNELS + 1],
 }
 
 impl Mixer {
@@ -104,7 +104,7 @@ impl Mixer {
             delay_send: StereoBuf::new(max_block),
             reverb_send: StereoBuf::new(max_block),
             wet: StereoBuf::new(max_block),
-            meters: [0.0; 5],
+            meters: [0.0; CHANNELS + 1],
         };
         for id in ParamId::all() {
             m.set_param(id, id.info().default);
@@ -118,7 +118,7 @@ impl Mixer {
 
     /// Peak levels since the last call: channels 0..4 post-fader, then
     /// the master after the final clip. Resets them.
-    pub fn take_meters(&mut self) -> [f32; 5] {
+    pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
         std::mem::take(&mut self.meters)
     }
 
@@ -158,7 +158,7 @@ impl Mixer {
     /// guard fired (output was silenced and effect state reset).
     pub fn process(
         &mut self,
-        chans: &mut [StereoBuf; 4],
+        chans: &mut [StereoBuf; CHANNELS],
         n: usize,
         out_l: &mut [f32],
         out_r: &mut [f32],
@@ -235,7 +235,7 @@ impl Mixer {
         }
         for v in out_l.iter_mut().chain(out_r.iter_mut()) {
             *v = v.clamp(-1.0, 1.0);
-            self.meters[4] = self.meters[4].max(v.abs());
+            self.meters[CHANNELS] = self.meters[CHANNELS].max(v.abs());
         }
         false
     }
@@ -249,21 +249,21 @@ mod tests {
     const SR: f32 = 44_100.0;
     const N: usize = 512;
 
-    fn chans_with(ch: usize, value: f32) -> [StereoBuf; 4] {
-        let mut c: [StereoBuf; 4] = std::array::from_fn(|_| StereoBuf::new(N));
+    fn chans_with(ch: usize, value: f32) -> [StereoBuf; CHANNELS] {
+        let mut c: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
         c[ch].l.fill(value);
         c[ch].r.fill(value);
         c
     }
 
-    fn run(m: &mut Mixer, chans: &mut [StereoBuf; 4]) -> (Vec<f32>, Vec<f32>) {
+    fn run(m: &mut Mixer, chans: &mut [StereoBuf; CHANNELS]) -> (Vec<f32>, Vec<f32>) {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
         m.process(chans, N, &mut l, &mut r);
         (l, r)
     }
 
-    fn guard_fired(m: &mut Mixer, chans: &mut [StereoBuf; 4]) -> bool {
+    fn guard_fired(m: &mut Mixer, chans: &mut [StereoBuf; CHANNELS]) -> bool {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
         m.process(chans, N, &mut l, &mut r)
@@ -315,7 +315,7 @@ mod tests {
         m.set_param(ParamId::Channel(0, ChannelParam::DelaySend), 1.0);
         m.set_param(ParamId::Fx(FxParam::DelaySync), 0.0);
         m.set_param(ParamId::Fx(FxParam::DelayMs), 0.0); // 10 ms = 441 samples
-        let mut chans: [StereoBuf; 4] = std::array::from_fn(|_| StereoBuf::new(N));
+        let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
         chans[0].l[0] = 0.5;
         chans[0].r[0] = 0.5;
         let (l, _) = run(&mut m, &mut chans);
@@ -328,7 +328,7 @@ mod tests {
         for c in 0..4 {
             m.set_param(ParamId::Channel(c, ChannelParam::Level), 1.0);
         }
-        let mut chans: [StereoBuf; 4] = std::array::from_fn(|_| StereoBuf::new(N));
+        let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
         for c in &mut chans {
             c.l.fill(5.0);
             c.r.fill(5.0);
