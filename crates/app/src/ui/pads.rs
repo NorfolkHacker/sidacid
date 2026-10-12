@@ -33,13 +33,54 @@ impl SidAcidApp {
                         text = text.color(theme::ACID).strong();
                     }
                     if ui.selectable_label(slot == selected, text).clicked() {
-                        let cmds = self.doc.select_pattern(machine, slot);
-                        self.send(cmds);
-                        self.view.focus = machine;
-                        self.record_pattern_change(machine, slot);
+                        self.select_pad(machine, slot);
                     }
                 }
             });
         });
+    }
+}
+
+impl SidAcidApp {
+    /// A pattern pad click: select the pattern (recorded into the song
+    /// while recording). A synth's step-writer stops when another pattern
+    /// is selected, so keys never land in a pattern the user did not click.
+    pub(crate) fn select_pad(&mut self, machine: usize, slot: u8) {
+        let changed = self.doc.project.selected[machine] != slot;
+        let cmds = self.doc.select_pattern(machine, slot);
+        self.send(cmds);
+        self.view.focus = machine;
+        if changed && machine < self.view.writers.len() {
+            self.view.writers[machine] = None;
+        }
+        self.record_pattern_change(machine, slot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::step_edit::StepWriter;
+
+    #[test]
+    fn selecting_another_pattern_stops_that_synths_step_writer() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let slot = app.doc.project.selected[0];
+        app.view.writers[0] = Some(StepWriter::new(3));
+        app.select_pad(0, slot);
+        assert!(
+            app.view.writers[0].is_some(),
+            "the same pattern: keep writing"
+        );
+        app.select_pad(2, slot + 1);
+        assert!(
+            app.view.writers[0].is_some(),
+            "a drum pad leaves the synth alone"
+        );
+        app.select_pad(0, slot + 1);
+        assert!(app.view.writers[0].is_none());
+        assert_eq!(app.doc.project.selected[0], slot + 1);
+        assert_eq!(app.view.focus, 0);
     }
 }

@@ -18,9 +18,11 @@ impl SidAcidApp {
     /// starts stopped in Pattern mode: make the transport view match.
     pub(crate) fn reset_transport_view(&mut self) {
         self.doc.end_gesture();
+        self.doc.end_pass();
         self.view.mode = Mode::Pattern;
         self.view.record = false;
         self.view.touched_knob = None;
+        self.view.engine_touch = None;
         self.view.live.clear();
         self.view.rec_last = None;
         self.view.was_playing = false;
@@ -33,7 +35,14 @@ impl SidAcidApp {
         self.stop_recording();
         self.view.record = false;
         self.view.mode = mode;
-        self.send(vec![Command::Stop, Command::SetMode(mode)]);
+        // A Stop while stopped would cut tails and auditions, and use up
+        // the engine's "first stop after a song end only releases".
+        if self.status.playing {
+            self.send(vec![Command::Stop]);
+            // Until a status says otherwise (a fast second Stop must see it).
+            self.status.playing = false;
+        }
+        self.send(vec![Command::SetMode(mode)]);
     }
 
     pub(crate) fn set_record(&mut self, on: bool) {
@@ -44,11 +53,12 @@ impl SidAcidApp {
     }
 
     /// Ends the current record pass: one undo step, live values dropped.
+    /// A knob still held stays held, but the engine no longer is told so
+    /// (song automation plays it again until recording resumes).
     pub(crate) fn stop_recording(&mut self) {
         self.doc.end_gesture();
-        if let Some(id) = self.view.touched_knob {
-            self.send(vec![Command::Touch(id, false)]);
-        }
+        self.doc.end_pass();
+        self.release_engine_touch();
         self.view.live.clear();
         self.view.rec_last = None;
     }
@@ -77,6 +87,9 @@ impl SidAcidApp {
             self.stop_recording();
         }
         self.send(vec![Command::Stop]);
+        // Until a status says otherwise: a second Stop before the next
+        // status returns to the start, and nothing more is recorded.
+        self.status.playing = false;
     }
 
     /// Writes the held knob's live value into the song up to the current step.
@@ -103,12 +116,9 @@ impl SidAcidApp {
         };
         let mut new_song = self.doc.project.song.clone();
         song::write_automation(&mut new_song, id, from, step, value);
-        let cmds = self.doc.apply(
-            Edit::Song {
-                song: Box::new(new_song),
-            },
-            true,
-        );
+        let cmds = self.doc.record(Edit::Song {
+            song: Box::new(new_song),
+        });
         self.send(cmds);
         self.view.rec_last = Some((id, step));
     }
@@ -124,12 +134,9 @@ impl SidAcidApp {
         }
         let mut new_song = self.doc.project.song.clone();
         song::write_pattern_ref(&mut new_song, bar, machine, slot);
-        let cmds = self.doc.apply(
-            Edit::Song {
-                song: Box::new(new_song),
-            },
-            true,
-        );
+        let cmds = self.doc.record(Edit::Song {
+            song: Box::new(new_song),
+        });
         self.send(cmds);
     }
 
@@ -140,9 +147,27 @@ impl SidAcidApp {
             return;
         }
         self.view.touched_knob = None;
-        self.send(vec![Command::Touch(id, false)]);
-        if !self.recording() {
+        self.release_engine_touch();
+        // A wheel gesture's step closes once the wheel rests instead.
+        if !self.recording() && !self.knob_scroll_open(id) {
             self.doc.end_gesture();
         }
+    }
+
+    /// Tells the engine the held knob is let go, once.
+    pub(crate) fn release_engine_touch(&mut self) {
+        if let Some(id) = self.view.engine_touch.take() {
+            self.send(vec![Command::Touch(id, false)]);
+        }
+    }
+
+    /// Tells the engine `id` is held (while recording), once per hold.
+    pub(crate) fn engine_touch(&mut self, id: ParamId) {
+        if self.view.engine_touch == Some(id) {
+            return;
+        }
+        self.release_engine_touch();
+        self.view.engine_touch = Some(id);
+        self.send(vec![Command::Touch(id, true)]);
     }
 }

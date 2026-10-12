@@ -98,6 +98,8 @@ pub enum Edit {
         data: Option<Box<SlotData>>,
         values: Vec<(ParamId, f32)>,
     },
+    /// Several edits as one undo step (a record pass), applied in order.
+    Group(Vec<Edit>),
     /// Changing a loaded slot's zone, slices, mode or markers.
     SlotMeta {
         slot: usize,
@@ -126,6 +128,7 @@ enum MergeKey {
     FmBank,
     SamplerSlot(usize),
     SlotMeta(usize),
+    Group,
 }
 
 fn merge_key(edit: &Edit) -> MergeKey {
@@ -156,6 +159,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::FmBank { .. } => MergeKey::FmBank,
         Edit::SamplerSlot { slot, .. } => MergeKey::SamplerSlot(*slot),
         Edit::SlotMeta { slot, .. } => MergeKey::SlotMeta(*slot),
+        Edit::Group(_) => MergeKey::Group,
     }
 }
 
@@ -170,6 +174,7 @@ struct Step {
 fn edit_bytes(edit: &Edit) -> usize {
     match edit {
         Edit::SamplerSlot { data: Some(d), .. } => d.pcm.len() * std::mem::size_of::<i16>(),
+        Edit::Group(edits) => edits.iter().map(edit_bytes).sum(),
         _ => 0,
     }
 }
@@ -191,6 +196,8 @@ pub struct Document {
     unsaved_selection: bool,
     /// Sample bytes the undo history may hold; see `UNDO_SAMPLE_BYTES`.
     undo_byte_budget: usize,
+    /// The newest undo step is the open record pass's `Edit::Group`.
+    pass_open: bool,
 }
 
 /// Sample data (PCM in `SlotData`) the undo history may hold. Twice the
@@ -211,6 +218,7 @@ impl Document {
             saved_generation: 0,
             unsaved_selection: false,
             undo_byte_budget: UNDO_SAMPLE_BYTES,
+            pass_open: false,
         }
     }
 
@@ -245,11 +253,57 @@ impl Document {
                 edit: inverse,
                 generation,
             });
+            self.pass_open = false;
         }
         self.gesture = merge.then_some(key);
         self.redo.clear();
         self.trim_undo();
         cmds
+    }
+
+    /// Applies an edit made during a record pass (recorded song changes,
+    /// switches, tempo and swing). All of a pass's edits form one undo
+    /// step until `end_pass`. An ordinary `apply` in between closes that
+    /// step, so the rest of the pass becomes a step of its own: undo never
+    /// reorders history. An edit that changes nothing is not recorded.
+    pub fn record(&mut self, edit: Edit) -> Vec<Command> {
+        let inverse = self.apply_raw(edit);
+        let cmds = self.commands_for(&inverse);
+        if self.is_no_op(&inverse) {
+            return cmds;
+        }
+        self.gesture = None;
+        self.last_generation += 1;
+        let generation = self.last_generation;
+        match self.undo.last_mut() {
+            Some(Step {
+                edit: Edit::Group(edits),
+                generation: top,
+            }) if self.pass_open => {
+                // Undo needs only each target's value from before the pass.
+                let key = merge_key(&inverse);
+                if !edits.iter().any(|e| merge_key(e) == key) {
+                    edits.push(inverse);
+                }
+                *top = generation;
+            }
+            _ => {
+                self.undo.push(Step {
+                    edit: Edit::Group(vec![inverse]),
+                    generation,
+                });
+                self.pass_open = true;
+            }
+        }
+        self.redo.clear();
+        self.trim_undo();
+        cmds
+    }
+
+    /// Closes the record pass: later edits start new undo steps.
+    pub fn end_pass(&mut self) {
+        self.pass_open = false;
+        self.gesture = None;
     }
 
     /// Drops the oldest steps past `UNDO_LIMIT` or the sample byte budget.
@@ -358,6 +412,12 @@ impl Document {
         self.gesture = None;
     }
 
+    /// Changes with each edit that changes the project (not undo/redo):
+    /// equal serials mean no edit came in between.
+    pub fn edit_serial(&self) -> u64 {
+        self.last_generation
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -368,6 +428,7 @@ impl Document {
 
     pub fn undo(&mut self) -> Vec<Command> {
         self.gesture = None;
+        self.pass_open = false;
         let Some(step) = self.undo.pop() else {
             return Vec::new();
         };
@@ -382,6 +443,7 @@ impl Document {
 
     pub fn redo(&mut self) -> Vec<Command> {
         self.gesture = None;
+        self.pass_open = false;
         let Some(step) = self.redo.pop() else {
             return Vec::new();
         };
@@ -597,6 +659,12 @@ impl Document {
             Edit::FmBank { bank } => Edit::FmBank {
                 bank: std::mem::replace(&mut p.fm.bank, bank),
             },
+            Edit::Group(edits) => {
+                let mut inverses: Vec<Edit> =
+                    edits.into_iter().map(|e| self.apply_raw(e)).collect();
+                inverses.reverse();
+                Edit::Group(inverses)
+            }
         }
     }
 
@@ -669,6 +737,7 @@ impl Document {
                         .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
                 ),
             }],
+            Edit::Group(edits) => edits.iter().flat_map(|e| self.commands_for(e)).collect(),
         }
     }
 }
@@ -764,6 +833,102 @@ mod tests {
         d.redo();
         assert_eq!(d.project, after);
         assert!(!d.can_redo());
+    }
+
+    /// The project's song with one automation point written at `step`.
+    fn song_with_point(d: &Document, step: u32, value: f32) -> Edit {
+        let mut song = d.project.song.clone();
+        acid_engine::song::write_automation(&mut song, CUTOFF, step, step, value);
+        Edit::Song {
+            song: Box::new(song),
+        }
+    }
+
+    const WAVE: ParamId = ParamId::Synth(0, SynthParam::Wave);
+
+    #[test]
+    fn a_record_pass_is_one_undo_step_across_switch_and_bpm_edits() {
+        let mut d = doc();
+        let before = d.project.clone();
+        let cmds = d.record(song_with_point(&d, 0, 0.5));
+        assert!(matches!(cmds.as_slice(), [Command::Song(_)]));
+        let cmds = d.record(Edit::Param {
+            id: WAVE,
+            value: 1.0,
+        });
+        assert!(matches!(cmds.as_slice(), [Command::SetParam(id, v)] if id == &WAVE && v == &1.0));
+        d.record(Edit::Bpm(150.0));
+        d.record(song_with_point(&d, 1, 0.75));
+        d.record(Edit::Bpm(151.0));
+        d.record(Edit::Swing(0.25));
+        d.end_pass();
+        let after = d.project.clone();
+        assert_eq!(after.bpm, 151.0);
+        let cmds = d.undo();
+        assert_eq!(d.project, before, "one undo step reverts the whole pass");
+        assert!(!d.can_undo());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::SetBpm(b) if *b == before.bpm))
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Command::Song(_))));
+        d.redo();
+        assert_eq!(d.project, after, "redo brings the whole pass back");
+    }
+
+    #[test]
+    fn record_pass_steps_keep_dirty_tracking() {
+        let mut d = doc();
+        d.record(song_with_point(&d, 0, 0.5));
+        d.mark_saved();
+        d.record(Edit::Param {
+            id: WAVE,
+            value: 1.0,
+        });
+        assert!(d.is_dirty(), "an edit merged into the pass after a save");
+        d.end_pass();
+        d.mark_saved();
+        d.undo();
+        assert!(d.is_dirty());
+        d.redo();
+        assert!(!d.is_dirty(), "redo returns to the saved state");
+        let same = d.project.bpm;
+        d.record(Edit::Bpm(same));
+        assert!(
+            !d.is_dirty(),
+            "a no-op edit leaves the pass and dirty state alone"
+        );
+        d.record(Edit::Bpm(99.0));
+        d.end_pass();
+        d.undo();
+        assert_eq!(d.project.bpm, same, "a later pass is its own step");
+        assert!(!d.is_dirty());
+        assert!(d.can_undo());
+    }
+
+    #[test]
+    fn an_ordinary_edit_closes_the_pass_step() {
+        let mut d = doc();
+        d.record(song_with_point(&d, 0, 0.5));
+        let mid = d.project.song.clone();
+        d.apply(
+            Edit::SynthLength {
+                synth: 0,
+                slot: 0,
+                length: 3,
+            },
+            false,
+        );
+        d.record(song_with_point(&d, 1, 0.5));
+        d.undo();
+        assert_eq!(
+            d.project.song, mid,
+            "the pass splits around the pattern edit"
+        );
+        d.undo();
+        d.undo();
+        assert!(d.project.song.automation.is_empty());
+        assert!(!d.can_undo());
     }
 
     #[test]

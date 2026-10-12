@@ -50,8 +50,10 @@ pub struct ViewState {
     pub writers: [Option<step_edit::StepWriter>; 2],
     /// Scroll distance accumulated per synth toward the next pitch notch.
     pub scroll_accum: [f32; 2],
-    /// Whether a note cell of each synth was scrolled on the previous frame.
-    pub scrolling: [bool; 2],
+    /// Open pitch-scroll gesture per synth's 303 editor.
+    pub scroll_at: [Option<step_edit::ScrollGesture>; 2],
+    /// Open wheel gesture on a knob (its undo step closes after a rest).
+    pub knob_scroll: Option<(acid_engine::params::ParamId, step_edit::ScrollGesture)>,
     /// Mouse drag in progress in each synth's piano roll.
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
     /// Egui time until which the "audio fault recovered" label shows.
@@ -71,6 +73,8 @@ pub struct ViewState {
     pub clip_text: Option<String>,
     /// Knob whose gesture (drag, scroll, reset) is still open.
     pub touched_knob: Option<acid_engine::params::ParamId>,
+    /// Knob the engine was told is held (`Command::Touch`), while recording.
+    pub engine_touch: Option<acid_engine::params::ParamId>,
     /// Non-blocking progress text shown at the right of the transport.
     pub status_line: Option<String>,
     /// Save waiting for its "Saving…" status to show.
@@ -193,55 +197,63 @@ impl SidAcidApp {
             self.pending.clear();
             return;
         };
-        let mut unsent = Vec::new();
-        for cmd in self.pending.drain(..) {
-            if !unsent.is_empty() {
-                unsent.push(cmd);
-            } else if let Err(cmd) = audio.send(cmd) {
-                unsent.push(cmd);
-            }
-        }
-        self.pending = unsent;
+        send_in_order(&mut self.pending, &mut |cmd| audio.send(cmd));
     }
 
     /// Reads events, then sends queued commands.
     fn pump(&mut self, now: f64) {
-        let Some(audio) = self.audio.as_mut() else {
+        if self.audio.is_none() {
             self.pending.clear();
             return;
-        };
-        while let Some(event) = audio.poll() {
+        }
+        while let Some(event) = self.audio.as_mut().and_then(AudioLink::poll) {
             if let Event::Status(status) = event {
-                if status.guard_fired {
-                    self.view.fault_until = now + 3.0;
-                }
-                // UI edits are bounded and loaded songs validated, so a
-                // refused song means the UI and engine disagree: a bug.
-                debug_assert!(!status.song_rejected, "the engine refused a song");
-                self.status = status;
-                self.view.auto_retried = false;
+                self.on_status(status, now);
             }
             // Dispose events drop here, on the UI thread.
         }
-        let failed = audio.has_failed();
+        let failed = self.audio.as_ref().is_some_and(AudioLink::has_failed);
         self.flush_pending();
         if failed {
-            self.audio = None;
-            self.status = Status::default();
-            self.audio_error = Some("The audio device stopped.".into());
-            self.view.audio_lost = true;
+            self.on_audio_failed();
         }
+    }
+
+    /// A status from the audio thread: audio is running fine.
+    fn on_status(&mut self, status: Status, now: f64) {
+        if status.guard_fired {
+            self.view.fault_until = now + 3.0;
+        }
+        // UI edits are bounded and loaded songs validated, so a
+        // refused song means the UI and engine disagree: a bug.
+        debug_assert!(!status.song_rejected, "the engine refused a song");
+        self.status = status;
+        self.view.auto_retried = false;
+    }
+
+    /// The audio stream failed: drop it and report it.
+    fn on_audio_failed(&mut self) {
+        self.audio = None;
+        self.status = Status::default();
+        self.audio_error = Some("The audio device stopped.".into());
+        self.view.audio_lost = true;
+    }
+
+    /// Takes a reported stream failure. True when audio should restart by
+    /// itself: once, until a status shows audio running again.
+    fn take_audio_retry(&mut self) -> bool {
+        if !std::mem::take(&mut self.view.audio_lost) || self.view.auto_retried {
+            return false;
+        }
+        self.view.auto_retried = true;
+        true
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.pump(ctx.input(|i| i.time));
         self.run_queued_save();
-        if self.view.audio_lost {
-            self.view.audio_lost = false;
-            if !self.view.auto_retried {
-                self.view.auto_retried = true;
-                self.start_audio();
-            }
+        if self.take_audio_retry() {
+            self.start_audio();
         }
         self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
@@ -284,6 +296,10 @@ impl SidAcidApp {
         });
         self.dialogs(ctx);
         self.tick_queued_save(ctx);
+        if let Some(left) = self.tick_scroll_gestures(ctx.input(|i| i.time)) {
+            // Keep frames coming so the gesture ends without more input.
+            ctx.request_repaint_after(Duration::from_secs_f64(left));
+        }
         self.flush_pending();
         if self.audio.is_some() {
             let ms = if self.status.playing { 16 } else { 150 };
@@ -318,6 +334,23 @@ impl eframe::App for SidAcidApp {
     }
 }
 
+/// Sends commands from the front of `pending` until `send` refuses one;
+/// that one and everything after it stay queued, in order.
+fn send_in_order(
+    pending: &mut Vec<Command>,
+    send: &mut impl FnMut(Command) -> Result<(), Command>,
+) {
+    let mut unsent = Vec::new();
+    for cmd in pending.drain(..) {
+        if !unsent.is_empty() {
+            unsent.push(cmd);
+        } else if let Err(cmd) = send(cmd) {
+            unsent.push(cmd);
+        }
+    }
+    *pending = unsent;
+}
+
 #[cfg(test)]
 pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
     let ctx = egui::Context::default();
@@ -329,6 +362,7 @@ pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Edit;
     use acid_engine::project::Project;
 
     #[test]
@@ -348,9 +382,131 @@ mod tests {
             before.drums[1].patterns[0]
         );
         app.doc.undo();
-        app.evolve_drums(0);
+        // Evolve leaves some seeds' patterns as they were: use one that changes it.
+        let groove = &before.drums[0].patterns[before.selected[2] as usize];
+        let seed = (0..100)
+            .find(|&s| acid_engine::random::evolve_drums(groove, s) != *groove)
+            .expect("some seed evolves the groove");
+        app.evolve_drums_seeded(0, seed);
+        assert_ne!(app.doc.project, before, "evolve changed the pattern");
         app.doc.undo();
         assert_eq!(app.doc.project, before);
+        assert!(!app.doc.can_undo(), "each button was one undo step");
+    }
+
+    #[test]
+    fn dice_pair_each_synth_with_its_drum_kits_selected_groove() {
+        use acid_engine::random::Dice;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.doc.select_pattern(3, 3);
+        let p = app.doc.project.clone();
+        let rest = Dice {
+            rest: true,
+            ..Dice::default()
+        };
+        let slot = p.selected[1] as usize;
+        let expected = acid_engine::random::randomise_synth(
+            &p.synths[1].patterns[slot],
+            rest,
+            &p.drums[1].patterns[3],
+            42,
+        );
+        let other_groove = acid_engine::random::randomise_synth(
+            &p.synths[1].patterns[slot],
+            rest,
+            &p.drums[0].patterns[p.selected[2] as usize],
+            42,
+        );
+        assert_ne!(expected, other_groove, "the groove matters for this seed");
+        app.randomise_synth_seeded(1, rest, 42);
+        assert_eq!(app.doc.project.synths[1].patterns[slot], expected);
+    }
+
+    #[test]
+    fn guard_status_shows_the_fault_for_three_seconds() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.auto_retried = true;
+        let status = Status {
+            guard_fired: true,
+            playing: true,
+            ..Status::default()
+        };
+        app.on_status(status, 10.0);
+        assert_eq!(app.view.fault_until, 13.0);
+        assert!(
+            !app.view.auto_retried,
+            "audio ran fine: a later failure may retry"
+        );
+        assert_eq!(app.status, status);
+        app.on_status(Status::default(), 11.0);
+        assert_eq!(
+            app.view.fault_until, 13.0,
+            "a clean status leaves the fault shown"
+        );
+    }
+
+    #[test]
+    fn a_lost_stream_retries_once_until_audio_runs_again() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.status.playing = true;
+        app.on_audio_failed();
+        assert_eq!(app.status, Status::default());
+        assert_eq!(
+            app.audio_error.as_deref(),
+            Some("The audio device stopped.")
+        );
+        assert!(app.audio.is_none());
+        assert!(app.take_audio_retry(), "the first failure retries");
+        assert!(!app.view.audio_lost);
+        assert!(!app.take_audio_retry(), "nothing new to handle");
+        app.on_audio_failed();
+        assert!(!app.take_audio_retry(), "a second failure does not retry");
+        app.on_status(Status::default(), 0.0);
+        app.on_audio_failed();
+        assert!(app.take_audio_retry(), "audio ran in between: retry again");
+    }
+
+    #[test]
+    fn a_full_ring_keeps_the_unsent_commands_in_order() {
+        let mut pending = vec![
+            Command::Play,
+            Command::SetBpm(1.0),
+            Command::SetBpm(2.0),
+            Command::Stop,
+        ];
+        let mut sent = Vec::new();
+        let mut room = 2;
+        let mut accept = |c: Command| {
+            if room == 0 {
+                return Err(c);
+            }
+            room -= 1;
+            sent.push(c);
+            Ok(())
+        };
+        send_in_order(&mut pending, &mut accept);
+        assert!(matches!(
+            sent.as_slice(),
+            [Command::Play, Command::SetBpm(_)]
+        ));
+        assert!(matches!(
+            pending.as_slice(),
+            [Command::SetBpm(v), Command::Stop] if *v == 2.0
+        ));
+        // Room again: everything left goes, still in order, and nothing
+        // jumps the queue past a refused command.
+        let mut order = Vec::new();
+        let mut refuse_first = true;
+        let mut pending2 = vec![Command::Play, Command::Stop];
+        send_in_order(&mut pending2, &mut |c: Command| {
+            if std::mem::take(&mut refuse_first) {
+                return Err(c);
+            }
+            order.push(c);
+            Ok(())
+        });
+        assert!(order.is_empty(), "nothing after a refusal is sent");
+        assert_eq!(pending2.len(), 2);
     }
 
     #[test]
@@ -392,6 +548,154 @@ mod tests {
         app.stop_recording();
         app.doc.undo();
         assert!(app.doc.project.song.automation.is_empty());
+    }
+
+    /// The Touch commands queued so far, in order.
+    fn touches(app: &SidAcidApp) -> Vec<bool> {
+        app.pending
+            .iter()
+            .filter_map(|c| match c {
+                Command::Touch(_, on) => Some(*on),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn switch_and_tempo_edits_join_the_record_pass_undo_step() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = recording_app();
+        let before = app.doc.project.clone();
+        app.view.touched_knob = Some(id);
+        app.view.live.insert(id, 0.7);
+        app.status.song_step = 4;
+        app.record_automation();
+        app.edit_switch(ParamId::Synth(0, SynthParam::Wave), 1.0);
+        app.edit_transport(Edit::Bpm(150.0));
+        app.edit_transport(Edit::Swing(0.3));
+        app.status.song_step = 6;
+        app.record_automation();
+        app.stop_recording();
+        assert_eq!(app.doc.project.bpm, 150.0);
+        app.doc.undo();
+        assert_eq!(app.doc.project, before, "the whole pass is one undo step");
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn outside_a_record_pass_switches_and_tempo_are_their_own_steps() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.edit_switch(ParamId::Synth(0, SynthParam::Wave), 1.0);
+        app.edit_transport(Edit::Bpm(150.0));
+        app.edit_transport(Edit::Bpm(151.0));
+        app.doc.end_gesture();
+        app.doc.undo();
+        assert_eq!(app.doc.project.bpm, 128.0, "a tempo drag is one step");
+        assert_eq!(
+            app.doc.project.param(ParamId::Synth(0, SynthParam::Wave)),
+            1.0
+        );
+        app.doc.undo();
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn stopping_a_pass_releases_a_held_knob_once_and_rearming_touches_it_again() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let held = || knob::KnobOutput {
+            value: None,
+            released: false,
+            touched: true,
+            scrolled: false,
+        };
+        let mut app = recording_app();
+        app.knob_gesture(id, held(), true, 0.0);
+        app.stop_recording();
+        assert_eq!(touches(&app), [true, false]);
+        app.view.record = false;
+        app.knob_gesture(id, held(), false, 0.1);
+        app.release_knob(id);
+        assert_eq!(touches(&app), [true, false], "no second release");
+
+        app.pending.clear();
+        app.view.record = true;
+        app.knob_gesture(id, held(), true, 0.2);
+        app.stop_recording();
+        app.view.record = true;
+        app.knob_gesture(id, held(), true, 0.3);
+        assert_eq!(
+            touches(&app),
+            [true, false, true],
+            "still held when recording resumes: touched again"
+        );
+        let mut idle = held();
+        idle.touched = false;
+        app.knob_gesture(id, idle, true, 0.4);
+        assert_eq!(touches(&app), [true, false, true, false]);
+        assert!(app.view.engine_touch.is_none());
+    }
+
+    #[test]
+    fn stop_twice_without_a_status_in_between_returns_to_the_start() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = recording_app();
+        app.doc.project.song.loop_range = Some((1, 2));
+        app.view.song_cursor = 3;
+        app.stop();
+        assert!(
+            !app.status.playing,
+            "assumed stopped until a status says otherwise"
+        );
+        app.view.touched_knob = Some(id);
+        app.view.live.insert(id, 0.7);
+        app.status.song_step = 5;
+        app.record_automation();
+        assert!(
+            app.doc.project.song.automation.is_empty(),
+            "nothing recorded after Stop"
+        );
+        app.stop();
+        assert_eq!(
+            app.view.song_cursor, 1,
+            "the second stop returns to the start"
+        );
+    }
+
+    #[test]
+    fn switching_mode_while_stopped_sends_no_stop() {
+        let mut app = recording_app();
+        app.status.playing = false;
+        app.pending.clear();
+        app.set_mode(acid_engine::sequencer::Mode::Pattern);
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Command::SetMode(acid_engine::sequencer::Mode::Pattern)]
+        ));
+        let mut app = recording_app();
+        app.pending.clear();
+        app.set_mode(acid_engine::sequencer::Mode::Pattern);
+        assert!(!app.status.playing, "switching while playing stops");
+    }
+
+    #[test]
+    fn recording_the_same_value_at_the_same_step_is_not_an_edit() {
+        use acid_engine::params::{ParamId, SynthParam};
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = recording_app();
+        app.view.touched_knob = Some(id);
+        app.view.live.insert(id, 0.5);
+        app.status.song_step = 4;
+        app.record_automation();
+        app.doc.mark_saved();
+        app.pending.clear();
+        app.record_automation();
+        assert!(app.pending.is_empty(), "no song sent again");
+        assert!(!app.doc.is_dirty(), "no edit applied");
+        assert_eq!(app.view.rec_last, Some((id, 4)));
     }
 
     #[test]
@@ -467,10 +771,12 @@ mod tests {
             acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
             3,
         ));
+        app.view.engine_touch = app.view.touched_knob;
         app.load_document(Document::new(acid_engine::project::Project::default()));
         assert_eq!(app.view.mode, acid_engine::sequencer::Mode::Pattern);
         assert!(!app.view.record);
         assert!(app.view.touched_knob.is_none() && app.view.rec_last.is_none());
+        assert!(app.view.engine_touch.is_none());
         assert!(!app.view.was_playing);
     }
 
@@ -632,8 +938,11 @@ mod tests {
         app.doc.undo();
         assert!(app.doc.project.sampler.patterns[0].notes.is_empty());
         app.view.focus = 0;
+        assert!(app.view.message.is_none());
+        let before = app.doc.project.clone();
         app.paste_pattern();
         assert!(app.view.message.is_some(), "refused onto a 303 pattern");
+        assert_eq!(app.doc.project, before, "and nothing changed");
     }
 
     #[test]
@@ -727,7 +1036,15 @@ mod tests {
         app.view.touched_knob = Some(acid_engine::params::ParamId::Master(
             acid_engine::params::MasterParam::Level,
         ));
-        app.view.scrolling = [true; 2];
+        let open = step_edit::ScrollGesture {
+            last: 0.0,
+            serial: Some(0),
+        };
+        app.view.scroll_at = [Some(open); 2];
+        app.view.knob_scroll = Some((
+            acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
+            open,
+        ));
         app.view.scroll_accum = [12.0; 2];
         let project = acid_engine::project::Project {
             selected: [17, 33, 0, 127, 0, 0],
@@ -736,7 +1053,8 @@ mod tests {
         app.load_document(Document::new(project));
         assert_eq!(app.view.bank, [1, 2, 0, 7, 0, 0]);
         assert!(app.view.touched_knob.is_none());
-        assert_eq!(app.view.scrolling, [false; 2]);
+        assert_eq!(app.view.scroll_at, [None; 2]);
+        assert!(app.view.knob_scroll.is_none());
         assert_eq!(app.view.scroll_accum, [0.0; 2]);
     }
 
@@ -779,6 +1097,75 @@ mod tests {
             app.doc.undo();
         }
         assert!(app.doc.project.song.bars.is_empty());
+    }
+
+    #[test]
+    fn song_insert_paste_and_no_loop_actions() {
+        use acid_engine::project::{Bar, PatternRef};
+        use song_panel::SongAction;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let bar = |n: u8| {
+            let mut b = Bar::default();
+            b.patterns[0] = Some(PatternRef(n));
+            b
+        };
+        let mut song = app.doc.project.song.clone();
+        song.bars = vec![bar(1), bar(2), bar(3)];
+        app.apply_song(song, false);
+        let start = app.doc.project.song.clone();
+        app.song_action(SongAction::Insert, Some((1, 1)));
+        assert_eq!(
+            app.doc.project.song.bars,
+            [bar(1), bar(2), bar(2), bar(3)],
+            "Insert copies the selected bar in front of it"
+        );
+        app.view.song_clip = Some(vec![bar(7), bar(8)]);
+        app.song_action(SongAction::Paste, Some((0, 0)));
+        assert_eq!(
+            app.doc.project.song.bars,
+            [bar(1), bar(7), bar(8), bar(2), bar(2), bar(3)],
+            "Paste goes after the selection"
+        );
+        app.song_action(SongAction::Paste, None);
+        assert_eq!(
+            app.doc.project.song.bars.len(),
+            8,
+            "no selection: at the end"
+        );
+        assert_eq!(app.doc.project.song.bars[6..], [bar(7), bar(8)]);
+        app.song_action(SongAction::Insert, None);
+        let selected = app.doc.project.selected.map(|s| Some(PatternRef(s)));
+        assert_eq!(app.doc.project.song.bars[8].patterns, selected);
+        app.song_action(SongAction::Loop(0, 2), Some((0, 2)));
+        app.song_action(SongAction::NoLoop, None);
+        assert_eq!(app.doc.project.song.loop_range, None);
+        app.doc.undo();
+        assert_eq!(app.doc.project.song.loop_range, Some((0, 2)));
+        for _ in 0..5 {
+            app.doc.undo();
+        }
+        assert_eq!(app.doc.project.song, start, "each action was one undo step");
+    }
+
+    #[test]
+    fn fm_bar_transpose_is_an_undoable_song_edit() {
+        use acid_engine::machine::MachineId;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let mut song = app.doc.project.song.clone();
+        song.bars = vec![acid_engine::project::Bar::default(); 2];
+        app.apply_song(song, false);
+        let before = app.doc.project.song.clone();
+        app.pending.clear();
+        let ti = MachineId::Fm.transpose_index().expect("FM transposes");
+        let mut song = before.clone();
+        song.bars[1].transpose[ti] = 5;
+        app.apply_song(song, false);
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Command::Song(s)] if s.bars[1].transpose[ti] == 5
+        ));
+        app.doc.undo();
+        assert_eq!(app.doc.project.song, before);
     }
 
     #[test]

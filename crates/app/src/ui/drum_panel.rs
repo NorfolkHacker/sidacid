@@ -71,9 +71,7 @@ impl SidAcidApp {
                                     .prefix("Len "),
                             );
                             if r.changed() {
-                                let cmds =
-                                    self.doc.apply(Edit::DrumLength { kit, slot, length }, true);
-                                self.send(cmds);
+                                self.set_drum_length(kit, slot, length);
                             }
                             if r.drag_stopped() || r.lost_focus() {
                                 self.doc.end_gesture();
@@ -136,10 +134,10 @@ impl SidAcidApp {
                                         .selected(hit != DrumHit::Off),
                                 );
                                 if r.clicked() {
-                                    edits.push((step, inst, cycle_hit(hit)));
+                                    edits.push((step, inst, None));
                                 }
                                 if r.secondary_clicked() {
-                                    edits.push((step, inst, DrumHit::Off));
+                                    edits.push((step, inst, Some(DrumHit::Off)));
                                 }
                             }
                             ui.end_row();
@@ -147,25 +145,92 @@ impl SidAcidApp {
                     });
             });
         for (step, inst, hit) in edits {
-            let cmds = self.doc.apply(
-                Edit::DrumHit {
-                    kit,
-                    slot,
-                    step,
-                    inst,
-                    hit,
-                },
-                false,
-            );
-            self.send(cmds);
-            self.view.focus = machine;
+            self.click_drum_cell(kit, slot, step, inst, hit);
         }
+    }
+
+    /// A grid click: `hit`, or with None the next hit after the current
+    /// one (Off → On → Accent). One undo step.
+    pub(crate) fn click_drum_cell(
+        &mut self,
+        kit: usize,
+        slot: u8,
+        step: usize,
+        inst: usize,
+        hit: Option<DrumHit>,
+    ) {
+        let current = self.doc.project.drums[kit].patterns[slot as usize].steps[step][inst];
+        let hit = hit.unwrap_or_else(|| cycle_hit(current));
+        let cmds = self.doc.apply(
+            Edit::DrumHit {
+                kit,
+                slot,
+                step,
+                inst,
+                hit,
+            },
+            false,
+        );
+        self.send(cmds);
+        self.view.focus = 2 + kit;
+    }
+
+    /// The Len field: one undo step per drag.
+    pub(crate) fn set_drum_length(&mut self, kit: usize, slot: u8, length: u8) {
+        let cmds = self.doc.apply(Edit::DrumLength { kit, slot, length }, true);
+        self.send(cmds);
+        self.view.focus = 2 + kit;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app() -> SidAcidApp {
+        SidAcidApp::headless(crate::document::Document::new(
+            acid_engine::demo::demo_project(),
+        ))
+    }
+
+    #[test]
+    fn drum_cell_click_cycles_and_undoes() {
+        let mut app = app();
+        let slot = 5;
+        let hit = |app: &SidAcidApp| app.doc.project.drums[1].patterns[slot as usize].steps[3][2];
+        assert_eq!(hit(&app), DrumHit::Off);
+        app.click_drum_cell(1, slot, 3, 2, None);
+        assert_eq!(hit(&app), DrumHit::On);
+        assert_eq!(app.view.focus, 3);
+        app.click_drum_cell(1, slot, 3, 2, None);
+        assert_eq!(hit(&app), DrumHit::Accent);
+        app.click_drum_cell(1, slot, 3, 2, Some(DrumHit::Off));
+        assert_eq!(hit(&app), DrumHit::Off, "a right-click clears");
+        app.doc.undo();
+        assert_eq!(hit(&app), DrumHit::Accent, "each click is one undo step");
+        app.doc.undo();
+        app.doc.undo();
+        assert_eq!(hit(&app), DrumHit::Off);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn drum_length_edits_focus_the_kit() {
+        let mut app = app();
+        let slot = app.doc.project.selected[3];
+        app.set_drum_length(1, slot, 12);
+        assert_eq!(app.doc.project.drums[1].patterns[slot as usize].length, 12);
+        assert_eq!(app.view.focus, 3, "copy/paste now acts on the 909");
+    }
+
+    #[test]
+    fn the_drum_panels_draw_headless() {
+        let mut app = app();
+        let before = app.doc.project.clone();
+        super::super::run_frames(&mut app, 2);
+        assert_eq!(app.doc.project, before, "drawing changes nothing");
+        assert!(!app.doc.can_undo());
+    }
 
     #[test]
     fn hits_cycle() {

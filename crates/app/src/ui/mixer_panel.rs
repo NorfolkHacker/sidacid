@@ -51,7 +51,8 @@ const MASTER: [(MasterParam, &str); 6] = [
 
 /// Peak (linear) to meter height 0..1 on a -48..0 dB scale.
 pub fn meter_fraction(peak: f32) -> f32 {
-    if peak <= 0.0 {
+    // NaN would pass through `clamp`.
+    if peak.is_nan() || peak <= 0.0 {
         return 0.0;
     }
     ((20.0 * peak.log10() - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
@@ -168,5 +169,10 @@ mod tests {
         assert!((meter_fraction(0.5) - (1.0 - 6.02 / 48.0)).abs() < 0.01);
         assert_eq!(meter_fraction(0.001), 0.0);
         assert_eq!(meter_fraction(4.0), 1.0);
+        assert_eq!(
+            meter_fraction(f32::NAN),
+            0.0,
+            "a NaN peak shows an empty meter"
+        );
     }
 }

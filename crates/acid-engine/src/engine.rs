@@ -337,6 +337,23 @@ impl Engine {
         id.index().map_or(0.0, |i| self.base[i])
     }
 
+    /// The saved knob position of a param.
+    #[cfg(test)]
+    pub(crate) fn knob(&self, id: ParamId) -> f32 {
+        id.index().map_or(0.0, |i| self.knobs[i])
+    }
+
+    /// Whether a knob is held against automation.
+    #[cfg(test)]
+    pub(crate) fn is_touched(&self, id: ParamId) -> bool {
+        id.index().is_some_and(|i| self.touched[i])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn swing(&self) -> f32 {
+        self.seq.swing()
+    }
+
     pub fn is_playing(&self) -> bool {
         self.seq.is_playing()
     }
@@ -1029,7 +1046,11 @@ mod tests {
         e.play();
         render(&mut e, 0.5);
         let m = e.take_meters();
-        assert!(m[0] > 0.01 && m[2] > 0.01 && m[CHANNELS] > 0.01, "{m:?}");
+        assert!(
+            m[..4].iter().all(|v| *v > 0.01),
+            "both synths and kits: {m:?}"
+        );
+        assert!(m[CHANNELS] > 0.01, "{m:?}");
         assert!(m[CHANNELS] <= 1.0 + 1e-6, "master is post-clip");
         e.stop();
         render(&mut e, 5.0);
@@ -1037,6 +1058,26 @@ mod tests {
         render(&mut e, 0.05);
         assert!(e.take_meters().iter().all(|v| *v < 1e-3));
         assert!(!e.take_guard_fired());
+    }
+
+    #[test]
+    fn guard_fires_and_recovers() {
+        let mut e = demo_engine();
+        e.play();
+        render(&mut e, 0.1);
+        assert!(!e.take_guard_fired());
+        e.synths[0].poison();
+        let (l, r) = render(&mut e, 0.05);
+        assert!(
+            all_finite(&l) && all_finite(&r),
+            "the guard mutes the block"
+        );
+        assert!(e.take_guard_fired(), "the guard fired");
+        assert!(!e.take_guard_fired(), "reported once");
+        let (l, r) = render(&mut e, 0.1);
+        assert!(all_finite(&l) && all_finite(&r));
+        assert!(peak(&l) > 0.01, "sound comes back after the reset");
+        assert!(!e.take_guard_fired(), "the reset synth renders cleanly");
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub struct KnobOutput {
     pub released: bool,
     /// The knob was dragged, scrolled or double-clicked this frame.
     pub touched: bool,
+    /// The mouse wheel moved over the knob this frame.
+    pub scrolled: bool,
 }
 
 pub fn drag_to_value(value: f32, dy: f32, fine: bool) -> f32 {
@@ -49,6 +51,7 @@ pub fn knob(
     let (rect, response) = ui.allocate_exact_size(CELL, Sense::click_and_drag());
     let mut new_value = None;
     let mut touched = response.dragged();
+    let mut scrolled = false;
     if response.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let v = drag_to_value(value, response.drag_delta().y, fine);
@@ -71,6 +74,7 @@ pub fn knob(
         });
         if delta != 0.0 {
             touched = true;
+            scrolled = true;
             let notches = ui
                 .data_mut(|d| scroll_notches(d.get_temp_mut_or_default::<f32>(response.id), delta));
             if notches != 0 {
@@ -123,6 +127,7 @@ pub fn knob(
         value: new_value,
         released: response.drag_stopped(),
         touched,
+        scrolled,
     }
 }
 

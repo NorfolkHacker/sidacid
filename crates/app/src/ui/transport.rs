@@ -67,8 +67,7 @@ impl SidAcidApp {
             );
             // Widget rounding must not turn a plain redraw into an edit.
             if r.changed() && (bpm - shown_bpm).abs() > 1e-3 {
-                let cmds = self.doc.apply(Edit::Bpm(bpm), true);
-                self.send(cmds);
+                self.edit_transport(Edit::Bpm(bpm));
             }
             if r.drag_stopped() || r.lost_focus() {
                 self.doc.end_gesture();
@@ -82,8 +81,7 @@ impl SidAcidApp {
                     .max_decimals(0),
             );
             if r.changed() && (swing - shown_swing).abs() > 1e-3 {
-                let cmds = self.doc.apply(Edit::Swing(swing / 100.0), true);
-                self.send(cmds);
+                self.edit_transport(Edit::Swing(swing / 100.0));
             }
             if r.drag_stopped() || r.lost_focus() {
                 self.doc.end_gesture();
@@ -107,5 +105,18 @@ impl SidAcidApp {
                 ui.label(egui::RichText::new(line).small());
             }
         });
+    }
+}
+
+impl SidAcidApp {
+    /// A tempo or swing edit: one undo step per drag, or part of the
+    /// record pass while recording.
+    pub(crate) fn edit_transport(&mut self, edit: Edit) {
+        let cmds = if self.recording() {
+            self.doc.record(edit)
+        } else {
+            self.doc.apply(edit, true)
+        };
+        self.send(cmds);
     }
 }

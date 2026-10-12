@@ -52,15 +52,7 @@ impl SidAcidApp {
                                     .prefix("Len "),
                             );
                             if r.changed() {
-                                let cmds = self.doc.apply(
-                                    Edit::SynthLength {
-                                        synth,
-                                        slot,
-                                        length,
-                                    },
-                                    true,
-                                );
-                                self.send(cmds);
+                                self.set_synth_length(synth, slot, length);
                             }
                             if r.drag_stopped() || r.lost_focus() {
                                 self.doc.end_gesture();
@@ -71,15 +63,7 @@ impl SidAcidApp {
                                     .prefix("Trans "),
                             );
                             if r2.changed() {
-                                let cmds = self.doc.apply(
-                                    Edit::SynthTranspose {
-                                        synth,
-                                        slot,
-                                        transpose,
-                                    },
-                                    true,
-                                );
-                                self.send(cmds);
+                                self.set_synth_transpose(synth, slot, transpose);
                             }
                             if r2.drag_stopped() || r2.lost_focus() {
                                 self.doc.end_gesture();
@@ -165,6 +149,34 @@ impl SidAcidApp {
 }
 
 impl SidAcidApp {
+    /// The Len field: one undo step per drag.
+    pub(crate) fn set_synth_length(&mut self, synth: usize, slot: u8, length: u8) {
+        let cmds = self.doc.apply(
+            Edit::SynthLength {
+                synth,
+                slot,
+                length,
+            },
+            true,
+        );
+        self.send(cmds);
+        self.view.focus = synth;
+    }
+
+    /// The Trans field: one undo step per drag.
+    pub(crate) fn set_synth_transpose(&mut self, synth: usize, slot: u8, transpose: i8) {
+        let cmds = self.doc.apply(
+            Edit::SynthTranspose {
+                synth,
+                slot,
+                transpose,
+            },
+            true,
+        );
+        self.send(cmds);
+        self.view.focus = synth;
+    }
+
     /// A fresh seed per click (time mixed with a counter).
     pub(crate) fn next_seed(&mut self) -> u64 {
         self.view.seed_counter = self.view.seed_counter.wrapping_add(1);
@@ -177,6 +189,17 @@ impl SidAcidApp {
 
     pub(crate) fn randomise_synth(&mut self, synth: usize, dice: acid_engine::random::Dice) {
         let seed = self.next_seed();
+        self.randomise_synth_seeded(synth, dice, seed);
+    }
+
+    /// Dice the selected pattern of `synth`, grooving with the selected
+    /// pattern of the drum kit of the same number.
+    pub(crate) fn randomise_synth_seeded(
+        &mut self,
+        synth: usize,
+        dice: acid_engine::random::Dice,
+        seed: u64,
+    ) {
         let p = &self.doc.project;
         let slot = p.selected[synth];
         let groove = &p.drums[synth].patterns[p.selected[2 + synth] as usize];
@@ -217,6 +240,10 @@ impl SidAcidApp {
 
     pub(crate) fn evolve_drums(&mut self, kit: usize) {
         let seed = self.next_seed();
+        self.evolve_drums_seeded(kit, seed);
+    }
+
+    pub(crate) fn evolve_drums_seeded(&mut self, kit: usize, seed: u64) {
         let slot = self.doc.project.selected[2 + kit];
         let pattern = acid_engine::random::evolve_drums(
             &self.doc.project.drums[kit].patterns[slot as usize],
@@ -232,5 +259,25 @@ impl SidAcidApp {
         );
         self.send(cmds);
         self.view.focus = 2 + kit;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+
+    #[test]
+    fn length_and_transpose_edits_focus_the_synth() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.focus = 4;
+        let slot = app.doc.project.selected[1];
+        app.set_synth_length(1, slot, 7);
+        assert_eq!(app.view.focus, 1);
+        app.view.focus = 4;
+        app.set_synth_transpose(1, slot, -3);
+        assert_eq!(app.view.focus, 1);
+        let p = &app.doc.project.synths[1].patterns[slot as usize];
+        assert_eq!((p.length, p.transpose), (7, -3));
     }
 }

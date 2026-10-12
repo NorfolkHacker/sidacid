@@ -173,6 +173,11 @@ impl Sequencer {
         self.bpm
     }
 
+    #[cfg(test)]
+    pub(crate) fn swing(&self) -> f32 {
+        self.swing
+    }
+
     pub fn set_swing(&mut self, swing: f32) {
         if swing.is_finite() {
             self.swing = swing.clamp(0.0, 0.75);

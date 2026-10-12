@@ -1,5 +1,6 @@
 //! Binding knobs and switches to project parameters.
 
+use super::step_edit::ScrollGesture;
 use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::fm::patch;
@@ -128,8 +129,7 @@ impl SidAcidApp {
             let names = discrete_names(id);
             if let Some(i) = knob::switch(ui, label, step_index(value, info.steps), names) {
                 let v = i as f32 / (info.steps - 1) as f32;
-                let cmds = self.doc.apply(Edit::Param { id, value: v }, false);
-                self.send(cmds);
+                self.edit_switch(id, v);
             }
             return;
         }
@@ -155,12 +155,26 @@ impl SidAcidApp {
             }
         );
         let out = knob::knob(ui, label, value, info.default, &tip, automated);
-        self.knob_gesture(id, out, recording);
+        self.knob_gesture(id, out, recording, ui.input(|i| i.time));
     }
 
     /// Applies one frame of knob interaction: a new value, and the touch
     /// that keeps automation off the knob while it is held.
-    pub(crate) fn knob_gesture(&mut self, id: ParamId, out: knob::KnobOutput, recording: bool) {
+    pub(crate) fn knob_gesture(
+        &mut self,
+        id: ParamId,
+        out: knob::KnobOutput,
+        recording: bool,
+        now: f64,
+    ) {
+        // Any other knob edit ends a resting wheel gesture first, so it
+        // never merges into the wheel's undo step.
+        if out.value.is_some()
+            && !(out.scrolled && self.knob_scroll_open(id))
+            && let Some((_, g)) = self.view.knob_scroll.take()
+        {
+            self.close_scroll_step(g);
+        }
         if let Some(v) = out.value {
             if recording {
                 self.view.live.insert(id, v);
@@ -170,11 +184,23 @@ impl SidAcidApp {
                 self.send(cmds);
             }
         }
+        if out.scrolled && !recording {
+            // Its undo step stays open until the wheel rests.
+            let serial = if out.value.is_some() {
+                Some(self.doc.edit_serial())
+            } else {
+                self.view
+                    .knob_scroll
+                    .filter(|(k, _)| *k == id)
+                    .and_then(|(_, g)| g.serial)
+            };
+            self.view.knob_scroll = Some((id, ScrollGesture { last: now, serial }));
+        }
         // While recording, any edit (a scroll notch, a double-click reset)
         // holds the knob for this frame so the value is written.
         if out.touched || (recording && out.value.is_some()) {
-            if self.view.touched_knob != Some(id) && recording {
-                self.send(vec![Command::Touch(id, true)]);
+            if recording {
+                self.engine_touch(id);
             }
             self.view.touched_knob = Some(id);
         } else if self.view.touched_knob == Some(id) {
@@ -183,6 +209,25 @@ impl SidAcidApp {
         if out.released {
             self.release_knob(id);
         }
+    }
+}
+
+impl SidAcidApp {
+    /// A wheel gesture on knob `id` is waiting for the wheel to rest.
+    pub(crate) fn knob_scroll_open(&self, id: ParamId) -> bool {
+        self.view.knob_scroll.is_some_and(|(k, _)| k == id)
+    }
+
+    /// A switch change: part of the record pass while recording (switches
+    /// are not automated, but their saved value still changes).
+    pub(crate) fn edit_switch(&mut self, id: ParamId, value: f32) {
+        let edit = Edit::Param { id, value };
+        let cmds = if self.recording() {
+            self.doc.record(edit)
+        } else {
+            self.doc.apply(edit, false)
+        };
+        self.send(cmds);
     }
 }
 
@@ -206,8 +251,9 @@ mod tests {
             value: Some(0.25),
             released: false,
             touched: false,
+            scrolled: false,
         };
-        app.knob_gesture(id, edit, true);
+        app.knob_gesture(id, edit, true, 0.0);
         assert_eq!(app.view.touched_knob, Some(id));
         assert!(
             app.pending
@@ -221,10 +267,107 @@ mod tests {
             value: None,
             released: false,
             touched: false,
+            scrolled: false,
         };
-        app.knob_gesture(id, idle, true);
+        app.knob_gesture(id, idle, true, 0.1);
         assert_eq!(app.view.touched_knob, None, "released on the next frame");
         assert!(matches!(app.pending.last(), Some(Command::Touch(t, false)) if *t == id));
+    }
+
+    fn scroll(value: f32) -> knob::KnobOutput {
+        knob::KnobOutput {
+            value: Some(value),
+            released: false,
+            touched: true,
+            scrolled: true,
+        }
+    }
+
+    fn idle() -> knob::KnobOutput {
+        knob::KnobOutput {
+            value: None,
+            released: false,
+            touched: false,
+            scrolled: false,
+        }
+    }
+
+    /// One UI frame of knob `id` at time `now` (the gesture, then the
+    /// per-frame scroll check `ui` runs).
+    fn frame(app: &mut SidAcidApp, id: ParamId, out: knob::KnobOutput, now: f64) {
+        app.knob_gesture(id, out, false, now);
+        app.tick_scroll_gestures(now);
+    }
+
+    #[test]
+    fn wheel_notches_close_together_are_one_undo_step() {
+        use crate::document::Document;
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let start = app.doc.project.param(id);
+        // Notches 100 ms apart, idle frames in between.
+        for (i, t) in [0.0, 0.1, 0.2].into_iter().enumerate() {
+            frame(&mut app, id, scroll(0.1 * (i + 1) as f32), t);
+            frame(&mut app, id, idle(), t + 0.05);
+        }
+        frame(&mut app, id, idle(), 0.4);
+        assert!(
+            app.view.knob_scroll.is_some(),
+            "still open 200 ms after the last notch"
+        );
+        frame(&mut app, id, idle(), 0.6);
+        assert!(
+            app.view.knob_scroll.is_none(),
+            "closed after 300 ms of rest"
+        );
+        // A notch a second later is a new step.
+        frame(&mut app, id, scroll(0.9), 1.6);
+        frame(&mut app, id, idle(), 2.0);
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(id), 0.3);
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(id), start);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn another_edit_during_the_rest_ends_the_scroll_step_first() {
+        use crate::document::Document;
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let start = app.doc.project.param(id);
+        frame(&mut app, id, scroll(0.2), 0.0);
+        frame(&mut app, id, idle(), 0.05);
+        // A double-click reset on the same knob within the rest.
+        let reset = knob::KnobOutput {
+            value: Some(0.7),
+            released: false,
+            touched: true,
+            scrolled: false,
+        };
+        frame(&mut app, id, reset, 0.1);
+        frame(&mut app, id, idle(), 0.15);
+        // Another knob's drag is open when the old scroll would have closed.
+        let other = ParamId::Synth(0, SynthParam::Resonance);
+        let drag = |v| knob::KnobOutput {
+            value: Some(v),
+            released: false,
+            touched: true,
+            scrolled: false,
+        };
+        frame(&mut app, other, drag(0.1), 0.2);
+        frame(&mut app, other, drag(0.2), 0.5);
+        frame(&mut app, other, drag(0.3), 0.8);
+        let mut done = drag(0.4);
+        done.released = true;
+        frame(&mut app, other, done, 0.9);
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(id), 0.7, "the drag is one step");
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(id), 0.2, "the reset is its own step");
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(id), start);
+        assert!(!app.doc.can_undo());
     }
 
     #[test]

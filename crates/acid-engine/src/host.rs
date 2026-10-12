@@ -497,6 +497,95 @@ mod tests {
         assert!(first.meters.iter().all(|m| *m == 0.0), "{first:?}");
     }
 
+    /// Peak of `samples` of host output.
+    fn run_peak(host: &mut EngineHost, samples: usize) -> f32 {
+        let mut l = vec![0.0; 512];
+        let mut r = vec![0.0; 512];
+        let mut peak = 0.0f32;
+        for _ in 0..samples.div_ceil(512) {
+            host.process(&mut l, &mut r);
+            peak = l.iter().chain(&r).fold(peak, |p, v| p.max(v.abs()));
+        }
+        peak
+    }
+
+    #[test]
+    fn each_command_reaches_the_engine() {
+        use crate::params::{MasterParam, SynthParam};
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let cutoff = ParamId::Synth(0, SynthParam::Cutoff);
+        let level = ParamId::Master(MasterParam::Level);
+
+        tx.push(Command::SetParam(cutoff, 0.125)).unwrap();
+        tx.push(Command::SetSwing(0.4)).unwrap();
+        tx.push(Command::SelectPattern {
+            machine: 3,
+            slot: 7,
+        })
+        .unwrap();
+        tx.push(Command::Touch(level, true)).unwrap();
+        tx.push(Command::SetParamLive(level, 0.3)).unwrap();
+        run(&mut host, 512);
+        let e = host.engine();
+        assert_eq!(e.knob(cutoff), 0.125, "SetParam moves the knob");
+        assert_eq!(e.live_param(cutoff), 0.125);
+        assert_eq!(e.swing(), 0.4, "SetSwing");
+        assert_eq!(e.current_patterns()[3], 7, "SelectPattern while stopped");
+        assert!(e.is_touched(level), "Touch(true)");
+        assert_eq!(e.live_param(level), 0.3, "SetParamLive plays the value");
+        assert_ne!(e.knob(level), 0.3, "SetParamLive keeps the knob");
+        tx.push(Command::Touch(level, false)).unwrap();
+        run(&mut host, 512);
+        assert!(!host.engine().is_touched(level), "Touch(false)");
+
+        tx.push(Command::DrumPattern {
+            kit: 1,
+            slot: 0,
+            pattern: Box::new(DrumPattern::default()),
+        })
+        .unwrap();
+        tx.push(Command::NotePattern {
+            machine: 4,
+            slot: 2,
+            pattern: Box::new(NotePattern::default()),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        let events: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        let old_drums = events.iter().find_map(|e| match e {
+            Event::DisposeDrumPattern(p) => Some(p),
+            _ => None,
+        });
+        assert_eq!(
+            old_drums.map(|p| **p == crate::demo::demo_project().drums[1].patterns[0]),
+            Some(true),
+            "the replaced drum pattern comes back"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::DisposeNotePattern(_))),
+            "the replaced note pattern comes back"
+        );
+
+        run_peak(&mut host, SR as usize);
+        assert!(run_peak(&mut host, 2048) < 1e-4, "stopped and quiet");
+        tx.push(Command::NoteOn {
+            machine: 4,
+            pitch: 60,
+            vel: 110,
+        })
+        .unwrap();
+        assert!(run_peak(&mut host, 4096) > 0.01, "NoteOn auditions");
+        tx.push(Command::NoteOff {
+            machine: 4,
+            pitch: 60,
+        })
+        .unwrap();
+        run_peak(&mut host, 2 * SR as usize);
+        assert!(run_peak(&mut host, 2048) < 1e-4, "NoteOff releases");
+    }
+
     #[test]
     fn set_param_live_reaches_the_engine() {
         let (mut host, mut tx, _rx) = host_with_demo();

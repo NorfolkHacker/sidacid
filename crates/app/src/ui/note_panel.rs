@@ -37,6 +37,7 @@ impl SidAcidApp {
                             true,
                         );
                         self.send(cmds);
+                        self.view.focus = m;
                     }
                     if r.drag_stopped() || r.lost_focus() {
                         self.doc.end_gesture();

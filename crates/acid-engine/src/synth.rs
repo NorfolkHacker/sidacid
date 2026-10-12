@@ -228,6 +228,13 @@ impl BassSynth {
         self.control(false);
     }
 
+    /// Test hook: NaN filter state, as a numerical blow-up would leave.
+    #[cfg(test)]
+    pub(crate) fn poison(&mut self) {
+        self.filter_env = f32::NAN;
+        self.note_semis = f32::NAN;
+    }
+
     pub fn note_off(&mut self) {
         self.gate = false;
         for v in 0..SidChip::VOICES {

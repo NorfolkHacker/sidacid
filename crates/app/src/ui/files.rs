@@ -178,7 +178,8 @@ impl SidAcidApp {
         self.view.writers = [None; 2];
         self.view.roll_drag = [None; 2];
         self.view.scroll_accum = [0.0; 2];
-        self.view.scrolling = [false; 2];
+        self.view.scroll_at = [None; 2];
+        self.view.knob_scroll = None;
         self.view.poly_drag = [None; 2];
         self.view.poly_scrolled = [false; 2];
         self.view.audition = None;

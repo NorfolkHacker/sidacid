@@ -89,6 +89,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transpose_index_covers_the_pitched_pattern_machines() {
+        assert_eq!(MachineId::Synth1.transpose_index(), Some(0));
+        assert_eq!(MachineId::Synth2.transpose_index(), Some(1));
+        assert_eq!(MachineId::Fm.transpose_index(), Some(2));
+        for m in [MachineId::Kit808, MachineId::Kit909, MachineId::Sampler] {
+            assert_eq!(m.transpose_index(), None, "{m:?}");
+        }
+        assert_eq!(TRANSPOSED, 3);
+    }
+
+    #[test]
     fn indices_round_trip_and_kinds_are_dense() {
         for (i, m) in MachineId::ALL.iter().enumerate() {
             assert_eq!(m.index(), i);
