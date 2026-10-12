@@ -14,3 +14,6 @@ music-synthesizer-for-android (https://github.com/google/music-synthesizer-for-a
 used under the Apache License, Version 2.0
 (https://www.apache.org/licenses/LICENSE-2.0). The code here is a new Rust
 implementation; the tables and formulas are from that project.
+
+    Copyright 2012 Google Inc.
+    Licensed under the Apache License, Version 2.0
