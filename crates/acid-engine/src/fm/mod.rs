@@ -11,6 +11,7 @@ pub mod fx;
 pub mod modulation;
 pub mod patch;
 pub mod sine;
+pub mod starter;
 
 /// Operators per voice.
 pub const OPS: usize = crate::params::FM_OPS;

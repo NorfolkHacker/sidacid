@@ -156,12 +156,24 @@ impl Default for NotePattern {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FmMachine {
     pub patterns: Vec<NotePattern>,
+    /// Name of the voice the FM params were last loaded from.
+    #[serde(default = "init_voice_name")]
+    pub voice_name: String,
+    /// The last imported DX7 bank, shown in the voice browser.
+    #[serde(default)]
+    pub bank: Option<Vec<crate::fm::sysex::Dx7Voice>>,
+}
+
+fn init_voice_name() -> String {
+    "INIT VOICE".into()
 }
 
 impl Default for FmMachine {
     fn default() -> Self {
         Self {
             patterns: vec![NotePattern::default(); PATTERNS],
+            voice_name: init_voice_name(),
+            bank: None,
         }
     }
 }
@@ -405,6 +417,11 @@ impl Project {
                 return bad(format!("{name} pattern {}", PatternRef(j as u8).label()));
             }
         }
+        if let Some(bank) = &self.fm.bank
+            && (bank.len() > crate::fm::sysex::BANK_VOICES || bank.iter().any(|v| !v.is_valid()))
+        {
+            return bad("FM voice bank".into());
+        }
         if self.selected.iter().any(|&s| s as usize >= PATTERNS) {
             return bad("selected pattern out of range".into());
         }
@@ -480,6 +497,39 @@ impl Project {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default project
 mod tests {
+    #[test]
+    fn fm_voice_name_and_bank_round_trip_and_default() {
+        let mut p = Project::default();
+        assert_eq!(p.fm.voice_name, "INIT VOICE");
+        p.fm.voice_name = "E.PIANO 1".into();
+        p.fm.bank = Some(crate::fm::starter::starter_bank());
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back, p);
+        let old: String = Project::default()
+            .to_ron()
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("voice_name:") && !t.starts_with("bank:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let loaded = Project::from_ron(&old).unwrap();
+        assert_eq!(loaded.fm.voice_name, "INIT VOICE");
+        assert_eq!(loaded.fm.bank, None);
+    }
+
+    #[test]
+    fn a_damaged_fm_bank_is_rejected() {
+        let mut p = Project::default();
+        let mut bad = crate::fm::sysex::Dx7Voice::init();
+        bad.algorithm = 40;
+        p.fm.bank = Some(vec![bad]);
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        p.fm.bank = Some(vec![crate::fm::sysex::Dx7Voice::init(); 33]);
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+    }
+
     use super::*;
     use crate::params::SynthParam;
 
