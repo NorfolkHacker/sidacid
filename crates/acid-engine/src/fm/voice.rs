@@ -188,7 +188,7 @@ impl Voice {
                 self.out_level[op] = ol;
                 self.env[op].set_out_level(ol);
             }
-            let level = self.env[op].tick() - amp_lfo * AMS_DEPTH[o.amp_mod_sens.min(3)];
+            let level = self.env[op].tick(n) - amp_lfo * AMS_DEPTH[o.amp_mod_sens.min(3)];
             let target = if o.on && level > SILENT {
                 2f32.powf(level).min(2.0)
             } else {

@@ -87,7 +87,7 @@ pub fn operator_out_level(level: f32, level_scaling: i32, velocity_scaling: i32)
     (ol + velocity_scaling as f32).max(0.0)
 }
 
-/// A DX7 four-rate, four-level envelope, advanced once per `BLOCK`.
+/// A DX7 four-rate, four-level envelope, advanced once per (sub-)block.
 #[derive(Clone, Copy, Debug)]
 pub struct Env {
     rates: [f32; 4],
@@ -100,7 +100,7 @@ pub struct Env {
     rising: bool,
     inc: f32,
     down: bool,
-    /// Envelope units per raw DX7 increment, for one block at this rate.
+    /// Envelope units per raw DX7 increment, for one full block at this rate.
     inc_scale: f32,
 }
 
@@ -177,20 +177,22 @@ impl Env {
         }
     }
 
-    /// Advances one block. Returns the level as log2 amplitude (0.0 = full scale).
-    pub fn tick(&mut self) -> f32 {
+    /// Advances `n` samples (at most one `BLOCK`). Returns the level as
+    /// log2 amplitude (0.0 = full scale).
+    pub fn tick(&mut self, n: usize) -> f32 {
+        let inc = self.inc * n.min(BLOCK) as f32 / BLOCK as f32;
         if self.stage < 3 || (self.stage < 4 && !self.down) {
             if self.rising {
                 if self.lvl < ATTACK_JUMP {
                     self.lvl = ATTACK_JUMP;
                 }
-                self.lvl += (17.0 - self.lvl.floor()) * self.inc;
+                self.lvl += (17.0 - self.lvl.floor()) * inc;
                 if self.lvl >= self.target {
                     self.lvl = self.target;
                     self.advance(self.stage + 1);
                 }
             } else {
-                self.lvl -= self.inc;
+                self.lvl -= inc;
                 if self.lvl <= self.target {
                     self.lvl = self.target;
                     self.advance(self.stage + 1);
@@ -235,11 +237,11 @@ mod tests {
         let mut e = full_env([99.0; 4], [99.0, 99.0, 99.0, 0.0]);
         let mut level = f32::MIN;
         for _ in 0..blocks(0.02) {
-            level = e.tick();
+            level = e.tick(BLOCK);
         }
         assert!(level.abs() < 0.05, "level {level}");
         for _ in 0..blocks(1.0) {
-            level = e.tick();
+            level = e.tick(BLOCK);
         }
         assert!(level.abs() < 0.05, "sustains at L3");
         assert!(e.is_down() && !e.is_finished());
@@ -249,12 +251,12 @@ mod tests {
     fn release_falls_silent_and_finishes() {
         let mut e = full_env([99.0; 4], [99.0, 99.0, 99.0, 0.0]);
         for _ in 0..blocks(0.05) {
-            e.tick();
+            e.tick(BLOCK);
         }
         e.release();
         let mut level = 0.0;
         for _ in 0..blocks(0.05) {
-            level = e.tick();
+            level = e.tick(BLOCK);
         }
         assert!(level < -12.0, "level {level}");
         assert!(e.is_finished());
@@ -264,7 +266,9 @@ mod tests {
     fn slower_rates_take_longer() {
         let attack_blocks = |rate: f32| {
             let mut e = full_env([rate, 99.0, 99.0, 99.0], [99.0, 99.0, 99.0, 0.0]);
-            (0..blocks(30.0)).position(|_| e.tick() > -0.1).unwrap()
+            (0..blocks(30.0))
+                .position(|_| e.tick(BLOCK) > -0.1)
+                .unwrap()
         };
         assert!(attack_blocks(50.0) > attack_blocks(70.0));
         assert!(attack_blocks(70.0) > attack_blocks(99.0));
@@ -279,7 +283,7 @@ mod tests {
             operator_out_level(0.0, 0, 0),
             0,
         );
-        let level = (0..blocks(0.05)).map(|_| e.tick()).last().unwrap();
+        let level = (0..blocks(0.05)).map(|_| e.tick(BLOCK)).last().unwrap();
         assert!(level < -13.0, "level {level}");
     }
 
@@ -292,10 +296,30 @@ mod tests {
             operator_out_level(50.0, 0, 0),
             0,
         );
-        let quiet = (0..blocks(0.1)).map(|_| e.tick()).last().unwrap();
+        let quiet = (0..blocks(0.1)).map(|_| e.tick(BLOCK)).last().unwrap();
         e.set_out_level(operator_out_level(99.0, 0, 0));
-        let loud = e.tick();
+        let loud = e.tick(BLOCK);
         assert!(loud > quiet + 1.0, "{quiet} -> {loud}");
+    }
+
+    #[test]
+    fn envelope_speed_does_not_depend_on_block_size() {
+        let rates = [60.0, 55.0, 50.0, 45.0];
+        let levels = [99.0, 70.0, 80.0, 0.0];
+        let mut a = full_env(rates, levels);
+        let mut b = full_env(rates, levels);
+        // 224 samples = 7 blocks of 32 = 32 blocks of 7.
+        let mut worst = 0.0f32;
+        for step in 0..400 {
+            if step == 250 {
+                a.release();
+                b.release();
+            }
+            let la = (0..7).map(|_| a.tick(32)).last().unwrap();
+            let lb = (0..32).map(|_| b.tick(7)).last().unwrap();
+            worst = worst.max((la - lb).abs());
+        }
+        assert!(worst < 0.1, "levels differ by {worst} log2 units");
     }
 
     #[test]
