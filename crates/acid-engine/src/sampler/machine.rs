@@ -147,7 +147,7 @@ impl Sampler {
                     .max_by_key(|&i| age(&voices[i]))
             })
             .unwrap_or_else(|| (0..VOICES).max_by_key(|&i| age(&voices[i])).unwrap_or(0));
-        self.voices[i].start(&seg, &s, slot, key, vel.min(127), live, clock);
+        self.voices[i].start(&seg, slot, key, vel.min(127), live, clock);
     }
 
     pub fn note_off(&mut self, key: u8, live: bool) {

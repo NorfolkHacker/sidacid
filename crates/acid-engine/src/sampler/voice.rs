@@ -107,7 +107,8 @@ pub struct Voice {
     env: f32,
     stage: Stage,
     release_coef: f32,
-    gain: f32,
+    /// Velocity factor; the slot's Level is applied live in `render`.
+    velocity: f32,
     filter: [Svf; 2],
     sample_rate: f32,
 }
@@ -131,23 +132,13 @@ impl Voice {
             env: 0.0,
             stage: Stage::Off,
             release_coef: 0.0,
-            gain: 0.0,
+            velocity: 0.0,
             filter: [Svf::new(sample_rate), Svf::new(sample_rate)],
             sample_rate,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn start(
-        &mut self,
-        seg: &Segment,
-        s: &SlotSettings,
-        slot: usize,
-        key: u8,
-        vel: u8,
-        live: bool,
-        age: u32,
-    ) {
+    pub fn start(&mut self, seg: &Segment, slot: usize, key: u8, vel: u8, live: bool, age: u32) {
         self.active = true;
         self.held = true;
         self.live = live;
@@ -174,7 +165,7 @@ impl Voice {
         }
         self.env = 0.0;
         self.stage = Stage::Attack;
-        self.gain = vel.min(127) as f32 / 127.0 * s.level_gain;
+        self.velocity = vel.min(127) as f32 / 127.0;
         self.filter = [Svf::new(self.sample_rate), Svf::new(self.sample_rate)];
     }
 
@@ -272,7 +263,7 @@ impl Voice {
                 l = self.filter[0].process(l);
                 r = self.filter[1].process(r);
             }
-            let g = self.env * edge * self.gain;
+            let g = self.env * edge * self.velocity * s.level_gain;
             out_l[i] += l * g * s.pan_l;
             out_r[i] += r * g * s.pan_r;
             self.pos += self.step;
@@ -394,6 +385,34 @@ mod tests {
     }
 
     #[test]
+    fn level_changes_reach_a_sounding_voice() {
+        let sample = sine_sample(48_000);
+        let s = SlotSettings::default();
+        let seg = segment(
+            &SlotPlay::from_meta(&SlotMeta::chromatic(36, 60, 36, 48_000)),
+            36,
+            &s,
+            48_000,
+            48_000,
+            SR,
+            120.0,
+        )
+        .unwrap();
+        let (mut a, mut b) = (Voice::new(SR), Voice::new(SR));
+        a.start(&seg, 0, 36, 100, false, 1);
+        b.start(&seg, 0, 36, 100, false, 1);
+        assert_eq!(run(&mut a, &sample, &s, 500), run(&mut b, &sample, &s, 500));
+        let mut quieter = s;
+        quieter.level_gain = s.level_gain * 0.5;
+        let full = run(&mut a, &sample, &s, 500);
+        let half = run(&mut b, &sample, &quieter, 500);
+        assert!(full.iter().any(|x| x.abs() > 0.1), "the voice sounds");
+        for (f, h) in full.iter().zip(&half) {
+            assert!((f * 0.5 - h).abs() < 1e-6, "{f} vs {h}");
+        }
+    }
+
+    #[test]
     fn a_segment_plays_to_its_end_then_stops_with_a_fade() {
         let sample = sine_sample(4000);
         let s = SlotSettings::default();
@@ -405,7 +424,7 @@ mod tests {
             rate: 1.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 36, 127, false, 1);
+        v.start(&seg, 0, 36, 127, false, 1);
         let out = run(&mut v, &sample, &s, 1200);
         assert!(!v.active, "ended after 1000 frames");
         let peak = out[..900].iter().fold(0.0f32, |m, x| m.max(x.abs()));
@@ -433,7 +452,7 @@ mod tests {
             rate: 1.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 36, 127, false, 1);
+        v.start(&seg, 0, 36, 127, false, 1);
         let out = run(&mut v, &sample, &s, 600);
         assert!(out[200] > out[400] && out[400] > out[550], "falling ramp");
     }
@@ -450,7 +469,7 @@ mod tests {
             rate: 2.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 36, 127, false, 1);
+        v.start(&seg, 0, 36, 127, false, 1);
         run(&mut v, &sample, &s, 990);
         assert!(v.active);
         run(&mut v, &sample, &s, 20);
@@ -469,7 +488,7 @@ mod tests {
             rate: 1.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 60, 127, false, 1);
+        v.start(&seg, 0, 60, 127, false, 1);
         let out = run(&mut v, &sample, &s, 20_000);
         assert!(v.active, "still looping");
         let max_step = out[5000..]
@@ -492,7 +511,7 @@ mod tests {
                 rate,
             };
             let mut v = Voice::new(SR);
-            v.start(&seg, &s, 0, 60, 127, false, 1);
+            v.start(&seg, 0, 60, 127, false, 1);
             let out = run(&mut v, &sample, &s, 2000);
             assert!(v.active, "rate {rate}");
             assert!(
@@ -525,7 +544,7 @@ mod tests {
             rate: 1.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 36, 127, false, 1);
+        v.start(&seg, 0, 36, 127, false, 1);
         run(&mut v, &sample, &s, 10);
         assert!(v.active && v.held);
         run(&mut v, &sample, &s, 40_000);
@@ -554,14 +573,14 @@ mod tests {
             rate: 1.0,
         };
         let mut v = Voice::new(SR);
-        v.start(&seg, &s, 0, 36, 127, false, 1);
+        v.start(&seg, 0, 36, 127, false, 1);
         run(&mut v, &sample, &s, 100);
         v.release(0.01);
         assert!(!v.held);
         run(&mut v, &sample, &s, 6000);
         assert!(!v.active);
         let mut c = Voice::new(SR);
-        c.start(&seg, &s, 0, 36, 127, false, 1);
+        c.start(&seg, 0, 36, 127, false, 1);
         run(&mut c, &sample, &s, 100);
         c.choke();
         run(&mut c, &sample, &s, 3000);
