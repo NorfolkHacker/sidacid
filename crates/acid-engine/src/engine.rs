@@ -193,7 +193,18 @@ impl Engine {
         }
     }
 
+    /// Stops the transport and releases every note (tails ring out).
+    /// Stopping while already stopped also silences the FM machine at
+    /// once, so drones (a released note held at a non-zero L4) can be cut.
     pub fn stop(&mut self) {
+        if !self.seq.is_playing() {
+            self.fm.reset();
+        }
+        self.end_playback();
+    }
+
+    /// Stops the transport and releases every note.
+    fn end_playback(&mut self) {
         self.seq.stop();
         for s in &mut self.synths {
             s.note_off();
@@ -448,7 +459,7 @@ impl Engine {
                     }
                 }
                 if self.seq.take_ended() {
-                    self.stop();
+                    self.end_playback();
                 }
                 continue;
             }
@@ -572,6 +583,29 @@ mod tests {
         render(&mut e, 0.3);
         let (l, _) = render(&mut e, 0.05);
         assert!(peak(&l) < 1e-4);
+    }
+
+    #[test]
+    fn stopping_twice_silences_fm_drones() {
+        use crate::params::OpParam;
+        let mut p = Project::default();
+        // OP1's L4 at full: a released note keeps sounding.
+        p.params.insert(ParamId::FmOp(0, OpParam::L4), 1.0);
+        let mut e = Engine::from_project(SR, &p);
+        e.play();
+        e.note_on(4, 60, 100);
+        render(&mut e, 0.1);
+        e.note_off(4, 60);
+        e.stop();
+        render(&mut e, 0.3);
+        let (l, _) = render(&mut e, 0.05);
+        assert!(
+            peak(&l) > 0.01,
+            "precondition: the drone rings after one stop"
+        );
+        e.stop();
+        let (l, _) = render(&mut e, 0.05);
+        assert_eq!(peak(&l), 0.0, "a second stop silences the FM machine");
     }
 
     #[test]

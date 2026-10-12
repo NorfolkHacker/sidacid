@@ -92,7 +92,11 @@ fn render_song_to<E>(
         rendered += CHUNK;
         progress((rendered as f64 / expected).min(0.99) as f32);
     }
-    engine.stop();
+    // Usually the song has ended (and stopped) itself; a second stop
+    // would hard-silence the FM tail.
+    if engine.is_playing() {
+        engine.stop();
+    }
     render_tail(&mut engine, &mut sink)?;
     progress(1.0);
     Ok(())
@@ -185,6 +189,31 @@ mod tests {
             "progress is monotonic"
         );
         assert_eq!(seen.last().copied(), Some(1.0));
+    }
+
+    #[test]
+    fn song_export_keeps_the_fm_release_tail() {
+        use crate::params::{OpParam, ParamId};
+        let mut p = Project::default();
+        p.bpm = 120.0; // 1 bar = 2 s
+        p.fm.patterns[0].notes.push(crate::project::Note {
+            start: 0,
+            len: 8,
+            pitch: 60,
+            vel: 120,
+        });
+        // OP1 releases slowly: the note rings past the song's end.
+        p.params.insert(ParamId::FmOp(0, OpParam::R4), 0.3);
+        let mut bar = crate::project::Bar::default();
+        bar.patterns[crate::machine::MachineId::Fm.index()] = Some(crate::project::PatternRef(0));
+        p.song.bars = vec![bar];
+        let (l, _) = render_song(&p, |_| {});
+        let sr = EXPORT_SAMPLE_RATE as usize;
+        assert!(l.len() > 2 * sr + sr / 4, "a tail follows the song");
+        assert!(
+            rms(&l[2 * sr..2 * sr + sr / 4]) > 1e-3,
+            "the FM release rings on after the song ends"
+        );
     }
 
     #[test]

@@ -148,6 +148,10 @@ impl Env {
         } else if self.stage < 4 {
             self.target = self.actual(self.levels[self.stage]);
             self.rising = self.target > self.lvl;
+        } else {
+            // Through the release: hold L4 at the new output level, so a
+            // drone (L4 above silence) follows the Level knob.
+            self.lvl = self.actual(self.levels[3]);
         }
     }
 
@@ -320,6 +324,19 @@ mod tests {
             worst = worst.max((la - lb).abs());
         }
         assert!(worst < 0.1, "levels differ by {worst} log2 units");
+    }
+
+    #[test]
+    fn a_finished_drone_follows_the_output_level() {
+        // L4 above silence: the released note holds L4 for ever.
+        let mut e = full_env([99.0; 4], [99.0, 99.0, 99.0, 99.0]);
+        e.tick(BLOCK);
+        e.release();
+        let drone = (0..blocks(0.05)).map(|_| e.tick(BLOCK)).last().unwrap();
+        assert!(e.is_finished() && drone > -0.1, "drone at {drone}");
+        e.set_out_level(operator_out_level(0.0, 0, 0));
+        let level = e.tick(BLOCK);
+        assert!(level < -13.0, "level 0 silences the drone: {level}");
     }
 
     #[test]
