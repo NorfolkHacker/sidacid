@@ -4,7 +4,7 @@
 //! no allocation, locking or I/O.
 
 use crate::drums::{DrumKit, KitKind};
-use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
+use crate::machine::{FIRST_NOTE_MACHINE, MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
 use crate::params::{CHANNELS, FmParam, PARAM_COUNT, ParamId, SamplerParam};
 use crate::placeholder::SineVoices;
@@ -451,7 +451,7 @@ impl Engine {
                 self.kits[k].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
             }
             for n in 0..NOTE_MACHINES {
-                let c = &mut self.chans[4 + n];
+                let c = &mut self.chans[FIRST_NOTE_MACHINE + n];
                 self.note_machines[n].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
             }
             self.seq.advance(run);

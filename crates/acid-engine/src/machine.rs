@@ -7,6 +7,9 @@ pub const MACHINES: usize = 6;
 pub const TRANSPOSED: usize = 3;
 /// Machines sequenced from note patterns: FM, Sampler.
 pub const NOTE_MACHINES: usize = 2;
+/// Index of the first note machine; note machine `n` is machine
+/// `FIRST_NOTE_MACHINE + n`.
+pub const FIRST_NOTE_MACHINE: usize = MachineId::Fm as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MachineId {
@@ -92,6 +95,9 @@ mod tests {
             assert_eq!(MachineId::from_index(i), Some(*m));
         }
         assert_eq!(MachineId::from_index(MACHINES), None);
+        for n in 0..NOTE_MACHINES {
+            assert_eq!(kind_of(FIRST_NOTE_MACHINE + n), Some(MachineKind::Notes(n)));
+        }
         assert_eq!(kind_of(4), Some(MachineKind::Notes(0)));
         assert_eq!(kind_of(5), Some(MachineKind::Notes(1)));
         assert_eq!(kind_of(3), Some(MachineKind::Drum(1)));

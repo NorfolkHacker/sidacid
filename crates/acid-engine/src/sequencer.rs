@@ -4,7 +4,7 @@
 //! lane), the mid tick (gate off unless sliding/tied into the next step),
 //! and on every tick the poly note tracks (FM, Sampler).
 
-use crate::machine::{MACHINES, MachineId, NOTE_MACHINES};
+use crate::machine::{FIRST_NOTE_MACHINE, MACHINES, MachineId, NOTE_MACHINES};
 use crate::params::ParamId;
 use crate::project::{DrumHit, Gate, PatternRef, Song, TICKS_PER_STEP};
 use crate::song::{Banks, DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
@@ -118,7 +118,7 @@ fn len_of(length: u8) -> usize {
 }
 
 /// Track indices of the note machines (FM, Sampler).
-const NOTE_TRACKS: std::ops::Range<usize> = 4..4 + NOTE_MACHINES;
+const NOTE_TRACKS: std::ops::Range<usize> = FIRST_NOTE_MACHINE..FIRST_NOTE_MACHINE + NOTE_MACHINES;
 
 fn transposed(pitch: u8, add: i8) -> u8 {
     (pitch as i16 + add as i16).clamp(0, 127) as u8
@@ -591,7 +591,7 @@ impl Sequencer {
                 release_all(t, m, out);
                 continue;
             }
-            let pat = &banks.notes[m - 4][t.pattern as usize];
+            let pat = &banks.notes[m - FIRST_NOTE_MACHINE][t.pattern as usize];
             let ticks = pat.ticks();
             if t.pos >= ticks {
                 t.pos = 0;
