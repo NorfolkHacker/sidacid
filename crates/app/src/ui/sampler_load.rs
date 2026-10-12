@@ -165,7 +165,9 @@ impl SidAcidApp {
         }
     }
 
-    /// Applies `change` to a copy of the slot's meta; refuses zone clashes and malformed metas with a message.
+    /// Applies `change` to a copy of the slot's meta; refuses zone clashes
+    /// and malformed metas with a message (a malformed step of a drag,
+    /// `merge`, is refused silently so the message doesn't flicker).
     pub(crate) fn edit_slot_meta(
         &mut self,
         slot: usize,
@@ -182,6 +184,9 @@ impl SidAcidApp {
             return false;
         }
         if !meta.is_well_formed(data.frames()) {
+            if !merge {
+                self.view.message = Some("That change doesn't fit this sample.".into());
+            }
             return false;
         }
         if sampler.zone_clash(slot, &meta) {

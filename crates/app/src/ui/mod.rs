@@ -959,6 +959,21 @@ mod tests {
     }
 
     #[test]
+    fn malformed_meta_edits_explain_themselves_except_mid_drag() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        let before = app.doc.project.clone();
+        assert!(!app.edit_slot_meta(0, true, |m| m.start = m.end));
+        assert!(app.view.message.is_none(), "no message while dragging");
+        assert!(!app.edit_slot_meta(0, false, |m| m.start = m.end));
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("That change doesn't fit this sample.")
+        );
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
     fn sampler_panel_draws_empty_and_loaded_slots_in_both_modes() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         run_frames(&mut app, 1);
