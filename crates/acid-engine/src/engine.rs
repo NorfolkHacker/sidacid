@@ -1,12 +1,13 @@
 //! The whole groovebox: two bass synths, two drum kits, the FM and Sampler
-//! note slots (sine placeholders for now), the mixer and the
+//! note slots (the FM synth and the sampler's sine placeholder), the mixer and the
 //! sequencer, rendered sample-accurately. process() is real-time safe:
 //! no allocation, locking or I/O.
 
 use crate::drums::{DrumKit, KitKind};
-use crate::machine::{FIRST_NOTE_MACHINE, MACHINES, MachineKind, NOTE_MACHINES, kind_of};
+use crate::fm::FmSynth;
+use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
-use crate::params::{CHANNELS, FmParam, PARAM_COUNT, ParamId, SamplerParam};
+use crate::params::{CHANNELS, PARAM_COUNT, ParamId, SamplerParam};
 use crate::placeholder::SineVoices;
 use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
@@ -24,7 +25,9 @@ pub struct Engine {
     sample_rate: f32,
     synths: [BassSynth; 2],
     kits: [DrumKit; 2],
-    note_machines: [SineVoices; NOTE_MACHINES],
+    fm: FmSynth,
+    /// The sampler slot's placeholder until the sampler engine arrives.
+    sampler: SineVoices,
     mixer: Mixer,
     seq: Sequencer,
     synth_patterns: [Vec<SynthPattern>; 2],
@@ -56,7 +59,8 @@ impl Engine {
                 DrumKit::new(KitKind::K808, sample_rate),
                 DrumKit::new(KitKind::K909, sample_rate),
             ],
-            note_machines: std::array::from_fn(|_| SineVoices::new(sample_rate)),
+            fm: FmSynth::new(sample_rate),
+            sampler: SineVoices::new(sample_rate),
             mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
             seq: Sequencer::new(sample_rate),
             synth_patterns: [
@@ -121,8 +125,9 @@ impl Engine {
             ParamId::Synth(s, p) => self.synths[s as usize].set_param(p, v),
             ParamId::Drum(k, i, p) => self.kits[k as usize].set_param(i as usize, p, v),
             ParamId::Kit(k, p) => self.kits[k as usize].set_kit_param(p, v),
-            ParamId::Fm(FmParam::Volume) => self.note_machines[0].set_volume(v),
-            ParamId::Sampler(SamplerParam::Volume) => self.note_machines[1].set_volume(v),
+            ParamId::Fm(p) => self.fm.set_param(p, v),
+            ParamId::FmOp(op, p) => self.fm.set_op_param(op as usize, p, v),
+            ParamId::Sampler(SamplerParam::Volume) => self.sampler.set_volume(v),
             _ => self.mixer.set_param(id, v),
         }
     }
@@ -153,26 +158,38 @@ impl Engine {
     pub fn play(&mut self) {
         self.seq.play();
         // The sequencer drops its held-note masks without emitting releases.
-        for v in &mut self.note_machines {
-            v.all_off();
-        }
+        self.fm.all_off();
+        self.sampler.all_off();
     }
 
-    /// Starts a note on note machine `machine` (4 = FM, 5 = Sampler) right
-    /// away, playing or not. Other machines, pitches above 127 and
-    /// velocity 0 are ignored.
+    /// Audition: starts a note on note machine `machine` (4 = FM,
+    /// 5 = Sampler) right away, playing or not. Other machines, pitches
+    /// above 127 and velocity 0 are ignored.
     pub fn note_on(&mut self, machine: usize, pitch: u8, vel: u8) {
-        if let Some(MachineKind::Notes(n)) = kind_of(machine)
-            && pitch <= 127
-            && vel > 0
-        {
-            self.note_machines[n].note_on(pitch, vel.min(127));
+        self.poly_on(machine, pitch, vel, true);
+    }
+
+    /// Audition release: only releases auditioned notes.
+    pub fn note_off(&mut self, machine: usize, pitch: u8) {
+        self.poly_off(machine, pitch, true);
+    }
+
+    fn poly_on(&mut self, machine: usize, pitch: u8, vel: u8, live: bool) {
+        if pitch > 127 || vel == 0 {
+            return;
+        }
+        match MachineId::from_index(machine) {
+            Some(MachineId::Fm) => self.fm.note_on(pitch, vel.min(127), live),
+            Some(MachineId::Sampler) => self.sampler.note_on(pitch, vel.min(127)),
+            _ => {}
         }
     }
 
-    pub fn note_off(&mut self, machine: usize, pitch: u8) {
-        if let Some(MachineKind::Notes(n)) = kind_of(machine) {
-            self.note_machines[n].note_off(pitch);
+    fn poly_off(&mut self, machine: usize, pitch: u8, live: bool) {
+        match MachineId::from_index(machine) {
+            Some(MachineId::Fm) => self.fm.note_off(pitch, live),
+            Some(MachineId::Sampler) => self.sampler.note_off(pitch),
+            _ => {}
         }
     }
 
@@ -181,9 +198,8 @@ impl Engine {
         for s in &mut self.synths {
             s.note_off();
         }
-        for v in &mut self.note_machines {
-            v.all_off();
-        }
+        self.fm.all_off();
+        self.sampler.all_off();
         self.base.copy_from_slice(&self.knobs);
         self.touched.fill(false);
         self.restore_all_knobs();
@@ -425,8 +441,10 @@ impl Engine {
                             machine,
                             pitch,
                             vel,
-                        } => self.note_on(machine, pitch, vel),
-                        SeqEvent::PolyOff { machine, pitch } => self.note_off(machine, pitch),
+                        } => self.poly_on(machine, pitch, vel, false),
+                        SeqEvent::PolyOff { machine, pitch } => {
+                            self.poly_off(machine, pitch, false)
+                        }
                     }
                 }
                 if self.seq.take_ended() {
@@ -450,10 +468,12 @@ impl Engine {
                 let c = &mut self.chans[2 + k];
                 self.kits[k].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
             }
-            for n in 0..NOTE_MACHINES {
-                let c = &mut self.chans[FIRST_NOTE_MACHINE + n];
-                self.note_machines[n].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
-            }
+            let c = &mut self.chans[MachineId::Fm.index()];
+            self.fm
+                .render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
+            let c = &mut self.chans[MachineId::Sampler.index()];
+            self.sampler
+                .render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
             self.seq.advance(run);
             pos += run;
         }
@@ -465,9 +485,8 @@ impl Engine {
             for k in &mut self.kits {
                 k.reset();
             }
-            for v in &mut self.note_machines {
-                v.reset();
-            }
+            self.fm.reset();
+            self.sampler.reset();
         }
     }
 }
@@ -1065,5 +1084,69 @@ mod tests {
         e.select_pattern(5, 9);
         assert_eq!(e.queued_patterns()[5], Some(9));
         assert_eq!(e.current_patterns().len(), crate::machine::MACHINES);
+    }
+
+    #[test]
+    fn audition_survives_a_pattern_release_of_the_same_pitch() {
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 4,
+            pitch: 60,
+            vel: 100,
+        });
+        let mut held = Engine::from_project(SR, &p);
+        held.play();
+        held.note_on(4, 60, 100);
+        let (l, _) = render(&mut held, 0.5);
+        assert!(
+            peak(&l[l.len() - 2000..]) > 0.01,
+            "audition note still sounds"
+        );
+        let mut pattern_only = Engine::from_project(SR, &p);
+        pattern_only.play();
+        let (l, _) = render(&mut pattern_only, 0.5);
+        assert!(peak(&l[l.len() - 2000..]) < 1e-3, "pattern note released");
+    }
+
+    #[test]
+    fn fm_operator_params_reach_the_synth() {
+        use crate::params::OpParam;
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 32,
+            pitch: 60,
+            vel: 120,
+        });
+        p.params.insert(ParamId::FmOp(0, OpParam::Level), 0.0);
+        let mut e = Engine::from_project(SR, &p);
+        e.play();
+        let (l, _) = render(&mut e, 0.3);
+        assert_eq!(peak(&l), 0.0, "OP1 (the only carrier heard) is at level 0");
+    }
+
+    #[test]
+    fn fm_algorithm_changes_the_sound() {
+        use crate::params::{FmParam, OpParam};
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 32,
+            pitch: 57,
+            vel: 120,
+        });
+        p.params.insert(ParamId::FmOp(1, OpParam::Level), 0.9);
+        let mut a = Engine::from_project(SR, &p);
+        p.params.insert(ParamId::Fm(FmParam::Algorithm), 1.0);
+        let mut b = Engine::from_project(SR, &p);
+        a.play();
+        b.play();
+        let (la, _) = render(&mut a, 0.3);
+        let (lb, _) = render(&mut b, 0.3);
+        assert_ne!(la, lb);
     }
 }
