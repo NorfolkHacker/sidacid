@@ -3,16 +3,66 @@
 use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::host::Command;
-use acid_engine::params::{FxParam, ParamId, SynthParam, step_index};
+use acid_engine::params::{FmParam, FxParam, OpParam, ParamId, SynthParam, fm_steps, step_index};
 use eframe::egui;
 
-/// Display names for each position of a discrete parameter.
+/// Display names for each position of a named switch; empty for a knob.
 pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
     match id {
         ParamId::Synth(_, SynthParam::Wave) => &["Saw", "Pulse"],
         ParamId::Synth(_, SynthParam::FilterMode) => &["LP", "BP", "HP"],
         ParamId::Fx(FxParam::DelayDivision) => &["1/16", "1/8", "3/16", "1/4", "3/8", "1/2"],
-        _ => &["Off", "On"],
+        ParamId::Fm(FmParam::LfoWave) => &["Tri", "Saw Dn", "Saw Up", "Square", "Sine", "S&H"],
+        ParamId::Fm(FmParam::Mono) => &["Poly", "Mono"],
+        ParamId::Fm(FmParam::FilterMode) => &["LP", "HP"],
+        ParamId::FmOp(_, OpParam::LeftCurve | OpParam::RightCurve) => {
+            &["-Lin", "-Exp", "+Exp", "+Lin"]
+        }
+        ParamId::FmOp(_, OpParam::FixedFreq) => &["Ratio", "Fixed"],
+        _ if id.info().steps == 2 => &["Off", "On"],
+        _ => &[],
+    }
+}
+
+/// The value a knob shows in its tooltip: DX7 units for FM controls, a
+/// percentage otherwise.
+pub fn value_text(id: ParamId, v: f32) -> String {
+    use FmParam as F;
+    use OpParam as O;
+    let pick = |n: usize| step_index(v, n as u8) as i32;
+    let signed = |x: i32| {
+        if x > 0 {
+            format!("+{x}")
+        } else {
+            x.to_string()
+        }
+    };
+    match id {
+        ParamId::Fm(F::Algorithm) => (pick(fm_steps::ALGORITHM) + 1).to_string(),
+        ParamId::Fm(F::Feedback) => pick(fm_steps::FEEDBACK).to_string(),
+        ParamId::Fm(F::PitchModSens) => pick(fm_steps::PITCH_MOD_SENS).to_string(),
+        ParamId::Fm(F::Transpose) => signed(pick(fm_steps::TRANSPOSE) - 24),
+        ParamId::FmOp(_, O::Coarse) => pick(fm_steps::COARSE).to_string(),
+        ParamId::FmOp(_, O::Detune) => signed(pick(fm_steps::DETUNE) - 7),
+        ParamId::FmOp(_, O::RateScaling) => pick(fm_steps::RATE_SCALING).to_string(),
+        ParamId::FmOp(_, O::AmpModSens) => pick(fm_steps::AMP_MOD_SENS).to_string(),
+        ParamId::FmOp(_, O::VelSens) => pick(fm_steps::VEL_SENS).to_string(),
+        ParamId::Fm(
+            F::PitchR1
+            | F::PitchR2
+            | F::PitchR3
+            | F::PitchR4
+            | F::PitchL1
+            | F::PitchL2
+            | F::PitchL3
+            | F::PitchL4
+            | F::LfoSpeed
+            | F::LfoDelay
+            | F::LfoPmd
+            | F::LfoAmd,
+        )
+        | ParamId::FmOp(_, _) => format!("{:.0}", v.clamp(0.0, 1.0) * 99.0),
+        _ => format!("{:.0}%", v * 100.0),
     }
 }
 
@@ -38,6 +88,7 @@ pub fn param_label(id: ParamId) -> String {
         ParamId::Master(p) => format!("Master {}", p.name()),
         ParamId::Fm(p) => format!("FM {}", p.name()),
         ParamId::Sampler(p) => format!("Sampler {}", p.name()),
+        ParamId::FmOp(op, p) => format!("FM OP{} {}", op + 1, p.name()),
     }
 }
 
@@ -46,7 +97,7 @@ impl SidAcidApp {
     pub(crate) fn param_knob(&mut self, ui: &mut egui::Ui, id: ParamId, label: &str) {
         let info = id.info();
         let value = self.doc.project.param(id);
-        if info.steps >= 2 {
+        if info.steps >= 2 && !discrete_names(id).is_empty() {
             let names = discrete_names(id);
             if let Some(i) = knob::switch(ui, label, step_index(value, info.steps), names) {
                 let v = i as f32 / (info.steps - 1) as f32;
@@ -67,9 +118,9 @@ impl SidAcidApp {
         };
         let automated = acid_engine::song::is_automated(&self.doc.project.song, id);
         let tip = format!(
-            "{} {:.0}%{}  (drag, Shift = fine, double-click = reset)",
+            "{} {}{}  (drag, Shift = fine, double-click = reset)",
             info.name,
-            value * 100.0,
+            value_text(id, value),
             if automated {
                 "  \u{b7} automated in song"
             } else {
@@ -174,6 +225,34 @@ mod tests {
                 acid_engine::params::ChannelParam::Level
             )),
             "Sampler Level"
+        );
+    }
+
+    #[test]
+    fn fm_labels_switches_and_values() {
+        use acid_engine::params::{FmParam, OpParam};
+        assert_eq!(
+            param_label(ParamId::FmOp(2, OpParam::Coarse)),
+            "FM OP3 Coarse"
+        );
+        assert_eq!(param_label(ParamId::Fm(FmParam::Cutoff)), "FM Cutoff");
+        assert_eq!(discrete_names(ParamId::Fm(FmParam::LfoWave)).len(), 6);
+        assert_eq!(
+            discrete_names(ParamId::FmOp(0, OpParam::LeftCurve))[3],
+            "+Lin"
+        );
+        assert_eq!(
+            discrete_names(ParamId::FmOp(0, OpParam::On)),
+            &["Off", "On"]
+        );
+        assert!(discrete_names(ParamId::Fm(FmParam::Algorithm)).is_empty());
+        assert_eq!(value_text(ParamId::Fm(FmParam::Algorithm), 1.0), "32");
+        assert_eq!(value_text(ParamId::FmOp(0, OpParam::Detune), 0.0), "-7");
+        assert_eq!(value_text(ParamId::Fm(FmParam::Transpose), 1.0), "+24");
+        assert_eq!(value_text(ParamId::FmOp(0, OpParam::R1), 1.0), "99");
+        assert_eq!(
+            value_text(ParamId::Synth(0, SynthParam::Cutoff), 0.5),
+            "50%"
         );
     }
 

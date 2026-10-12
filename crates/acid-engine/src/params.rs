@@ -7,8 +7,26 @@ pub const SYNTHS: usize = 2;
 pub const KITS: usize = 2;
 pub const CHANNELS: usize = 6;
 pub const DRUM_INSTRUMENTS: usize = 8;
+/// Operators in the FM synth.
+pub const FM_OPS: usize = 6;
 /// Number of entries in `ParamId::all()`.
-pub const PARAM_COUNT: usize = 215;
+pub const PARAM_COUNT: usize = 380;
+
+/// Positions of the FM controls that pick from a list. The numeric ones
+/// are continuous knobs the synth rounds with `step_index(v, N)`.
+pub mod fm_steps {
+    pub const ALGORITHM: usize = 32;
+    pub const FEEDBACK: usize = 8;
+    pub const COARSE: usize = 32;
+    pub const DETUNE: usize = 15;
+    pub const RATE_SCALING: usize = 8;
+    pub const AMP_MOD_SENS: usize = 4;
+    pub const VEL_SENS: usize = 8;
+    pub const PITCH_MOD_SENS: usize = 8;
+    pub const TRANSPOSE: usize = 49;
+    pub const CURVES: usize = 4;
+    pub const LFO_WAVES: usize = 6;
+}
 
 macro_rules! param_enum {
     ($name:ident { $($var:ident => $label:literal),+ $(,)? }) => {
@@ -44,7 +62,27 @@ param_enum!(FxParam {
     DelayReturn => "Delay Return", ReverbSize => "Size", ReverbDamping => "Damping",
     ReverbWidth => "Width", ReverbReturn => "Reverb Return",
 });
-param_enum!(FmParam { Volume => "Volume" });
+param_enum!(FmParam {
+    Volume => "Volume", Algorithm => "Algorithm", Feedback => "Feedback", OscSync => "Osc Sync",
+    PitchR1 => "Pitch R1", PitchR2 => "Pitch R2", PitchR3 => "Pitch R3", PitchR4 => "Pitch R4",
+    PitchL1 => "Pitch L1", PitchL2 => "Pitch L2", PitchL3 => "Pitch L3", PitchL4 => "Pitch L4",
+    LfoSpeed => "LFO Speed", LfoDelay => "LFO Delay", LfoPmd => "LFO Pitch Depth",
+    LfoAmd => "LFO Amp Depth", LfoSync => "LFO Sync", LfoWave => "LFO Wave",
+    PitchModSens => "Pitch Mod Sens", Transpose => "Transpose",
+    Mono => "Mono", Glide => "Glide", Vintage => "Vintage",
+    FilterOn => "Filter", FilterMode => "Filter Mode", Cutoff => "Cutoff", Resonance => "Resonance",
+    ChorusRate => "Chorus Rate", ChorusDepth => "Chorus Depth", ChorusMix => "Chorus Mix",
+    PhaserRate => "Phaser Rate", PhaserDepth => "Phaser Depth", PhaserFeedback => "Phaser Feedback",
+    PhaserMix => "Phaser Mix",
+});
+param_enum!(OpParam {
+    R1 => "Rate 1", R2 => "Rate 2", R3 => "Rate 3", R4 => "Rate 4",
+    L1 => "Level 1", L2 => "Level 2", L3 => "Level 3", L4 => "Level 4",
+    BreakPoint => "Break Point", LeftDepth => "Left Depth", RightDepth => "Right Depth",
+    LeftCurve => "Left Curve", RightCurve => "Right Curve", RateScaling => "Rate Scaling",
+    AmpModSens => "Amp Mod Sens", VelSens => "Velocity", Level => "Level",
+    FixedFreq => "Fixed Freq", Coarse => "Coarse", Fine => "Fine", Detune => "Detune", On => "On",
+});
 param_enum!(SamplerParam { Volume => "Volume" });
 param_enum!(MasterParam {
     CompOn => "Comp On", CompThreshold => "Threshold", CompRatio => "Ratio",
@@ -62,6 +100,7 @@ pub enum ParamId {
     Master(MasterParam),
     Fm(FmParam),
     Sampler(SamplerParam),
+    FmOp(u8, OpParam),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,7 +189,45 @@ impl ParamId {
                     F::ReverbReturn => cont(n, 0.6),
                 }
             }
-            ParamId::Fm(p) => cont(p.name(), 0.7),
+            ParamId::Fm(p) => {
+                use FmParam as F;
+                let n = p.name();
+                let of99 = |x: f32| x / 99.0;
+                match p {
+                    F::Volume => cont(n, 0.7),
+                    F::Algorithm | F::Feedback | F::LfoDelay | F::LfoPmd | F::LfoAmd => {
+                        cont(n, 0.0)
+                    }
+                    F::OscSync | F::LfoSync => disc(n, 1.0, 2),
+                    F::PitchR1 | F::PitchR2 | F::PitchR3 | F::PitchR4 => cont(n, 1.0),
+                    F::PitchL1 | F::PitchL2 | F::PitchL3 | F::PitchL4 => cont(n, of99(50.0)),
+                    F::LfoSpeed => cont(n, of99(35.0)),
+                    F::LfoWave => disc(n, 0.0, fm_steps::LFO_WAVES as u8),
+                    F::PitchModSens => cont(n, 3.0 / 7.0),
+                    F::Transpose => cont(n, 0.5),
+                    F::Mono | F::Vintage | F::FilterOn | F::FilterMode => disc(n, 0.0, 2),
+                    F::Glide | F::Resonance | F::ChorusMix | F::PhaserMix => cont(n, 0.0),
+                    F::Cutoff => cont(n, 1.0),
+                    F::ChorusRate | F::PhaserRate | F::PhaserFeedback => cont(n, 0.3),
+                    F::ChorusDepth | F::PhaserDepth => cont(n, 0.5),
+                }
+            }
+            ParamId::FmOp(op, p) => {
+                use OpParam as O;
+                let n = p.name();
+                match p {
+                    O::R1 | O::R2 | O::R3 | O::R4 | O::L1 | O::L2 | O::L3 => cont(n, 1.0),
+                    O::L4 | O::LeftDepth | O::RightDepth | O::Fine => cont(n, 0.0),
+                    O::RateScaling | O::AmpModSens | O::VelSens => cont(n, 0.0),
+                    O::BreakPoint => cont(n, 39.0 / 99.0),
+                    O::LeftCurve | O::RightCurve => disc(n, 0.0, fm_steps::CURVES as u8),
+                    O::Level => cont(n, if op == 0 { 1.0 } else { 0.0 }),
+                    O::FixedFreq => disc(n, 0.0, 2),
+                    O::Coarse => cont(n, 1.0 / 31.0),
+                    O::Detune => cont(n, 0.5),
+                    O::On => disc(n, 1.0, 2),
+                }
+            }
             ParamId::Sampler(p) => cont(p.name(), 0.7),
             ParamId::Master(p) => {
                 let n = p.name();
@@ -175,6 +252,7 @@ impl ParamId {
             ParamId::Drum(k, i, _) => (k as usize) < KITS && (i as usize) < DRUM_INSTRUMENTS,
             ParamId::Kit(k, _) => (k as usize) < KITS,
             ParamId::Channel(c, _) => (c as usize) < CHANNELS,
+            ParamId::FmOp(op, _) => (op as usize) < FM_OPS,
             ParamId::Fm(_) | ParamId::Sampler(_) | ParamId::Fx(_) | ParamId::Master(_) => true,
         }
     }
@@ -193,6 +271,7 @@ impl ParamId {
         let master_base = fx_base + FxParam::ALL.len();
         let fm_base = master_base + MasterParam::ALL.len();
         let sampler_base = fm_base + FmParam::ALL.len();
+        let fm_op_base = sampler_base + SamplerParam::ALL.len();
         Some(match self {
             ParamId::Synth(s, p) => s as usize * synth_n + p as usize,
             ParamId::Drum(k, i, p) => {
@@ -208,6 +287,7 @@ impl ParamId {
             ParamId::Master(p) => master_base + p as usize,
             ParamId::Fm(p) => fm_base + p as usize,
             ParamId::Sampler(p) => sampler_base + p as usize,
+            ParamId::FmOp(op, p) => fm_op_base + op as usize * OpParam::ALL.len() + p as usize,
         })
     }
 
@@ -229,6 +309,9 @@ impl ParamId {
         v.extend(MasterParam::ALL.iter().map(|&p| ParamId::Master(p)));
         v.extend(FmParam::ALL.iter().map(|&p| ParamId::Fm(p)));
         v.extend(SamplerParam::ALL.iter().map(|&p| ParamId::Sampler(p)));
+        for op in 0..FM_OPS as u8 {
+            v.extend(OpParam::ALL.iter().map(|&p| ParamId::FmOp(op, p)));
+        }
         v
     }
 }
@@ -264,19 +347,53 @@ mod tests {
         let all = ParamId::all();
         assert_eq!(
             all.len(),
-            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 1 + 1
+            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 34 + 1 + 6 * 22
         );
         let unique: HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
     }
 
     #[test]
-    fn fm_and_sampler_params_come_last() {
+    fn fm_params_follow_the_master_params() {
         let all = ParamId::all();
-        assert_eq!(all[all.len() - 2], ParamId::Fm(FmParam::Volume));
-        assert_eq!(all[all.len() - 1], ParamId::Sampler(SamplerParam::Volume));
+        let first_fm = all
+            .iter()
+            .position(|id| matches!(id, ParamId::Fm(_)))
+            .unwrap();
+        assert_eq!(all[first_fm], ParamId::Fm(FmParam::Volume));
+        assert!(matches!(all[first_fm - 1], ParamId::Master(_)));
+        assert_eq!(all[all.len() - 1], ParamId::FmOp(5, OpParam::On));
+        assert!(all.contains(&ParamId::Sampler(SamplerParam::Volume)));
         assert_eq!(ParamId::Fm(FmParam::Volume).info().default, 0.7);
-        assert!(ParamId::Channel(5, ChannelParam::Level).is_valid());
+    }
+
+    #[test]
+    fn fm_defaults_are_the_dx7_init_voice() {
+        let d = |id: ParamId| id.info().default;
+        assert_eq!(d(ParamId::FmOp(0, OpParam::Level)), 1.0);
+        assert_eq!(d(ParamId::FmOp(1, OpParam::Level)), 0.0);
+        assert_eq!(d(ParamId::FmOp(3, OpParam::R1)), 1.0);
+        assert_eq!(d(ParamId::FmOp(3, OpParam::L4)), 0.0);
+        assert!((d(ParamId::FmOp(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
+        assert_eq!(d(ParamId::FmOp(2, OpParam::Detune)), 0.5);
+        assert_eq!(d(ParamId::FmOp(5, OpParam::On)), 1.0);
+        assert!((d(ParamId::Fm(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);
+        assert_eq!(d(ParamId::Fm(FmParam::Transpose)), 0.5);
+        assert_eq!(d(ParamId::Fm(FmParam::Algorithm)), 0.0);
+        assert_eq!(ParamId::Fm(FmParam::LfoWave).info().steps, 6);
+        assert_eq!(ParamId::FmOp(0, OpParam::LeftCurve).info().steps, 4);
+        assert_eq!(
+            ParamId::Fm(FmParam::Algorithm).info().steps,
+            0,
+            "a rounded knob"
+        );
+    }
+
+    #[test]
+    fn fm_operator_ids_are_bounded() {
+        assert!(ParamId::FmOp(5, OpParam::Fine).is_valid());
+        assert!(!ParamId::FmOp(6, OpParam::Fine).is_valid());
+        assert_eq!(ParamId::FmOp(6, OpParam::Fine).index(), None);
     }
 
     #[test]
