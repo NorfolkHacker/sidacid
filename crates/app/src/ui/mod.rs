@@ -535,6 +535,28 @@ mod tests {
     }
 
     #[test]
+    fn note_patterns_copy_between_fm_and_sampler_but_not_onto_synths() {
+        use acid_engine::project::Note;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.doc.project.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 4,
+            pitch: 60,
+            vel: 100,
+        });
+        app.view.focus = 4;
+        app.copy_pattern();
+        app.view.focus = 5;
+        app.paste_pattern();
+        assert_eq!(app.doc.project.sampler.patterns[0].notes.len(), 1);
+        app.doc.undo();
+        assert!(app.doc.project.sampler.patterns[0].notes.is_empty());
+        app.view.focus = 0;
+        app.paste_pattern();
+        assert!(app.view.message.is_some(), "refused onto a 303 pattern");
+    }
+
+    #[test]
     fn pasting_drums_onto_a_synth_is_refused() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.view.focus = 2;

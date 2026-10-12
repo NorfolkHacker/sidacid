@@ -3,7 +3,10 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
-use acid_engine::project::{BANK_SIZE, DrumPattern, PatternRef, Project, SynthPattern};
+use acid_engine::machine::{MachineKind, kind_of};
+use acid_engine::project::{
+    BANK_SIZE, DrumPattern, NotePattern, PatternRef, Project, SynthPattern,
+};
 use eframe::egui;
 use std::sync::mpsc;
 
@@ -21,6 +24,7 @@ pub enum Pending {
 pub enum Clip {
     Synth(SynthPattern),
     Drum(DrumPattern),
+    Notes(NotePattern),
 }
 
 fn project_dialog() -> rfd::FileDialog {
@@ -195,28 +199,42 @@ impl SidAcidApp {
             "SidAcid pattern {}",
             PatternRef(slot as u8).label()
         ));
-        self.view.clipboard = Some(if m < 2 {
-            Clip::Synth(self.doc.project.synths[m].patterns[slot].clone())
-        } else {
-            Clip::Drum(self.doc.project.drums[m - 2].patterns[slot].clone())
-        });
+        self.view.clipboard = match kind_of(m) {
+            Some(MachineKind::Synth(s)) => Some(Clip::Synth(
+                self.doc.project.synths[s].patterns[slot].clone(),
+            )),
+            Some(MachineKind::Drum(k)) => {
+                Some(Clip::Drum(self.doc.project.drums[k].patterns[slot].clone()))
+            }
+            Some(MachineKind::Notes(_)) => self
+                .doc
+                .project
+                .note_patterns(m)
+                .map(|p| Clip::Notes(p[slot].clone())),
+            None => None,
+        };
     }
 
     pub(crate) fn paste_pattern(&mut self) {
         let m = self.view.focus;
         let slot = self.doc.project.selected[m];
-        let edit = match (&self.view.clipboard, m < 2) {
-            (Some(Clip::Synth(p)), true) => Edit::SynthPattern {
-                synth: m,
-                slot,
-                pattern: Box::new(p.clone()),
-            },
-            (Some(Clip::Drum(p)), false) => Edit::DrumPattern {
-                kit: m - 2,
-                slot,
-                pattern: Box::new(p.clone()),
-            },
+        let edit = match (&self.view.clipboard, kind_of(m)) {
             (None, _) => return,
+            (Some(Clip::Synth(p)), Some(MachineKind::Synth(s))) => Edit::SynthPattern {
+                synth: s,
+                slot,
+                pattern: Box::new(p.clone()),
+            },
+            (Some(Clip::Drum(p)), Some(MachineKind::Drum(k))) => Edit::DrumPattern {
+                kit: k,
+                slot,
+                pattern: Box::new(p.clone()),
+            },
+            (Some(Clip::Notes(p)), Some(MachineKind::Notes(_))) => Edit::NotePattern {
+                machine: m,
+                slot,
+                pattern: Box::new(p.clone()),
+            },
             _ => {
                 self.view.message = Some("The clipboard holds a different kind of pattern.".into());
                 return;

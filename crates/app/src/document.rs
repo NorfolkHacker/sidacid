@@ -5,7 +5,7 @@
 use acid_engine::host::Command;
 use acid_engine::params::ParamId;
 use acid_engine::project::{
-    DrumHit, DrumPattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
+    DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
 };
 use std::path::PathBuf;
 
@@ -55,6 +55,16 @@ pub enum Edit {
         slot: u8,
         pattern: Box<DrumPattern>,
     },
+    NotePattern {
+        machine: usize,
+        slot: u8,
+        pattern: Box<NotePattern>,
+    },
+    NoteLength {
+        machine: usize,
+        slot: u8,
+        length: u8,
+    },
     Bpm(f32),
     Swing(f32),
     View {
@@ -77,6 +87,8 @@ enum MergeKey {
     DrumHit(usize, u8, usize, usize),
     DrumLength(usize, u8),
     DrumPattern(usize, u8),
+    NotePattern(usize, u8),
+    NoteLength(usize, u8),
     Bpm,
     Swing,
     View(usize),
@@ -101,6 +113,8 @@ fn merge_key(edit: &Edit) -> MergeKey {
         } => MergeKey::DrumHit(*kit, *slot, *step, *inst),
         Edit::DrumLength { kit, slot, .. } => MergeKey::DrumLength(*kit, *slot),
         Edit::DrumPattern { kit, slot, .. } => MergeKey::DrumPattern(*kit, *slot),
+        Edit::NotePattern { machine, slot, .. } => MergeKey::NotePattern(*machine, *slot),
+        Edit::NoteLength { machine, slot, .. } => MergeKey::NoteLength(*machine, *slot),
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
         Edit::View { synth, .. } => MergeKey::View(*synth),
@@ -296,6 +310,32 @@ impl Document {
                     pattern: Box::new(old),
                 }
             }
+            Edit::NotePattern {
+                machine,
+                slot,
+                pattern,
+            } => {
+                let pats = p.note_patterns_mut(machine).expect("note machine");
+                let old = std::mem::replace(&mut pats[slot as usize], *pattern);
+                Edit::NotePattern {
+                    machine,
+                    slot,
+                    pattern: Box::new(old),
+                }
+            }
+            Edit::NoteLength {
+                machine,
+                slot,
+                length,
+            } => {
+                let pat = &mut p.note_patterns_mut(machine).expect("note machine")[slot as usize];
+                let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
+                Edit::NoteLength {
+                    machine,
+                    slot,
+                    length: old,
+                }
+            }
             Edit::Bpm(bpm) => Edit::Bpm(std::mem::replace(&mut p.bpm, bpm.clamp(40.0, 300.0))),
             Edit::Swing(swing) => {
                 Edit::Swing(std::mem::replace(&mut p.swing, swing.clamp(0.0, 0.75)))
@@ -330,6 +370,15 @@ impl Document {
                     kit: *kit as u8,
                     slot: *slot,
                     pattern: Box::new(p.drums[*kit].patterns[*slot as usize].clone()),
+                }]
+            }
+            Edit::NotePattern { machine, slot, .. } | Edit::NoteLength { machine, slot, .. } => {
+                vec![Command::NotePattern {
+                    machine: *machine as u8,
+                    slot: *slot,
+                    pattern: Box::new(
+                        p.note_patterns(*machine).expect("note machine")[*slot as usize].clone(),
+                    ),
                 }]
             }
             Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
@@ -581,6 +630,46 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn note_pattern_edits_undo_and_sync_the_engine() {
+        use acid_engine::project::{Note, NotePattern};
+        let mut d = doc();
+        let mut p = NotePattern::default();
+        p.notes.push(Note {
+            start: 2,
+            len: 3,
+            pitch: 64,
+            vel: 99,
+        });
+        let cmds = d.apply(
+            Edit::NotePattern {
+                machine: 5,
+                slot: 7,
+                pattern: Box::new(p.clone()),
+            },
+            false,
+        );
+        assert_eq!(d.project.sampler.patterns[7], p);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::NotePattern { machine: 5, slot: 7, pattern }] if **pattern == p
+        ));
+        d.apply(
+            Edit::NoteLength {
+                machine: 5,
+                slot: 7,
+                length: 99,
+            },
+            false,
+        );
+        assert_eq!(d.project.sampler.patterns[7].length, 64, "clamped");
+        d.undo();
+        assert_eq!(d.project.sampler.patterns[7].length, 16);
+        d.undo();
+        assert!(d.project.sampler.patterns[7].notes.is_empty());
+        assert!(d.project.fm.patterns[7].notes.is_empty());
     }
 
     #[test]
