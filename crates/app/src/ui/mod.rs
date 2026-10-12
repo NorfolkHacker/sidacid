@@ -18,6 +18,7 @@ mod poly_edit;
 mod polyroll;
 mod record;
 mod roll_edit;
+mod sampler_load;
 mod song_panel;
 mod step303;
 mod step_edit;
@@ -36,6 +37,8 @@ pub struct ViewState {
     /// Machine that keyboard shortcuts act on (0..MACHINES).
     pub focus: usize,
     pub message: Option<String>,
+    /// Selected sampler slot (0..16).
+    pub sampler_slot: usize,
     /// Bank shown on each machine's pads (0..8).
     pub bank: [u8; acid_engine::machine::MACHINES],
     /// Active 303 step-writer per synth.
@@ -825,5 +828,101 @@ mod tests {
     fn the_starter_bank_is_built_once() {
         assert!(std::ptr::eq(fm_voices::starter(), fm_voices::starter()));
         assert_eq!(fm_voices::starter().len(), 16);
+    }
+
+    fn test_wav(seconds: f32) -> Vec<u8> {
+        let rate = 22_050;
+        let mut cur = std::io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::new(&mut cur, spec).unwrap();
+        for i in 0..(seconds * rate as f32) as usize {
+            let click = if i % 5512 < 200 { 12_000.0 } else { 0.0 };
+            w.write_sample(((i as f32 * 0.3).sin() * click) as i16)
+                .unwrap();
+        }
+        w.finalize().unwrap();
+        cur.into_inner()
+    }
+
+    #[test]
+    fn loading_samples_picks_modes_zones_and_params() {
+        use acid_engine::params::{ParamId, SlotParam};
+        use acid_engine::sampler::slot::SlotMode;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "Break", Some("wav"), &test_wav(2.0));
+        let slot = app.doc.project.sampler.slots[0].as_ref().expect("loaded");
+        assert_eq!(slot.meta.mode, SlotMode::Slice);
+        assert_eq!(slot.meta.base_key, 24);
+        assert!(slot.meta.slices.len() >= 2);
+        assert_eq!(slot.meta.original_bpm, 120.0);
+        assert_eq!(
+            app.doc
+                .project
+                .param(ParamId::SamplerSlot(0, SlotParam::Choke)),
+            1.0
+        );
+        assert_eq!(
+            app.doc
+                .project
+                .param(ParamId::SamplerSlot(0, SlotParam::TempoLock)),
+            1.0
+        );
+        let span = slot.meta.slices.len() as u8;
+
+        app.load_sample_bytes(1, "Stab", Some("wav"), &test_wav(0.5));
+        let stab = app.doc.project.sampler.slots[1].as_ref().unwrap();
+        assert_eq!(stab.meta.mode, SlotMode::Chromatic);
+        assert_eq!(stab.meta.base_key, 24 + span, "placed above the break");
+        assert_eq!(
+            app.doc
+                .project
+                .param(ParamId::SamplerSlot(1, SlotParam::Choke)),
+            0.0
+        );
+
+        app.doc.undo();
+        assert!(
+            app.doc.project.sampler.slots[1].is_none(),
+            "a load is one undo step"
+        );
+
+        let before = app.doc.project.clone();
+        app.load_sample_bytes(2, "Bad", Some("wav"), b"junk");
+        assert!(app.view.message.is_some());
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn meta_edits_refuse_zone_clashes() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        app.load_sample_bytes(1, "B", Some("wav"), &test_wav(0.5));
+        let b_base = app.doc.project.sampler.slots[1]
+            .as_ref()
+            .unwrap()
+            .meta
+            .base_key;
+        assert!(!app.edit_slot_meta(1, false, |m| m.base_key = 30));
+        assert!(app.view.message.is_some());
+        assert_eq!(
+            app.doc.project.sampler.slots[1]
+                .as_ref()
+                .unwrap()
+                .meta
+                .base_key,
+            b_base
+        );
+        app.view.message = None;
+        assert!(app.edit_slot_meta(1, false, |m| {
+            m.base_key = 100;
+            m.high_key = 110;
+        }));
+        app.clear_slot(0);
+        assert!(app.doc.project.sampler.slots[0].is_none());
     }
 }

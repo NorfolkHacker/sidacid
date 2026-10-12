@@ -8,7 +8,9 @@ use acid_engine::params::ParamId;
 use acid_engine::project::{
     DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
 };
+use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const UNDO_LIMIT: usize = 200;
 
@@ -83,6 +85,17 @@ pub enum Edit {
     FmBank {
         bank: Option<Vec<Dx7Voice>>,
     },
+    /// Loading or clearing a sampler slot, with its knob values: one undo step.
+    SamplerSlot {
+        slot: usize,
+        data: Option<Box<SlotData>>,
+        values: Vec<(ParamId, f32)>,
+    },
+    /// Changing a loaded slot's zone, slices, mode or markers.
+    SlotMeta {
+        slot: usize,
+        meta: Box<SlotMeta>,
+    },
 }
 
 /// Which edits may fold into one undo step during a gesture.
@@ -104,6 +117,8 @@ enum MergeKey {
     Song,
     FmVoice,
     FmBank,
+    SamplerSlot(usize),
+    SlotMeta(usize),
 }
 
 fn merge_key(edit: &Edit) -> MergeKey {
@@ -132,6 +147,8 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::Song { .. } => MergeKey::Song,
         Edit::FmVoice { .. } => MergeKey::FmVoice,
         Edit::FmBank { .. } => MergeKey::FmBank,
+        Edit::SamplerSlot { slot, .. } => MergeKey::SamplerSlot(*slot),
+        Edit::SlotMeta { slot, .. } => MergeKey::SlotMeta(*slot),
     }
 }
 
@@ -375,6 +392,29 @@ impl Document {
                     values: old_values,
                 }
             }
+            Edit::SamplerSlot { slot, data, values } => {
+                let old = std::mem::replace(&mut p.sampler.slots[slot], data.map(|d| *d));
+                let old_values = values
+                    .into_iter()
+                    .map(|(id, v)| {
+                        let before = p.param(id);
+                        p.params.insert(id, v.clamp(0.0, 1.0));
+                        (id, before)
+                    })
+                    .collect();
+                Edit::SamplerSlot {
+                    slot,
+                    data: old.map(Box::new),
+                    values: old_values,
+                }
+            }
+            Edit::SlotMeta { slot, meta } => match p.sampler.slots[slot].as_mut() {
+                Some(d) => Edit::SlotMeta {
+                    slot,
+                    meta: Box::new(std::mem::replace(&mut d.meta, *meta)),
+                },
+                None => Edit::SlotMeta { slot, meta },
+            },
             Edit::FmBank { bank } => Edit::FmBank {
                 bank: std::mem::replace(&mut p.fm.bank, bank),
             },
@@ -421,6 +461,35 @@ impl Document {
                 .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
                 .collect(),
             Edit::FmBank { .. } => Vec::new(),
+            Edit::SamplerSlot { slot, values, .. } => {
+                let data = p.sampler.slots[*slot].as_ref();
+                let mut cmds = vec![
+                    Command::SamplerSample {
+                        slot: *slot as u8,
+                        sample: data.map(|d| Arc::new(d.to_sample())),
+                    },
+                    Command::SamplerPlay {
+                        slot: *slot as u8,
+                        play: Box::new(
+                            data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
+                        ),
+                    },
+                ];
+                cmds.extend(
+                    values
+                        .iter()
+                        .map(|(id, _)| Command::SetParam(*id, p.param(*id))),
+                );
+                cmds
+            }
+            Edit::SlotMeta { slot, .. } => vec![Command::SamplerPlay {
+                slot: *slot as u8,
+                play: Box::new(
+                    p.sampler.slots[*slot]
+                        .as_ref()
+                        .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
+                ),
+            }],
         }
     }
 }
@@ -825,5 +894,58 @@ mod tests {
             }]
         ));
         assert!(d.dirty);
+    }
+
+    #[test]
+    fn sampler_slot_edits_undo_and_sync_the_engine() {
+        use acid_engine::params::SlotParam;
+        use acid_engine::sampler::slot::{SlotData, SlotMeta};
+        let mut d = doc();
+        let tone: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
+        let data = SlotData::new(
+            "Hit",
+            22_050,
+            1,
+            &tone,
+            SlotMeta::sliced(24, vec![0, 500], 120.0, 1000),
+        );
+        let choke = ParamId::SamplerSlot(2, SlotParam::Choke);
+        let cmds = d.apply(
+            Edit::SamplerSlot {
+                slot: 2,
+                data: Some(Box::new(data.clone())),
+                values: vec![(choke, 1.0)],
+            },
+            false,
+        );
+        assert_eq!(d.project.sampler.slots[2], Some(data));
+        assert!(matches!(
+            cmds[0],
+            Command::SamplerSample {
+                slot: 2,
+                sample: Some(_)
+            }
+        ));
+        assert!(matches!(cmds[1], Command::SamplerPlay { slot: 2, .. }));
+        assert!(matches!(cmds[2], Command::SetParam(id, v) if id == choke && v == 1.0));
+        let mut meta = d.project.sampler.slots[2].as_ref().unwrap().meta.clone();
+        meta.slices = vec![0, 300];
+        let cmds = d.apply(
+            Edit::SlotMeta {
+                slot: 2,
+                meta: Box::new(meta),
+            },
+            false,
+        );
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], Command::SamplerPlay { slot: 2, .. }));
+        d.undo();
+        assert_eq!(
+            d.project.sampler.slots[2].as_ref().unwrap().meta.slices,
+            vec![0, 500]
+        );
+        d.undo();
+        assert_eq!(d.project.sampler.slots[2], None);
+        assert_eq!(d.project.param(choke), 0.0);
     }
 }

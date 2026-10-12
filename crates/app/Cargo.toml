@@ -14,3 +14,6 @@ eframe.workspace = true
 cpal.workspace = true
 rfd.workspace = true
 rtrb.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
