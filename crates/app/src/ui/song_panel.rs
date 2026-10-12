@@ -6,12 +6,11 @@ use super::params_ui::param_label;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
+use acid_engine::machine::{MACHINES, MachineId};
 use acid_engine::project::{Bar, PatternRef, Song};
 use acid_engine::sequencer::Mode;
 use acid_engine::song;
 use eframe::egui;
-
-const MACHINES: [&str; 4] = ["Synth 1", "Synth 2", "808", "909"];
 
 /// A song-toolbar click, collected while drawing and applied afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,14 +170,11 @@ impl SidAcidApp {
                                 label
                             }
                         };
-                        let text = format!(
-                            "{}\n{}\n{}\n{}\n{}",
-                            i + 1,
-                            cell(0),
-                            cell(1),
-                            cell(2),
-                            cell(3)
-                        );
+                        let mut text = format!("{}", i + 1);
+                        for m in 0..MACHINES {
+                            text.push('\n');
+                            text.push_str(&cell(m));
+                        }
                         let mut rich = egui::RichText::new(text).monospace().size(10.0);
                         if Some(i) == playing_bar {
                             rich = rich.color(theme::ACID).strong();
@@ -189,7 +185,7 @@ impl SidAcidApp {
                         }
                         let selected = sel.is_some_and(|(a, b)| (a..=b).contains(&i));
                         let r =
-                            ui.add_sized([44.0, 84.0], egui::Button::new(rich).selected(selected));
+                            ui.add_sized([44.0, 118.0], egui::Button::new(rich).selected(selected));
                         if r.clicked() {
                             clicked = Some((i, ui.input(|inp| inp.modifiers.shift)));
                         }
@@ -223,8 +219,9 @@ impl SidAcidApp {
         let mut finished = false;
         ui.label(egui::RichText::new(format!("Bar {}", a + 1)).strong());
         egui::Grid::new("bar_editor").striped(true).show(ui, |ui| {
-            for m in 0..4 {
-                ui.label(MACHINES[m]);
+            for machine in MachineId::ALL {
+                let m = machine.index();
+                ui.label(machine.name());
                 ui.monospace(bar.patterns[m].map_or("—".to_string(), |r| r.label()));
                 if ui
                     .button(format!("Use {}", PatternRef(selected[m]).label()))
@@ -240,9 +237,9 @@ impl SidAcidApp {
                 if ui.checkbox(&mut bar.mutes[m], "Mute").changed() {
                     changed = true;
                 }
-                if m < 2 {
+                if let Some(ti) = machine.transpose_index() {
                     let r = ui.add(
-                        egui::DragValue::new(&mut bar.transpose[m])
+                        egui::DragValue::new(&mut bar.transpose[ti])
                             .range(-12..=12)
                             .prefix("Trans "),
                     );

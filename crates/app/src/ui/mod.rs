@@ -769,4 +769,16 @@ mod tests {
         app.doc.undo();
         assert!(app.doc.project.song.bars.is_empty());
     }
+
+    #[test]
+    fn song_bars_carry_fm_and_sampler_patterns() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.doc.select_pattern(4, 3);
+        app.doc.select_pattern(5, 17);
+        app.song_action(song_panel::SongAction::Add, None);
+        let bar = app.doc.project.song.bars[0];
+        assert_eq!(bar.patterns[4], Some(acid_engine::project::PatternRef(3)));
+        assert_eq!(bar.patterns[5], Some(acid_engine::project::PatternRef(17)));
+        run_frames(&mut app, 2);
+    }
 }
