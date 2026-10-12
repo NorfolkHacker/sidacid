@@ -94,6 +94,18 @@ impl SidAcidApp {
                                 theme::GRID_BG
                             },
                         );
+                        let sampler_row = if machine == MachineId::Sampler.index() {
+                            super::sampler_ui::row_label(&self.doc.project.sampler.slots, pitch)
+                        } else {
+                            None
+                        };
+                        if let Some((slot, _)) = &sampler_row {
+                            painter.rect_filled(
+                                row,
+                                0.0,
+                                super::sampler_ui::SLOT_TINTS[slot % 4].gamma_multiply(0.18),
+                            );
+                        }
                         let key = egui::Rect::from_min_max(
                             pos2(rect.left(), y0),
                             pos2(geom.left - 1.0, y0 + ROW_H - 1.0),
@@ -106,7 +118,15 @@ impl SidAcidApp {
                             Color32::from_gray(190)
                         };
                         painter.rect_filled(key, 1.0, key_colour);
-                        if pitch % 12 == 0 {
+                        if let Some((_, text)) = &sampler_row {
+                            painter.text(
+                                pos2(rect.left() + 1.0, y0 + ROW_H / 2.0),
+                                Align2::LEFT_CENTER,
+                                text,
+                                FontId::monospace(6.5),
+                                Color32::BLACK,
+                            );
+                        } else if pitch % 12 == 0 {
                             painter.text(
                                 pos2(rect.left() + 2.0, y0 + ROW_H / 2.0),
                                 Align2::LEFT_CENTER,

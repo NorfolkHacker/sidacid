@@ -19,6 +19,7 @@ mod polyroll;
 mod record;
 mod roll_edit;
 mod sampler_load;
+mod sampler_ui;
 mod song_panel;
 mod step303;
 mod step_edit;
