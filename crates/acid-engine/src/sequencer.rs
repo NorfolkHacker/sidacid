@@ -3,9 +3,10 @@
 //! Each 16th step has a start tick (notes, drums, param lane) and a mid
 //! tick (gate off unless sliding/tied into the next step).
 
+use crate::machine::{MACHINES, MachineId};
 use crate::params::ParamId;
-use crate::project::{DrumHit, DrumPattern, Gate, PatternRef, Song, SynthPattern};
-use crate::song::{DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
+use crate::project::{DrumHit, Gate, PatternRef, Song};
+use crate::song::{Banks, DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -78,8 +79,8 @@ pub struct Sequencer {
     global_step: u64,
     phase: Phase,
     samples_to_next: f64,
-    /// 0, 1 = synths; 2, 3 = drum kits.
-    tracks: [Track; 4],
+    /// Indexed by `MachineId::index`.
+    tracks: [Track; MACHINES],
     mode: Mode,
     song_start: usize,
     song_bar: usize,
@@ -95,7 +96,7 @@ pub struct Sequencer {
     resync_pending: bool,
     /// The pattern last selected per machine; restored when song
     /// playback (which overrides the tracks' patterns) is left.
-    chosen: [u8; 4],
+    chosen: [u8; MACHINES],
     ended: bool,
 }
 
@@ -113,7 +114,7 @@ impl Sequencer {
             global_step: 0,
             phase: Phase::StepStart,
             samples_to_next: 0.0,
-            tracks: [Track::default(); 4],
+            tracks: [Track::default(); MACHINES],
             mode: Mode::Pattern,
             song_start: 0,
             song_bar: 0,
@@ -123,7 +124,7 @@ impl Sequencer {
             seek: false,
             auto_sync: false,
             resync_pending: false,
-            chosen: [0; 4],
+            chosen: [0; MACHINES],
             ended: false,
         }
     }
@@ -253,13 +254,7 @@ impl Sequencer {
 
     /// Loads the current bar's patterns, mutes and transposes. Returns
     /// false (and stops) when the song has no bar here.
-    fn load_bar(
-        &mut self,
-        song: &Song,
-        synths: [&[SynthPattern]; 2],
-        drums: [&[DrumPattern]; 2],
-        out: &mut Vec<SeqEvent>,
-    ) -> bool {
+    fn load_bar(&mut self, song: &Song, banks: Banks<'_>, out: &mut Vec<SeqEvent>) -> bool {
         let Some(bar) = song.bars.get(self.song_bar) else {
             for s in 0..2 {
                 if self.tracks[s].gate_open {
@@ -271,17 +266,13 @@ impl Sequencer {
             return false;
         };
         if self.seek {
-            self.song_step = bar_start_step(song, self.song_bar, synths, drums);
+            self.song_step = bar_start_step(song, self.song_bar, banks);
             self.seek = false;
             self.auto_sync = true;
         }
-        self.bar_len = bar_steps(bar, synths, drums);
-        for m in 0..4 {
-            let bank_len = if m < 2 {
-                synths[m].len()
-            } else {
-                drums[m - 2].len()
-            };
+        self.bar_len = bar_steps(bar, banks);
+        for m in 0..MACHINES {
+            let bank_len = banks.bank_len(m);
             let t = &mut self.tracks[m];
             t.step = 0;
             match bar.patterns[m] {
@@ -291,9 +282,9 @@ impl Sequencer {
                 }
                 _ => t.silent = true,
             }
-            if m < 2 {
-                t.transpose_add = bar.transpose[m];
-            }
+            t.transpose_add = MachineId::ALL[m]
+                .transpose_index()
+                .map_or(0, |i| bar.transpose[i]);
         }
         true
     }
@@ -325,12 +316,7 @@ impl Sequencer {
     /// Re-derives the song position after a song edit. At a bar start the
     /// bar load does it; mid-bar the current bar's length and position are
     /// recomputed here. A bar that no longer exists ends at its old length.
-    fn apply_resync(
-        &mut self,
-        song: &Song,
-        synths: [&[SynthPattern]; 2],
-        drums: [&[DrumPattern]; 2],
-    ) {
+    fn apply_resync(&mut self, song: &Song, banks: Banks<'_>) {
         self.resync_pending = false;
         if self.bar_step == 0 {
             self.seek = true;
@@ -339,8 +325,8 @@ impl Sequencer {
         let Some(bar) = song.bars.get(self.song_bar) else {
             return;
         };
-        self.song_step = bar_start_step(song, self.song_bar, synths, drums) + self.bar_step as u32;
-        self.bar_len = bar_steps(bar, synths, drums);
+        self.song_step = bar_start_step(song, self.song_bar, banks) + self.bar_step as u32;
+        self.bar_len = bar_steps(bar, banks);
         self.auto_sync = true;
         if self.bar_step >= self.bar_len {
             // The bar got shorter than where we are: the next bar start
@@ -388,13 +374,7 @@ impl Sequencer {
         }
     }
 
-    pub fn tick(
-        &mut self,
-        synths: [&[SynthPattern]; 2],
-        drums: [&[DrumPattern]; 2],
-        song: &Song,
-        out: &mut Vec<SeqEvent>,
-    ) {
+    pub fn tick(&mut self, banks: Banks<'_>, song: &Song, out: &mut Vec<SeqEvent>) {
         if !self.playing {
             return;
         }
@@ -403,9 +383,9 @@ impl Sequencer {
             Phase::StepStart => {
                 if self.mode == Mode::Song {
                     if self.resync_pending {
-                        self.apply_resync(song, synths, drums);
+                        self.apply_resync(song, banks);
                     }
-                    if self.bar_step == 0 && !self.load_bar(song, synths, drums, out) {
+                    if self.bar_step == 0 && !self.load_bar(song, banks, out) {
                         return;
                     }
                     // Before the pattern lanes, so a lane value wins on its step.
@@ -424,7 +404,7 @@ impl Sequencer {
                         }
                         continue;
                     }
-                    let pat = &synths[s][t.pattern as usize];
+                    let pat = &banks.synths[s][t.pattern as usize];
                     if t.step >= len_of(pat.length) {
                         t.step = 0;
                     }
@@ -488,7 +468,7 @@ impl Sequencer {
                     if t.silent {
                         continue;
                     }
-                    let pat = &drums[k][t.pattern as usize];
+                    let pat = &banks.drums[k][t.pattern as usize];
                     if t.step >= len_of(pat.length) {
                         t.step = 0;
                     }
@@ -516,7 +496,7 @@ impl Sequencer {
                     if t.silent {
                         continue;
                     }
-                    let pat = &synths[s][t.pattern as usize];
+                    let pat = &banks.synths[s][t.pattern as usize];
                     let len = len_of(pat.length);
                     if t.gate_open {
                         let step = pat.steps[t.step];
@@ -528,12 +508,8 @@ impl Sequencer {
                         }
                     }
                 }
-                for m in 0..4 {
-                    let len = if m < 2 {
-                        len_of(synths[m][self.tracks[m].pattern as usize].length)
-                    } else {
-                        len_of(drums[m - 2][self.tracks[m].pattern as usize].length)
-                    };
+                for m in 0..MACHINES {
+                    let len = banks.length(m, self.tracks[m].pattern).unwrap_or(1);
                     let t = &mut self.tracks[m];
                     t.step += 1;
                     if t.step >= len {
@@ -568,7 +544,7 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, SynthStep};
+    use crate::project::{DrumHit, DrumPattern, Gate, NotePattern, SynthPattern, SynthStep};
 
     const SR: f32 = 44_100.0;
 
@@ -587,6 +563,7 @@ mod tests {
     struct Fixture {
         synths: [Vec<SynthPattern>; 2],
         drums: [Vec<DrumPattern>; 2],
+        notes: [Vec<NotePattern>; 2],
         song: crate::project::Song,
     }
 
@@ -601,8 +578,16 @@ mod tests {
                     vec![DrumPattern::default(); 4],
                     vec![DrumPattern::default(); 4],
                 ],
+                notes: [
+                    vec![NotePattern::default(); 4],
+                    vec![NotePattern::default(); 4],
+                ],
                 song: crate::project::Song::default(),
             }
+        }
+
+        fn banks(&self) -> Banks<'_> {
+            Banks::new(&self.synths, &self.drums, &self.notes)
         }
 
         fn run(&self, seq: &mut Sequencer, total: usize) -> Vec<(usize, SeqEvent)> {
@@ -613,12 +598,7 @@ mod tests {
                 let n = seq.samples_to_next_tick().min(total - pos);
                 if n == 0 {
                     buf.clear();
-                    seq.tick(
-                        [&self.synths[0], &self.synths[1]],
-                        [&self.drums[0], &self.drums[1]],
-                        &self.song,
-                        &mut buf,
-                    );
+                    seq.tick(self.banks(), &self.song, &mut buf);
                     out.extend(buf.iter().map(|e| (pos, *e)));
                     continue;
                 }
@@ -1222,5 +1202,21 @@ mod tests {
         f.run(&mut s, 10);
         assert!(!s.is_playing());
         assert!(s.take_ended());
+    }
+
+    #[test]
+    fn note_tracks_select_queue_and_report() {
+        let mut f = Fixture::new();
+        f.notes[0][1].length = 4;
+        let mut s = new_seq();
+        s.select(4, 1);
+        s.select(5, 2);
+        assert_eq!((s.current_pattern(4), s.current_pattern(5)), (1, 2));
+        s.play();
+        s.select(4, 3);
+        assert_eq!(s.queued_pattern(4), Some(3));
+        f.run(&mut s, 4 * 5513);
+        assert_eq!(s.current_pattern(4), 3, "switched after the 4-step pattern");
+        assert_eq!(s.queued_pattern(4), None);
     }
 }

@@ -119,29 +119,29 @@ impl SidAcidApp {
             _ => Vec::new(),
         };
         let mut s = self.doc.project.song.clone();
-        let (synths, drums) = song::banks(&self.doc.project);
+        let banks = song::Banks::of(&self.doc.project);
         match action {
             SongAction::Add => {
                 let at = s.bars.len();
-                song::insert_bars(&mut s, at, &[new_bar], synths, drums);
+                song::insert_bars(&mut s, at, &[new_bar], banks);
                 self.view.song_cursor = at;
                 self.view.song_sel_end = None;
             }
             SongAction::Insert => {
                 let at = sel.map_or(s.bars.len(), |(a, _)| a);
                 let bar = sel.map_or(new_bar, |(a, _)| s.bars[a]);
-                song::insert_bars(&mut s, at, &[bar], synths, drums);
+                song::insert_bars(&mut s, at, &[bar], banks);
             }
-            SongAction::Duplicate(a, b) => song::duplicate_bars(&mut s, a, b, synths, drums),
+            SongAction::Duplicate(a, b) => song::duplicate_bars(&mut s, a, b, banks),
             SongAction::Delete(a, b) => {
-                song::delete_bars(&mut s, a, b, synths, drums);
+                song::delete_bars(&mut s, a, b, banks);
                 self.view.song_cursor = a.min(s.bars.len().saturating_sub(1));
                 self.view.song_sel_end = None;
             }
             SongAction::Loop(a, b) => s.loop_range = Some((a as u16, b as u16)),
             SongAction::Paste => {
                 let at = sel.map_or(s.bars.len(), |(_, b)| b + 1);
-                song::insert_bars(&mut s, at, &clip, synths, drums);
+                song::insert_bars(&mut s, at, &clip, banks);
             }
             SongAction::NoLoop => s.loop_range = None,
         }

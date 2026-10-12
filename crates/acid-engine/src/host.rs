@@ -5,8 +5,9 @@
 //! freed on the UI thread, never on the audio thread.
 
 use crate::engine::Engine;
+use crate::machine::MACHINES;
 use crate::params::{CHANNELS, ParamId};
-use crate::project::{DrumPattern, Song, SynthPattern};
+use crate::project::{DrumPattern, NotePattern, Song, SynthPattern};
 use crate::sequencer::Mode;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
@@ -39,6 +40,11 @@ pub enum Command {
         slot: u8,
         pattern: Box<DrumPattern>,
     },
+    NotePattern {
+        machine: u8,
+        slot: u8,
+        pattern: Box<NotePattern>,
+    },
     ReplaceEngine(Box<Engine>),
     SetMode(Mode),
     Song(Box<Song>),
@@ -52,9 +58,9 @@ pub enum Command {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Status {
     pub playing: bool,
-    pub playhead: [usize; 4],
-    pub patterns: [u8; 4],
-    pub queued: [Option<u8>; 4],
+    pub playhead: [usize; MACHINES],
+    pub patterns: [u8; MACHINES],
+    pub queued: [Option<u8>; MACHINES],
     /// Peaks since the previous status: channels 0..CHANNELS, then master.
     pub meters: [f32; CHANNELS + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
@@ -70,6 +76,7 @@ pub enum Event {
     Status(Status),
     DisposeSynthPattern(Box<SynthPattern>),
     DisposeDrumPattern(Box<DrumPattern>),
+    DisposeNotePattern(Box<NotePattern>),
     DisposeEngine(Box<Engine>),
     DisposeSong(Box<Song>),
 }
@@ -160,6 +167,15 @@ impl EngineHost {
                     self.engine
                         .swap_drum_pattern(kit as usize, slot, &mut pattern);
                     self.dispose(Event::DisposeDrumPattern(pattern));
+                }
+                Command::NotePattern {
+                    machine,
+                    slot,
+                    mut pattern,
+                } => {
+                    self.engine
+                        .swap_note_pattern(machine as usize, slot, &mut pattern);
+                    self.dispose(Event::DisposeNotePattern(pattern));
                 }
                 Command::ReplaceEngine(mut engine) => {
                     std::mem::swap(&mut self.engine, &mut engine);

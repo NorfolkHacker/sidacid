@@ -3,11 +3,12 @@
 //! no allocation, locking or I/O.
 
 use crate::drums::{DrumKit, KitKind};
+use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
 use crate::params::{CHANNELS, PARAM_COUNT, ParamId};
-use crate::project::{DrumPattern, PATTERNS, Project, Song, SynthPattern};
+use crate::project::{DrumPattern, NotePattern, PATTERNS, Project, Song, SynthPattern};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
-use crate::song::MAX_BARS;
+use crate::song::{Banks, MAX_BARS};
 use crate::synth::BassSynth;
 
 /// Upper bound on sequencer ticks fired without time advancing; guards
@@ -24,6 +25,7 @@ pub struct Engine {
     seq: Sequencer,
     synth_patterns: [Vec<SynthPattern>; 2],
     drum_patterns: [Vec<DrumPattern>; 2],
+    note_patterns: [Vec<NotePattern>; NOTE_MACHINES],
     chans: [StereoBuf; CHANNELS],
     events: Vec<SeqEvent>,
     /// Knob values set through `set_param`, indexed by `ParamId::index`.
@@ -60,6 +62,7 @@ impl Engine {
                 vec![DrumPattern::default(); PATTERNS],
                 vec![DrumPattern::default(); PATTERNS],
             ],
+            note_patterns: std::array::from_fn(|_| vec![NotePattern::default(); PATTERNS]),
             chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
             events: Vec::with_capacity(EVENT_RESERVE),
             knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
@@ -78,14 +81,14 @@ impl Engine {
             self.synth_patterns[s] = p.synths[s].patterns.clone();
             self.drum_patterns[s] = p.drums[s].patterns.clone();
         }
+        self.note_patterns = [p.fm.patterns.clone(), p.sampler.patterns.clone()];
         for id in ParamId::all() {
             self.set_param(id, p.param(id));
         }
         self.song = p.song.clone();
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
-        // Machines 4 and 5 join the sequencer in the next change.
-        for (m, &slot) in p.selected.iter().enumerate().take(4) {
+        for (m, &slot) in p.selected.iter().enumerate() {
             self.seq.select(m, slot);
         }
     }
@@ -234,9 +237,9 @@ impl Engine {
         self.seq.is_playing()
     }
 
-    /// Ignores `machine >= 4` and `slot >= 128`.
+    /// Ignores `machine >= MACHINES` and `slot >= 128`.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) {
-        if machine < 4 && (slot as usize) < PATTERNS {
+        if machine < MACHINES && (slot as usize) < PATTERNS {
             self.seq.select(machine, slot);
         }
     }
@@ -288,7 +291,31 @@ impl Engine {
         p
     }
 
-    pub fn queued_patterns(&self) -> [Option<u8>; 4] {
+    /// Swaps `p` into note machine `machine` (4 = FM, 5 = Sampler).
+    /// Real-time safe. An invalid target or malformed pattern leaves both
+    /// untouched and returns false.
+    pub fn swap_note_pattern(&mut self, machine: usize, slot: u8, p: &mut NotePattern) -> bool {
+        let Some(MachineKind::Notes(n)) = kind_of(machine) else {
+            return false;
+        };
+        if slot as usize >= PATTERNS || !p.is_well_formed() {
+            return false;
+        }
+        std::mem::swap(&mut self.note_patterns[n][slot as usize], p);
+        true
+    }
+
+    pub fn set_note_pattern(
+        &mut self,
+        machine: usize,
+        slot: u8,
+        mut p: NotePattern,
+    ) -> NotePattern {
+        self.swap_note_pattern(machine, slot, &mut p);
+        p
+    }
+
+    pub fn queued_patterns(&self) -> [Option<u8>; MACHINES] {
         std::array::from_fn(|m| self.seq.queued_pattern(m))
     }
 
@@ -302,11 +329,11 @@ impl Engine {
         std::mem::take(&mut self.guard_fired)
     }
 
-    pub fn playhead(&self) -> [usize; 4] {
+    pub fn playhead(&self) -> [usize; MACHINES] {
         std::array::from_fn(|m| self.seq.playhead(m))
     }
 
-    pub fn current_patterns(&self) -> [u8; 4] {
+    pub fn current_patterns(&self) -> [u8; MACHINES] {
         std::array::from_fn(|m| self.seq.current_pattern(m))
     }
 
@@ -338,8 +365,11 @@ impl Engine {
                 ticks_here += 1;
                 self.events.clear();
                 self.seq.tick(
-                    [&self.synth_patterns[0], &self.synth_patterns[1]],
-                    [&self.drum_patterns[0], &self.drum_patterns[1]],
+                    Banks::new(
+                        &self.synth_patterns,
+                        &self.drum_patterns,
+                        &self.note_patterns,
+                    ),
                     &self.song,
                     &mut self.events,
                 );
@@ -534,7 +564,7 @@ mod tests {
         e.set_param(ParamId::Kit(2, KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
-        assert_eq!(e.current_patterns(), [0, 0, 0, 0]);
+        assert_eq!(e.current_patterns(), [0; MACHINES]);
     }
 
     #[test]
@@ -586,7 +616,7 @@ mod tests {
         e.play();
         render(&mut e, 0.3);
         assert!(e.playhead()[2] >= 2);
-        assert_eq!(e.current_patterns(), [0, 0, 0, 0]);
+        assert_eq!(e.current_patterns(), [0; MACHINES]);
     }
 
     #[test]
@@ -662,7 +692,7 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         e.select_pattern(3, 5);
-        assert_eq!(e.queued_patterns(), [None, None, None, Some(5)]);
+        assert_eq!(e.queued_patterns(), [None, None, None, Some(5), None, None]);
     }
 
     #[test]
@@ -839,5 +869,30 @@ mod tests {
         assert_eq!(e.song_bar(), 1);
         assert_eq!(e.song_step(), 16);
         assert_eq!(e.mode(), crate::sequencer::Mode::Song);
+    }
+
+    #[test]
+    fn note_patterns_swap_and_report() {
+        use crate::project::{Note, NotePattern};
+        let mut e = demo_engine();
+        let mut p = NotePattern::default();
+        p.notes.push(Note {
+            start: 0,
+            len: 4,
+            pitch: 60,
+            vel: 100,
+        });
+        assert!(e.swap_note_pattern(4, 2, &mut p));
+        assert!(p.notes.is_empty(), "got the old, empty pattern back");
+        assert!(!e.swap_note_pattern(0, 2, &mut p), "not a note machine");
+        let mut bad = NotePattern {
+            length: 0,
+            ..NotePattern::default()
+        };
+        assert!(!e.swap_note_pattern(5, 0, &mut bad));
+        e.play();
+        e.select_pattern(5, 9);
+        assert_eq!(e.queued_patterns()[5], Some(9));
+        assert_eq!(e.current_patterns().len(), crate::machine::MACHINES);
     }
 }

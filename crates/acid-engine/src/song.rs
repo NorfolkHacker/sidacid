@@ -1,40 +1,74 @@
 //! Pure song helpers shared by the sequencer, offline render and the UI:
 //! bar lengths, global step positions, automation lookup and editing.
 
+use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, DrumPattern, PATTERNS, PatternRef, Project, STEPS, Song, SynthPattern,
+    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
+    SynthPattern,
 };
 use std::collections::BTreeMap;
 
 pub const MAX_BARS: usize = 999;
 pub const DEFAULT_BAR_STEPS: usize = 16;
 
-pub type SynthBanks<'a> = [&'a [SynthPattern]; 2];
-pub type DrumBanks<'a> = [&'a [DrumPattern]; 2];
+/// Every machine's pattern bank, borrowed. Cheap to copy.
+#[derive(Clone, Copy)]
+pub struct Banks<'a> {
+    pub synths: [&'a [SynthPattern]; 2],
+    pub drums: [&'a [DrumPattern]; 2],
+    pub notes: [&'a [NotePattern]; NOTE_MACHINES],
+}
 
-pub fn banks(p: &Project) -> (SynthBanks<'_>, DrumBanks<'_>) {
-    (
-        [&p.synths[0].patterns[..], &p.synths[1].patterns[..]],
-        [&p.drums[0].patterns[..], &p.drums[1].patterns[..]],
-    )
+impl<'a> Banks<'a> {
+    pub fn new(
+        synths: &'a [Vec<SynthPattern>; 2],
+        drums: &'a [Vec<DrumPattern>; 2],
+        notes: &'a [Vec<NotePattern>; NOTE_MACHINES],
+    ) -> Self {
+        Self {
+            synths: [&synths[0], &synths[1]],
+            drums: [&drums[0], &drums[1]],
+            notes: [&notes[0], &notes[1]],
+        }
+    }
+
+    pub fn of(p: &'a Project) -> Self {
+        Self {
+            synths: [&p.synths[0].patterns, &p.synths[1].patterns],
+            drums: [&p.drums[0].patterns, &p.drums[1].patterns],
+            notes: [&p.fm.patterns, &p.sampler.patterns],
+        }
+    }
+
+    /// Patterns in `machine`'s bank; 0 for an invalid machine.
+    pub fn bank_len(&self, machine: usize) -> usize {
+        match kind_of(machine) {
+            Some(MachineKind::Synth(s)) => self.synths[s].len(),
+            Some(MachineKind::Drum(k)) => self.drums[k].len(),
+            Some(MachineKind::Notes(n)) => self.notes[n].len(),
+            None => 0,
+        }
+    }
+
+    /// Length in steps (1..=STEPS) of `machine`'s pattern `slot`.
+    pub fn length(&self, machine: usize, slot: u8) -> Option<usize> {
+        let s = slot as usize;
+        let length = match kind_of(machine)? {
+            MachineKind::Synth(i) => self.synths[i].get(s)?.length,
+            MachineKind::Drum(i) => self.drums[i].get(s)?.length,
+            MachineKind::Notes(i) => self.notes[i].get(s)?.length,
+        };
+        Some((length as usize).clamp(1, STEPS))
+    }
 }
 
 /// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
-pub fn bar_steps(bar: &Bar, synths: SynthBanks<'_>, drums: DrumBanks<'_>) -> usize {
-    let mut longest = 0;
-    // Machines 4 and 5 join bar lengths in the next change.
-    for (m, r) in bar.patterns.iter().enumerate().take(4) {
-        let Some(PatternRef(slot)) = r else { continue };
-        let length = if m < 2 {
-            synths[m].get(*slot as usize).map(|p| p.length)
-        } else {
-            drums[m - 2].get(*slot as usize).map(|p| p.length)
-        };
-        if let Some(l) = length {
-            longest = longest.max((l as usize).clamp(1, STEPS));
-        }
-    }
+pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
+    let longest = (0..MACHINES)
+        .filter_map(|m| banks.length(m, bar.patterns[m]?.0))
+        .max()
+        .unwrap_or(0);
     if longest == 0 {
         DEFAULT_BAR_STEPS
     } else {
@@ -43,21 +77,16 @@ pub fn bar_steps(bar: &Bar, synths: SynthBanks<'_>, drums: DrumBanks<'_>) -> usi
 }
 
 /// Global step at which `bar` starts (`bar == bars.len()` gives the song length).
-pub fn bar_start_step(
-    song: &Song,
-    bar: usize,
-    synths: SynthBanks<'_>,
-    drums: DrumBanks<'_>,
-) -> u32 {
+pub fn bar_start_step(song: &Song, bar: usize, banks: Banks<'_>) -> u32 {
     song.bars
         .iter()
         .take(bar)
-        .map(|b| bar_steps(b, synths, drums) as u32)
+        .map(|b| bar_steps(b, banks) as u32)
         .sum()
 }
 
-pub fn total_steps(song: &Song, synths: SynthBanks<'_>, drums: DrumBanks<'_>) -> u32 {
-    bar_start_step(song, song.bars.len(), synths, drums)
+pub fn total_steps(song: &Song, banks: Banks<'_>) -> u32 {
+    bar_start_step(song, song.bars.len(), banks)
 }
 
 /// The lane's value at `step`: its last point at or before it.
@@ -105,7 +134,7 @@ pub fn clear_automation(song: &mut Song, param: ParamId) {
 /// and in the following bars that still held the bar's old reference.
 /// Out-of-range machines and slots are ignored.
 pub fn write_pattern_ref(song: &mut Song, bar: usize, machine: usize, slot: u8) {
-    if machine >= 4 || slot as usize >= PATTERNS {
+    if machine >= MACHINES || slot as usize >= PATTERNS {
         return;
     }
     let Some(old) = song.bars.get(bar).map(|b| b.patterns[machine]) else {
@@ -135,24 +164,15 @@ fn shift_automation(song: &mut Song, from: u32, delta: i64) {
     }
 }
 
-pub fn insert_bars(
-    song: &mut Song,
-    at: usize,
-    bars: &[Bar],
-    synths: SynthBanks<'_>,
-    drums: DrumBanks<'_>,
-) {
+pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
     let at = at.min(song.bars.len());
     let room = MAX_BARS.saturating_sub(song.bars.len());
     let bars = &bars[..bars.len().min(room)];
     if bars.is_empty() {
         return;
     }
-    let start = bar_start_step(song, at, synths, drums);
-    let added: u32 = bars
-        .iter()
-        .map(|b| bar_steps(b, synths, drums) as u32)
-        .sum();
+    let start = bar_start_step(song, at, banks);
+    let added: u32 = bars.iter().map(|b| bar_steps(b, banks) as u32).sum();
     shift_automation(song, start, added as i64);
     song.bars.splice(at..at, bars.iter().copied());
     if let Some((a, b)) = song.loop_range {
@@ -162,13 +182,7 @@ pub fn insert_bars(
     }
 }
 
-pub fn delete_bars(
-    song: &mut Song,
-    first: usize,
-    last: usize,
-    synths: SynthBanks<'_>,
-    drums: DrumBanks<'_>,
-) {
+pub fn delete_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'_>) {
     if song.bars.is_empty() {
         return;
     }
@@ -176,8 +190,8 @@ pub fn delete_bars(
     if first > last {
         return;
     }
-    let start = bar_start_step(song, first, synths, drums);
-    let end = bar_start_step(song, last + 1, synths, drums);
+    let start = bar_start_step(song, first, banks);
+    let end = bar_start_step(song, last + 1, banks);
     for lane in &mut song.automation {
         lane.points.retain(|k, _| *k < start || *k >= end);
     }
@@ -199,19 +213,13 @@ pub fn delete_bars(
     });
 }
 
-pub fn duplicate_bars(
-    song: &mut Song,
-    first: usize,
-    last: usize,
-    synths: SynthBanks<'_>,
-    drums: DrumBanks<'_>,
-) {
+pub fn duplicate_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'_>) {
     if first > last || last >= song.bars.len() {
         return;
     }
     let copy: Vec<Bar> = song.bars[first..=last].to_vec();
-    let src_start = bar_start_step(song, first, synths, drums);
-    let src_end = bar_start_step(song, last + 1, synths, drums);
+    let src_start = bar_start_step(song, first, banks);
+    let src_end = bar_start_step(song, last + 1, banks);
     let points: Vec<(ParamId, Vec<(u32, f32)>)> = song
         .automation
         .iter()
@@ -226,15 +234,15 @@ pub fn duplicate_bars(
         })
         .collect();
     let before = song.bars.len();
-    insert_bars(song, last + 1, &copy, synths, drums);
+    insert_bars(song, last + 1, &copy, banks);
     let inserted = song.bars.len() - before;
     if inserted == 0 {
         return;
     }
     // At the bar cap only the first `inserted` bars were copied: their
     // automation ends where the truncated copy ends.
-    let span = bar_start_step(song, first + inserted, synths, drums) - src_start;
-    let dst = bar_start_step(song, last + 1, synths, drums);
+    let span = bar_start_step(song, first + inserted, banks) - src_start;
+    let dst = bar_start_step(song, last + 1, banks);
     for (param, pts) in points {
         for (offset, v) in pts.into_iter().filter(|(o, _)| *o < span) {
             write_automation(song, param, dst + offset, dst + offset, v);
@@ -276,10 +284,10 @@ mod tests {
     #[test]
     fn bar_length_is_the_longest_assigned_pattern() {
         let p = project_with_lengths(32, 12);
-        let (s, d) = banks(&p);
-        assert_eq!(bar_steps(&bar([None; 4]), s, d), DEFAULT_BAR_STEPS);
-        assert_eq!(bar_steps(&bar([Some(1), None, Some(2), None]), s, d), 32);
-        assert_eq!(bar_steps(&bar([None, None, Some(2), None]), s, d), 12);
+        let b = Banks::of(&p);
+        assert_eq!(bar_steps(&bar([None; 4]), b), DEFAULT_BAR_STEPS);
+        assert_eq!(bar_steps(&bar([Some(1), None, Some(2), None]), b), 32);
+        assert_eq!(bar_steps(&bar([None, None, Some(2), None]), b), 12);
     }
 
     #[test]
@@ -290,11 +298,11 @@ mod tests {
             bar([Some(1), None, None, None]),
             bar([None; 4]),
         ];
-        let (s, d) = banks(&p);
-        assert_eq!(bar_start_step(&p.song, 0, s, d), 0);
-        assert_eq!(bar_start_step(&p.song, 1, s, d), 16);
-        assert_eq!(bar_start_step(&p.song, 2, s, d), 48);
-        assert_eq!(total_steps(&p.song, s, d), 64);
+        let b = Banks::of(&p);
+        assert_eq!(bar_start_step(&p.song, 0, b), 0);
+        assert_eq!(bar_start_step(&p.song, 1, b), 16);
+        assert_eq!(bar_start_step(&p.song, 2, b), 48);
+        assert_eq!(total_steps(&p.song, b), 64);
     }
 
     #[test]
@@ -356,8 +364,8 @@ mod tests {
         write_automation(&mut p.song, id, 20, 20, 0.2);
         p.song.loop_range = Some((1, 2));
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        insert_bars(&mut p.song, 1, &[Bar::default(), Bar::default()], s, d);
+        let b = Banks::of(&snapshot);
+        insert_bars(&mut p.song, 1, &[Bar::default(), Bar::default()], b);
         assert_eq!(p.song.bars.len(), 5);
         let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
         assert_eq!(keys, vec![5, 52], "points from bar 1 on move by 32 steps");
@@ -372,8 +380,8 @@ mod tests {
         write_automation(&mut p.song, id, 40, 40, 0.3);
         p.song.loop_range = Some((2, 3));
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        delete_bars(&mut p.song, 1, 1, s, d);
+        let b = Banks::of(&snapshot);
+        delete_bars(&mut p.song, 1, 1, b);
         assert_eq!(p.song.bars.len(), 3);
         let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
         assert_eq!(keys, vec![5, 24]);
@@ -382,7 +390,7 @@ mod tests {
             Some((1, 2)),
             "loop after the cut moves back"
         );
-        delete_bars(&mut p.song, 2, 2, s, d);
+        delete_bars(&mut p.song, 2, 2, b);
         assert_eq!(p.song.loop_range, None, "loop endpoint deleted");
     }
 
@@ -392,8 +400,8 @@ mod tests {
         p.song.bars[1].mutes[2] = true;
         write_automation(&mut p.song, id, 18, 18, 0.6);
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        duplicate_bars(&mut p.song, 1, 1, s, d);
+        let b = Banks::of(&snapshot);
+        duplicate_bars(&mut p.song, 1, 1, b);
         assert_eq!(p.song.bars.len(), 3);
         assert!(p.song.bars[2].mutes[2]);
         let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
@@ -407,8 +415,8 @@ mod tests {
         write_automation(&mut p.song, id, 20, 20, 0.2);
         write_automation(&mut p.song, id, 36, 36, 0.3);
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        duplicate_bars(&mut p.song, 0, 1, s, d);
+        let b = Banks::of(&snapshot);
+        duplicate_bars(&mut p.song, 0, 1, b);
         assert_eq!(p.song.bars.len(), MAX_BARS, "only bar 0 fit");
         let points: Vec<(u32, f32)> = lane(&p.song, id)
             .unwrap()
@@ -437,7 +445,7 @@ mod tests {
         let mut song = Song::default();
         song.bars = vec![bar([Some(0); 4]); 2];
         let before = song.clone();
-        write_pattern_ref(&mut song, 0, 4, 1);
+        write_pattern_ref(&mut song, 0, MACHINES, 1);
         write_pattern_ref(&mut song, 0, 0, PATTERNS as u8);
         assert_eq!(song, before);
     }
@@ -449,19 +457,44 @@ mod tests {
         write_automation(&mut p.song, id, 18, 20, 0.5);
         write_automation(&mut p.song, other, 40, 40, 0.5);
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        delete_bars(&mut p.song, 1, 1, s, d);
+        let b = Banks::of(&snapshot);
+        delete_bars(&mut p.song, 1, 1, b);
         assert!(lane(&p.song, id).is_none(), "empty lane pruned");
         assert_eq!(p.song.automation.len(), 1);
         assert!(is_automated(&p.song, other));
     }
 
     #[test]
+    fn note_patterns_count_toward_bar_length() {
+        let mut p = Project::default();
+        p.sampler.patterns[3].length = 48;
+        let mut b = Bar::default();
+        b.patterns[5] = Some(PatternRef(3));
+        assert_eq!(bar_steps(&b, Banks::of(&p)), 48);
+        assert_eq!(Banks::of(&p).length(5, 3), Some(48));
+        assert_eq!(Banks::of(&p).length(6, 0), None);
+        assert_eq!(Banks::of(&p).bank_len(4), PATTERNS);
+    }
+
+    #[test]
+    fn recorded_pattern_change_reaches_the_sampler() {
+        let mut song = Song {
+            bars: vec![Bar::default(); 3],
+            ..Default::default()
+        };
+        write_pattern_ref(&mut song, 1, 5, 7);
+        assert_eq!(song.bars[1].patterns[5], Some(PatternRef(7)));
+        assert_eq!(song.bars[2].patterns[5], Some(PatternRef(7)));
+        write_pattern_ref(&mut song, 0, 6, 7);
+        assert!(song.bars[0].patterns.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn bar_count_is_capped() {
         let (mut p, _) = sixteen_step_song(MAX_BARS - 1);
         let snapshot = p.clone();
-        let (s, d) = banks(&snapshot);
-        insert_bars(&mut p.song, 0, &[Bar::default(); 5], s, d);
+        let b = Banks::of(&snapshot);
+        insert_bars(&mut p.song, 0, &[Bar::default(); 5], b);
         assert_eq!(p.song.bars.len(), MAX_BARS);
     }
 }

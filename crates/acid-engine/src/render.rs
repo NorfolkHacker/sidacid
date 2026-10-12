@@ -78,8 +78,7 @@ fn render_song_to<E>(
     engine.set_mode(Mode::Song);
     engine.set_song_start(0);
     engine.play();
-    let (synths, drums) = song::banks(&p);
-    let steps = song::total_steps(&p.song, synths, drums).max(1) as f64;
+    let steps = song::total_steps(&p.song, song::Banks::of(&p)).max(1) as f64;
     let step_samples = 60.0 / p.bpm.clamp(40.0, 300.0) as f64 / 4.0 * sr as f64;
     let expected = steps * step_samples;
     let cap = MAX_SONG_SECONDS * EXPORT_SAMPLE_RATE as usize;
