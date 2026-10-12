@@ -19,6 +19,7 @@ mod polyroll;
 mod record;
 mod roll_edit;
 mod sampler_load;
+mod sampler_panel;
 mod sampler_ui;
 mod song_panel;
 mod step303;
@@ -32,6 +33,9 @@ use crate::document::Document;
 use acid_engine::host::{Command, Event, Status};
 use eframe::egui;
 use std::time::Duration;
+
+/// Cached waveform for one slot: (pcm pointer, pcm length, columns, peaks).
+pub type WaveCacheEntry = (usize, usize, usize, Vec<(f32, f32)>);
 
 #[derive(Default)]
 pub struct ViewState {
@@ -100,6 +104,14 @@ pub struct ViewState {
     pub fm_browser: fm_voices::FmBrowser,
     /// Operator shown in the FM operator editor (0..6).
     pub fm_op: usize,
+    /// Cached waveform peaks per slot: (pcm pointer, pcm length, columns, peaks).
+    pub wave_cache: std::collections::HashMap<usize, WaveCacheEntry>,
+    /// Marker being dragged in the waveform: (slot, marker).
+    pub wave_drag: Option<(usize, sampler_ui::Marker)>,
+    /// Transient sensitivity for "Detect" (None = 0.5).
+    pub sampler_sensitivity: Option<f32>,
+    /// Key held by a shift-click on a slot pad.
+    pub pad_note: Option<u8>,
 }
 
 pub struct SidAcidApp {
@@ -286,7 +298,7 @@ impl SidAcidApp {
         }
         self.fm_panel(ui);
         ui.add_space(6.0);
-        self.note_panel(ui, acid_engine::machine::MachineId::Sampler);
+        self.sampler_panel(ui);
         ui.add_space(6.0);
         self.mixer_panel(ui);
         self.song_panel(ui);
@@ -925,5 +937,19 @@ mod tests {
         }));
         app.clear_slot(0);
         assert!(app.doc.project.sampler.slots[0].is_none());
+    }
+
+    #[test]
+    fn sampler_panel_draws_empty_and_loaded_slots_in_both_modes() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        run_frames(&mut app, 1);
+        app.load_sample_bytes(0, "Break", Some("wav"), &test_wav(2.0));
+        app.load_sample_bytes(1, "Stab", Some("wav"), &test_wav(0.5));
+        for slot in [0, 1, 7] {
+            app.view.sampler_slot = slot;
+            run_frames(&mut app, 2);
+        }
+        assert!(app.view.wave_cache.contains_key(&0) && app.view.wave_cache.contains_key(&1));
+        assert!(app.view.poly_scrolled[1], "the sampler roll is drawn");
     }
 }

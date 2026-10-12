@@ -16,7 +16,6 @@ const SLICE_MIN_SECONDS: f32 = 1.0;
 const CHROMATIC_SPAN: u8 = 24;
 
 impl SidAcidApp {
-    #[allow(dead_code)] // used by the sampler panel (Task 9)
     pub(crate) fn load_sample_dialog(&mut self, slot: usize) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
@@ -29,7 +28,6 @@ impl SidAcidApp {
         }
     }
 
-    #[allow(dead_code)] // used by the sampler panel (Task 9)
     pub(crate) fn load_sample_file(&mut self, slot: usize, path: &std::path::Path) {
         match std::fs::read(path) {
             Ok(bytes) => {
@@ -140,7 +138,6 @@ impl SidAcidApp {
         self.view.sampler_slot = slot;
     }
 
-    #[allow(dead_code)] // used by the sampler panel (Task 9)
     pub(crate) fn clear_slot(&mut self, slot: usize) {
         if self
             .doc
@@ -162,7 +159,6 @@ impl SidAcidApp {
         }
     }
 
-    #[allow(dead_code)] // used by the sampler panel (Task 9)
     /// Applies `change` to a copy of the slot's meta; refuses zone clashes and malformed metas with a message.
     pub(crate) fn edit_slot_meta(
         &mut self,

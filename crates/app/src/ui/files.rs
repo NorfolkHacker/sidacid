@@ -143,6 +143,9 @@ impl SidAcidApp {
         self.view.audition = None;
         self.view.fm_op = 0;
         self.view.sampler_slot = 0;
+        self.view.wave_cache.clear();
+        self.view.wave_drag = None;
+        self.view.pad_note = None;
         self.view.fm_browser = Default::default();
         self.reset_transport_view();
         self.view.song_cursor = 0;

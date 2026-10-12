@@ -1,8 +1,6 @@
 //! Pure helpers for the sampler panel and the roll: waveform peaks,
 //! frame/pixel mapping, marker editing, key names and row labels.
 
-#![allow(dead_code)] // used by the sampler panel (Task 9)
-
 use super::step_edit::NOTE_NAMES;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotMode};
 use eframe::egui::Color32;

@@ -1,0 +1,348 @@
+//! The sampler panel: global knobs, 16 slot pads, the selected slot's
+//! controls and waveform with draggable markers, its knobs, and the
+//! pattern row with the poly roll. Audio files can be dropped on it.
+
+use super::sampler_ui::{
+    Marker, frame_to_x, key_name, markers, nearest_marker, peaks, set_marker, x_to_frame, zone_text,
+};
+use super::{SidAcidApp, theme};
+use acid_engine::host::Command;
+use acid_engine::machine::MachineId;
+use acid_engine::params::{ParamId, SamplerParam, SlotParam};
+use acid_engine::project::PatternRef;
+use acid_engine::sampler::SLOTS;
+use acid_engine::sampler::slicing::{detect_slices, equal_slices, mono_mix};
+use acid_engine::sampler::slot::SlotMode;
+use eframe::egui::{self, Sense, Stroke, pos2, vec2};
+
+const SLOT_KNOBS: [(SlotParam, &str); 13] = [
+    (SlotParam::Level, "Level"),
+    (SlotParam::Pan, "Pan"),
+    (SlotParam::Tune, "Tune"),
+    (SlotParam::Fine, "Fine"),
+    (SlotParam::Cutoff, "Cutoff"),
+    (SlotParam::Resonance, "Reso"),
+    (SlotParam::Attack, "Attack"),
+    (SlotParam::Decay, "Decay"),
+    (SlotParam::Sustain, "Sustain"),
+    (SlotParam::Release, "Release"),
+    (SlotParam::Reverse, "Reverse"),
+    (SlotParam::Choke, "Choke"),
+    (SlotParam::TempoLock, "Tempo"),
+];
+const WAVE_H: f32 = 100.0;
+const MARKER_GRAB_PX: f32 = 5.0;
+
+impl SidAcidApp {
+    pub(crate) fn sampler_panel(&mut self, ui: &mut egui::Ui) {
+        let m = MachineId::Sampler.index();
+        let slot = self.doc.project.selected[m];
+        let title = format!("SAMPLER   {}", PatternRef(slot).label());
+        let resp = egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+            .id_salt("sampler")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    self.param_knob(ui, ParamId::Sampler(SamplerParam::Volume), "Volume");
+                    self.param_knob(ui, ParamId::Sampler(SamplerParam::Grit), "Grit");
+                });
+                self.sampler_pads(ui);
+                self.sampler_slot_row(ui);
+                self.sampler_waveform(ui);
+                let s = self.view.sampler_slot.min(SLOTS - 1) as u8;
+                ui.horizontal_wrapped(|ui| {
+                    for (p, label) in SLOT_KNOBS {
+                        self.param_knob(ui, ParamId::SamplerSlot(s, p), label);
+                    }
+                });
+                self.note_pattern_row(ui, m);
+                self.poly_roll(ui, m);
+            });
+        self.sampler_drop(
+            ui,
+            resp.header_response
+                .rect
+                .union(resp.body_response.map_or(egui::Rect::NOTHING, |b| b.rect)),
+        );
+        self.release_pad_note(ui);
+    }
+
+    fn sampler_pads(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("sampler_pads")
+            .spacing([3.0, 3.0])
+            .show(ui, |ui| {
+                for i in 0..SLOTS {
+                    let name = self.doc.project.sampler.slots[i]
+                        .as_ref()
+                        .map_or("·".to_string(), |d| d.name.chars().take(6).collect());
+                    let r = ui.add_sized(
+                        [64.0, 22.0],
+                        egui::Button::new(format!("{} {}", i + 1, name))
+                            .selected(self.view.sampler_slot == i),
+                    );
+                    if r.clicked() {
+                        self.view.sampler_slot = i;
+                    }
+                    let shift = ui.input(|inp| inp.modifiers.shift);
+                    if shift
+                        && r.is_pointer_button_down_on()
+                        && self.view.pad_note.is_none()
+                        && let Some(d) = self.doc.project.sampler.slots[i].as_ref()
+                    {
+                        let key = match d.meta.mode {
+                            SlotMode::Slice => d.meta.base_key,
+                            SlotMode::Chromatic => d.meta.root,
+                        };
+                        self.send(vec![Command::NoteOn {
+                            machine: MachineId::Sampler.index() as u8,
+                            pitch: key,
+                            vel: 110,
+                        }]);
+                        self.view.pad_note = Some(key);
+                    }
+                    if i % 8 == 7 {
+                        ui.end_row();
+                    }
+                }
+            });
+    }
+
+    fn release_pad_note(&mut self, ui: &egui::Ui) {
+        if let Some(key) = self.view.pad_note
+            && !ui.input(|i| i.pointer.primary_down())
+        {
+            self.send(vec![Command::NoteOff {
+                machine: MachineId::Sampler.index() as u8,
+                pitch: key,
+            }]);
+            self.view.pad_note = None;
+        }
+    }
+
+    fn sampler_slot_row(&mut self, ui: &mut egui::Ui) {
+        let s = self.view.sampler_slot.min(SLOTS - 1);
+        let data = self.doc.project.sampler.slots[s].clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("Slot {}", s + 1)).strong());
+            if ui.button("Load…").clicked() {
+                self.load_sample_dialog(s);
+            }
+            let Some(d) = data else {
+                ui.weak("Empty — load or drop an audio file (WAV, FLAC, MP3, OGG).");
+                return;
+            };
+            ui.label(&d.name);
+            if ui.button("Clear").clicked() {
+                self.clear_slot(s);
+                return;
+            }
+            ui.separator();
+            for (mode, label) in [
+                (SlotMode::Slice, "Slice"),
+                (SlotMode::Chromatic, "Chromatic"),
+            ] {
+                if ui.selectable_label(d.meta.mode == mode, label).clicked() && d.meta.mode != mode
+                {
+                    self.edit_slot_meta(s, false, |m| {
+                        m.mode = mode;
+                        if mode == SlotMode::Chromatic {
+                            m.high_key = m.base_key.saturating_add(23).min(127);
+                            m.root = m.base_key;
+                        }
+                    });
+                }
+            }
+            let mut base = d.meta.base_key;
+            let r = ui.add(
+                egui::DragValue::new(&mut base)
+                    .range(0..=127)
+                    .prefix("Zone "),
+            );
+            if r.changed() {
+                let shift = base as i16 - d.meta.base_key as i16;
+                self.edit_slot_meta(s, r.dragged(), |m| {
+                    m.base_key = base;
+                    m.high_key = (m.high_key as i16 + shift).clamp(base as i16, 127) as u8;
+                    m.root = (m.root as i16 + shift).clamp(0, 127) as u8;
+                });
+            }
+            if r.drag_stopped() || r.lost_focus() {
+                self.doc.end_gesture();
+            }
+            ui.label(zone_text(&d.meta));
+            ui.separator();
+            match d.meta.mode {
+                SlotMode::Slice => {
+                    for n in [4usize, 8, 16, 32] {
+                        if ui.button(format!("÷{n}")).clicked() {
+                            let frames = d.frames();
+                            self.edit_slot_meta(s, false, |m| m.slices = equal_slices(frames, n));
+                        }
+                    }
+                    let mut sens = self.view.sampler_sensitivity.unwrap_or(0.5);
+                    if ui
+                        .add(egui::Slider::new(&mut sens, 0.0..=1.0).text("Sens"))
+                        .changed()
+                    {
+                        self.view.sampler_sensitivity = Some(sens);
+                    }
+                    if ui.button("Detect").clicked() {
+                        let mono = mono_mix(
+                            &d.pcm
+                                .iter()
+                                .map(|&x| x as f32 / 32_768.0)
+                                .collect::<Vec<_>>(),
+                            d.channels as usize,
+                        );
+                        let slices = detect_slices(&mono, d.sample_rate, sens);
+                        self.edit_slot_meta(s, false, |m| m.slices = slices);
+                    }
+                    let mut bpm = d.meta.original_bpm;
+                    let r = ui.add(
+                        egui::DragValue::new(&mut bpm)
+                            .range(20.0..=400.0)
+                            .speed(0.1)
+                            .prefix("Orig BPM "),
+                    );
+                    if r.changed() {
+                        self.edit_slot_meta(s, r.dragged(), |m| m.original_bpm = bpm);
+                    }
+                    if r.drag_stopped() || r.lost_focus() {
+                        self.doc.end_gesture();
+                    }
+                }
+                SlotMode::Chromatic => {
+                    let mut root = d.meta.root;
+                    let r = ui.add(
+                        egui::DragValue::new(&mut root)
+                            .range(0..=127)
+                            .custom_formatter(|v, _| key_name(v as u8))
+                            .prefix("Root "),
+                    );
+                    if r.changed() {
+                        self.edit_slot_meta(s, r.dragged(), |m| m.root = root);
+                    }
+                    let mut top = d.meta.high_key;
+                    let r2 = ui.add(
+                        egui::DragValue::new(&mut top)
+                            .range(d.meta.base_key as u32..=127)
+                            .custom_formatter(|v, _| key_name(v as u8))
+                            .prefix("Top "),
+                    );
+                    if r2.changed() {
+                        self.edit_slot_meta(s, r2.dragged(), |m| m.high_key = top);
+                    }
+                    if r.drag_stopped() || r.lost_focus() || r2.drag_stopped() || r2.lost_focus() {
+                        self.doc.end_gesture();
+                    }
+                    let mut looping = d.meta.loop_on;
+                    if ui.checkbox(&mut looping, "Loop").changed() {
+                        self.edit_slot_meta(s, false, |m| m.loop_on = looping);
+                    }
+                }
+            }
+        });
+    }
+
+    fn sampler_waveform(&mut self, ui: &mut egui::Ui) {
+        let s = self.view.sampler_slot.min(SLOTS - 1);
+        let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
+            return;
+        };
+        let width = ui.available_width().clamp(200.0, 900.0);
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, WAVE_H), Sense::click_and_drag());
+        let columns = width as usize;
+        let key = (d.pcm.as_ptr() as usize, d.pcm.len(), columns);
+        let fresh = self
+            .view
+            .wave_cache
+            .get(&s)
+            .is_some_and(|c| (c.0, c.1, c.2) == key);
+        if !fresh {
+            let p = peaks(&d.pcm, d.channels as usize, columns);
+            self.view.wave_cache.insert(s, (key.0, key.1, key.2, p));
+        }
+        let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
+            return;
+        };
+        let frames = d.frames();
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, theme::GRID_DARK);
+        let mid = rect.center().y;
+        let half = rect.height() * 0.45;
+        if let Some((_, _, _, cols)) = self.view.wave_cache.get(&s) {
+            for (i, (lo, hi)) in cols.iter().enumerate() {
+                let x = rect.left() + i as f32 + 0.5;
+                painter.line_segment(
+                    [pos2(x, mid - hi * half), pos2(x, mid - lo * half)],
+                    Stroke::new(1.0_f32, theme::KNOB_TRACK),
+                );
+            }
+        }
+        let marks = markers(&d.meta);
+        let xs: Vec<f32> = marks
+            .iter()
+            .map(|(_, f)| frame_to_x(*f, frames, rect.left(), rect.width()))
+            .collect();
+        for ((m, _), x) in marks.iter().zip(&xs) {
+            let colour = match m {
+                Marker::Slice(_) => theme::ACID,
+                Marker::Start | Marker::End => theme::ACCENT,
+                Marker::LoopStart | Marker::LoopEnd => theme::SLIDE,
+            };
+            painter.line_segment(
+                [pos2(*x, rect.top()), pos2(*x, rect.bottom())],
+                Stroke::new(1.5_f32, colour),
+            );
+        }
+        let pointer = resp.interact_pointer_pos();
+        if resp.drag_started()
+            && let Some(p) = pointer
+            && let Some(i) = nearest_marker(&xs, p.x, MARKER_GRAB_PX)
+        {
+            self.view.wave_drag = Some((s, marks[i].0));
+        }
+        if resp.dragged()
+            && let Some(p) = pointer
+            && let Some((ds, marker)) = self.view.wave_drag
+            && ds == s
+        {
+            let frame = x_to_frame(p.x, frames, rect.left(), rect.width());
+            self.edit_slot_meta(s, true, |m| {
+                set_marker(m, marker, frame, frames);
+            });
+        }
+        if resp.drag_stopped() {
+            self.view.wave_drag = None;
+            self.doc.end_gesture();
+        }
+    }
+
+    fn sampler_drop(&mut self, ui: &egui::Ui, panel: egui::Rect) {
+        let dropped = ui.ctx().input(|i| i.raw.dropped_files.clone());
+        let over = ui
+            .ctx()
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| panel.contains(p));
+        let Some(file) = dropped.into_iter().next() else {
+            return;
+        };
+        if !over {
+            return;
+        }
+        let slot = self.view.sampler_slot.min(SLOTS - 1);
+        if let Some(path) = &file.path {
+            self.load_sample_file(slot, path);
+        } else if let Some(bytes) = &file.bytes {
+            let ext = std::path::Path::new(&file.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase);
+            let stem = std::path::Path::new(&file.name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.load_sample_bytes(slot, &stem, ext.as_deref(), bytes);
+        }
+    }
+}
