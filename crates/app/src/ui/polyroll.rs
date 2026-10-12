@@ -17,6 +17,8 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 const TICK_W: f32 = 6.0;
 const ROW_H: f32 = 8.0;
 const KEY_W: f32 = 30.0;
+/// The sampler's key strip is wider to fit row labels like "Amen ·05".
+const SAMPLER_KEY_W: f32 = 64.0;
 const VEL_H: f32 = 32.0;
 const VIEW_H: f32 = 260.0;
 const NEW_VEL: u8 = 100;
@@ -52,6 +54,11 @@ impl SidAcidApp {
 
     pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, machine: usize) {
         let n = machine - MachineId::Fm.index();
+        let key_w = if machine == MachineId::Sampler.index() {
+            SAMPLER_KEY_W
+        } else {
+            KEY_W
+        };
         let slot = self.doc.project.selected[machine];
         let Some(bank) = self.doc.project.note_patterns(machine) else {
             return;
@@ -65,7 +72,7 @@ impl SidAcidApp {
         };
         let playhead = (self.status.playing && self.status.patterns[machine] == slot)
             .then_some(self.status.playhead[machine]);
-        let width = KEY_W + TICK_W * ticks as f32;
+        let width = key_w + TICK_W * ticks as f32;
         let mut changed = false;
         let mut finished = false;
         let mut key_down: Option<u8> = None;
@@ -88,7 +95,7 @@ impl SidAcidApp {
                         Sense::click_and_drag(),
                     );
                     let geom = PolyGeom {
-                        left: rect.left() + KEY_W,
+                        left: rect.left() + key_w,
                         top: rect.top(),
                         tick_w: TICK_W,
                         row_h: ROW_H,
@@ -141,7 +148,7 @@ impl SidAcidApp {
                                 pos2(rect.left() + 1.0, y0 + ROW_H / 2.0),
                                 Align2::LEFT_CENTER,
                                 text,
-                                FontId::monospace(6.5),
+                                FontId::monospace(8.0),
                                 if black {
                                     Color32::from_gray(230)
                                 } else {
@@ -272,7 +279,7 @@ impl SidAcidApp {
 
                 let (lane, lresp) =
                     ui.allocate_exact_size(vec2(width, VEL_H), Sense::click_and_drag());
-                let left = lane.left() + KEY_W;
+                let left = lane.left() + key_w;
                 let painter = ui.painter_at(lane);
                 painter.rect_filled(
                     egui::Rect::from_min_max(pos2(left, lane.top()), lane.right_bottom()),
