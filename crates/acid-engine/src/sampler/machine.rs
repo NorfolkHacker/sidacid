@@ -1,0 +1,358 @@
+//! The sampler machine: 16 slots, 16 voices, choke, tempo lock and Grit.
+//! Real-time safe: samples arrive and leave as `Arc`s through `swap_*`,
+//! so nothing is allocated or freed while rendering.
+
+use super::sample::SampleData;
+use super::settings::SlotSettings;
+use super::slot::SlotPlay;
+use super::voice::{Voice, segment};
+use super::{SLOTS, VOICES};
+use crate::params::{SamplerParam, SlotParam, on};
+use std::sync::Arc;
+
+const CHUNK: usize = 64;
+/// Grit's sample-and-hold rate (an SP-1200-style 26.04 kHz).
+const GRIT_RATE: f32 = 26_040.0;
+/// Grit quantises over ±this range so chords don't clip.
+const GRIT_RANGE: f32 = 4.0;
+
+pub struct Sampler {
+    sample_rate: f32,
+    bpm: f32,
+    samples: [Option<Arc<SampleData>>; SLOTS],
+    plays: [SlotPlay; SLOTS],
+    settings: [SlotSettings; SLOTS],
+    voices: [Voice; VOICES],
+    clock: u32,
+    volume: f32,
+    grit: bool,
+    grit_phase: f32,
+    grit_hold: [f32; 2],
+    buf_l: [f32; CHUNK],
+    buf_r: [f32; CHUNK],
+}
+
+fn grit_quantise(x: f32) -> f32 {
+    ((x / GRIT_RANGE).clamp(-1.0, 1.0) * 2048.0).round() / 2048.0 * GRIT_RANGE
+}
+
+impl Sampler {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            sample_rate,
+            bpm: 120.0,
+            samples: std::array::from_fn(|_| None),
+            plays: [SlotPlay::EMPTY; SLOTS],
+            settings: [SlotSettings::default(); SLOTS],
+            voices: std::array::from_fn(|_| Voice::new(sample_rate)),
+            clock: 0,
+            volume: 0.49,
+            grit: false,
+            grit_phase: 0.0,
+            grit_hold: [0.0; 2],
+            buf_l: [0.0; CHUNK],
+            buf_r: [0.0; CHUNK],
+        }
+    }
+
+    pub fn set_param(&mut self, p: SamplerParam, v: f32) {
+        match p {
+            SamplerParam::Volume => self.volume = v.clamp(0.0, 1.0).powi(2),
+            SamplerParam::Grit => self.grit = on(v),
+        }
+    }
+
+    pub fn set_slot_param(&mut self, slot: usize, p: SlotParam, v: f32) {
+        if let Some(s) = self.settings.get_mut(slot) {
+            s.set(p, v);
+        }
+    }
+
+    pub fn set_bpm(&mut self, bpm: f32) {
+        if bpm.is_finite() && bpm > 0.0 {
+            self.bpm = bpm;
+        }
+    }
+
+    fn kill_slot(&mut self, slot: usize) {
+        for v in self.voices.iter_mut().filter(|v| v.slot == slot) {
+            v.kill();
+        }
+    }
+
+    /// Exchanges a slot's sample with `sample`. The caller disposes of
+    /// what comes back off the audio thread. False for a bad slot.
+    pub fn swap_sample(&mut self, slot: usize, sample: &mut Option<Arc<SampleData>>) -> bool {
+        if slot >= SLOTS {
+            return false;
+        }
+        self.kill_slot(slot);
+        std::mem::swap(&mut self.samples[slot], sample);
+        true
+    }
+
+    pub fn swap_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
+        if slot >= SLOTS {
+            return false;
+        }
+        self.kill_slot(slot);
+        std::mem::swap(&mut self.plays[slot], play);
+        true
+    }
+
+    pub fn note_on(&mut self, key: u8, vel: u8, live: bool) {
+        if key > 127 || vel == 0 {
+            return;
+        }
+        let Some(slot) = (0..SLOTS).find(|&i| {
+            let (lo, hi) = self.plays[i].key_range();
+            self.samples[i].is_some() && (lo..=hi).contains(&key)
+        }) else {
+            return;
+        };
+        let Some(sample) = self.samples[slot].as_deref() else {
+            return;
+        };
+        let s = self.settings[slot];
+        let Some(seg) = segment(
+            &self.plays[slot],
+            key,
+            &s,
+            sample.sample_rate,
+            sample.frames(),
+            self.sample_rate,
+            self.bpm,
+        ) else {
+            return;
+        };
+        if s.choke {
+            for v in self
+                .voices
+                .iter_mut()
+                .filter(|v| v.active && v.slot == slot)
+            {
+                v.choke();
+            }
+        }
+        self.clock = self.clock.wrapping_add(1);
+        let clock = self.clock;
+        let voices = &self.voices;
+        let age = |v: &Voice| clock.wrapping_sub(v.age);
+        let i = voices
+            .iter()
+            .position(|v| !v.active)
+            .or_else(|| {
+                (0..VOICES)
+                    .filter(|&i| !voices[i].held)
+                    .max_by_key(|&i| age(&voices[i]))
+            })
+            .unwrap_or_else(|| (0..VOICES).max_by_key(|&i| age(&voices[i])).unwrap_or(0));
+        self.voices[i].start(&seg, &s, slot, key, vel.min(127), live, clock);
+    }
+
+    pub fn note_off(&mut self, key: u8, live: bool) {
+        for v in &mut self.voices {
+            if v.active && v.held && v.key == key && v.live == live {
+                let release = self.settings[v.slot].release_s;
+                v.release(release);
+            }
+        }
+    }
+
+    pub fn all_off(&mut self) {
+        for v in &mut self.voices {
+            let release = self.settings[v.slot].release_s;
+            v.release(release);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for v in &mut self.voices {
+            v.kill();
+        }
+        self.grit_hold = [0.0; 2];
+        self.grit_phase = 0.0;
+    }
+
+    pub fn active_voices(&self) -> usize {
+        self.voices.iter().filter(|v| v.active).count()
+    }
+
+    pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let total = left.len().min(right.len());
+        let mut pos = 0;
+        while pos < total {
+            let n = (total - pos).min(CHUNK);
+            self.buf_l[..n].fill(0.0);
+            self.buf_r[..n].fill(0.0);
+            for v in self.voices.iter_mut().filter(|v| v.active) {
+                match self.samples[v.slot].as_deref() {
+                    Some(sample) => v.render(
+                        sample,
+                        &self.settings[v.slot],
+                        &mut self.buf_l[..n],
+                        &mut self.buf_r[..n],
+                    ),
+                    None => v.kill(),
+                }
+            }
+            for i in 0..n {
+                let (mut l, mut r) = (self.buf_l[i], self.buf_r[i]);
+                if self.grit {
+                    self.grit_phase += GRIT_RATE / self.sample_rate;
+                    if self.grit_phase >= 1.0 {
+                        self.grit_phase -= self.grit_phase.floor();
+                        self.grit_hold = [grit_quantise(l), grit_quantise(r)];
+                    }
+                    [l, r] = self.grit_hold;
+                }
+                left[pos + i] += l * self.volume;
+                right[pos + i] += r * self.volume;
+            }
+            pos += n;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sampler::slot::{SlotMeta, SlotPlay};
+    use crate::testutil::{all_finite, peak};
+
+    const SR: f32 = 48_000.0;
+
+    fn sine(frames: usize) -> Arc<SampleData> {
+        Arc::new(SampleData {
+            sample_rate: 48_000,
+            left: (0..frames).map(|i| (i as f32 * 0.05).sin() * 0.8).collect(),
+            right: None,
+        })
+    }
+
+    fn loaded() -> Sampler {
+        let mut s = Sampler::new(SR);
+        let mut a = Some(sine(48_000));
+        assert!(s.swap_sample(0, &mut a));
+        assert!(a.is_none(), "got the empty slot back");
+        let mut play = SlotPlay::from_meta(&SlotMeta::sliced(
+            36,
+            vec![0, 12_000, 24_000, 36_000],
+            120.0,
+            48_000,
+        ));
+        assert!(s.swap_play(0, &mut play));
+        let mut b = Some(sine(48_000));
+        s.swap_sample(1, &mut b);
+        let mut chrom = SlotPlay::from_meta(&SlotMeta::chromatic(60, 83, 60, 48_000));
+        s.swap_play(1, &mut chrom);
+        s
+    }
+
+    fn render(s: &mut Sampler, n: usize) -> (Vec<f32>, Vec<f32>) {
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        s.render(&mut l, &mut r);
+        (l, r)
+    }
+
+    #[test]
+    fn notes_in_a_zone_play_and_others_are_silent() {
+        let mut s = loaded();
+        s.note_on(30, 100, false);
+        s.note_on(50, 100, false);
+        assert_eq!(s.active_voices(), 0, "no zone there");
+        s.note_on(37, 100, false);
+        s.note_on(64, 100, false);
+        assert_eq!(s.active_voices(), 2);
+        let (l, r) = render(&mut s, 4800);
+        assert!(all_finite(&l) && peak(&l) > 0.1 && peak(&r) > 0.1);
+    }
+
+    #[test]
+    fn choke_cuts_the_slots_previous_note() {
+        let mut s = loaded();
+        s.set_slot_param(0, SlotParam::Choke, 1.0);
+        s.note_on(36, 100, false);
+        render(&mut s, 480);
+        s.note_on(37, 100, false);
+        render(&mut s, 3000);
+        assert_eq!(s.active_voices(), 1, "the first slice was choked");
+        let mut free = loaded();
+        free.note_on(36, 100, false);
+        render(&mut free, 480);
+        free.note_on(37, 100, false);
+        render(&mut free, 3000);
+        assert_eq!(free.active_voices(), 2, "without choke both ring");
+    }
+
+    #[test]
+    fn audition_and_pattern_release_separately() {
+        let mut s = loaded();
+        s.note_on(60, 100, true);
+        s.note_on(60, 100, false);
+        s.note_off(60, false);
+        render(&mut s, 24_000);
+        assert_eq!(s.active_voices(), 1);
+        s.note_off(60, true);
+        render(&mut s, 24_000);
+        assert_eq!(s.active_voices(), 0);
+    }
+
+    #[test]
+    fn swapping_a_sample_stops_its_voices_and_returns_the_old_one() {
+        let mut s = loaded();
+        s.note_on(36, 100, false);
+        let mut none: Option<Arc<SampleData>> = None;
+        assert!(s.swap_sample(0, &mut none));
+        assert!(none.is_some(), "old sample handed back for disposal");
+        assert_eq!(s.active_voices(), 0);
+        s.note_on(36, 100, false);
+        assert_eq!(s.active_voices(), 0, "empty slot");
+        assert!(!s.swap_sample(16, &mut None));
+    }
+
+    #[test]
+    fn sixteen_voices_and_the_oldest_is_stolen() {
+        let mut s = loaded();
+        for k in 60..76 {
+            s.note_on(k, 100, false);
+        }
+        assert_eq!(s.active_voices(), 16);
+        s.note_on(80, 100, false);
+        assert_eq!(s.active_voices(), 16);
+    }
+
+    #[test]
+    fn grit_quantises_and_volume_scales() {
+        let mut s = loaded();
+        s.set_param(SamplerParam::Grit, 1.0);
+        s.set_param(SamplerParam::Volume, 1.0);
+        s.note_on(60, 127, false);
+        let (l, _) = render(&mut s, 4800);
+        assert!(peak(&l) > 0.1);
+        for v in &l {
+            let steps = v / 4.0 * 2048.0;
+            assert!((steps - steps.round()).abs() < 1e-3, "{v}");
+        }
+        let held = l.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(held > 1000, "sample-and-hold repeats values: {held}");
+        let mut quiet = loaded();
+        quiet.set_param(SamplerParam::Volume, 0.0);
+        quiet.note_on(60, 127, false);
+        assert_eq!(peak(&render(&mut quiet, 480).0), 0.0);
+    }
+
+    #[test]
+    fn all_off_releases_and_reset_silences() {
+        let mut s = loaded();
+        s.note_on(60, 100, false);
+        s.note_on(61, 100, true);
+        s.all_off();
+        render(&mut s, 24_000);
+        assert_eq!(s.active_voices(), 0);
+        s.note_on(60, 100, false);
+        s.reset();
+        assert_eq!(s.active_voices(), 0);
+        assert_eq!(peak(&render(&mut s, 100).0), 0.0);
+    }
+}
