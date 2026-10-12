@@ -14,6 +14,11 @@ const VOICE_GAIN: f32 = 0.25;
 const SILENT: f32 = -13.0;
 /// Time constant of the steal fade.
 const DECLICK_SECONDS: f32 = 0.0005;
+/// Phase shift (in cycles) per unit of modulator output. msfa scales a
+/// full-level operator by gain 2.0 (`Exp2::lookup(level - (14 << 24))`), so
+/// a full modulator moves its target ±2 cycles and feedback is fed that
+/// doubled output too. Carriers are heard at gain 1.0.
+const MOD_INDEX: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Voice {
@@ -206,7 +211,7 @@ impl Voice {
                 let mut m = 0.0;
                 let mut bits = alg.mods[op];
                 while bits != 0 {
-                    m += outs[bits.trailing_zeros() as usize];
+                    m += MOD_INDEX * outs[bits.trailing_zeros() as usize];
                     bits &= bits - 1;
                 }
                 if op == alg.feedback {
@@ -215,7 +220,7 @@ impl Voice {
                 let y = sine.at(self.phase[op] + m, patch.vintage) * (g0[op] + dg[op] * i as f32);
                 if op == alg.feedback {
                     self.fb[1] = self.fb[0];
-                    self.fb[0] = y;
+                    self.fb[0] = MOD_INDEX * y;
                 }
                 outs[op] = y;
                 self.phase[op] += inc[op];
@@ -236,5 +241,51 @@ impl Voice {
             self.active = false;
             self.last_out = 0.0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fm::BLOCK;
+    use crate::fm::algorithms::ALGORITHMS;
+    use std::f32::consts::TAU;
+
+    const SR: f32 = 48_000.0;
+
+    /// msfa (the DX7 reference) scales operator output by gain 2.0 at full
+    /// level, so a full-level modulator shifts its carrier's phase by up to
+    /// ±2 cycles. Algorithm 1, OP2 at 99 modulating OP1 at 99, ratio 1, osc
+    /// sync: OP1 must read sin(2π(p + 2·sin(2π p))).
+    #[test]
+    fn a_full_level_modulator_has_index_two_cycles() {
+        let mut patch = FmPatch::default();
+        patch.ops[1].level = 99.0;
+        for o in &mut patch.ops {
+            o.vel_sens = 0;
+        }
+        let alg = ALGORITHMS[0];
+        let sine = Sine::new();
+        let mut v = Voice::new(SR);
+        v.start(&patch, 69, 127, false, 1);
+        let mut buf = [0.0f32; BLOCK];
+        for _ in 0..(0.05 * SR) as usize / BLOCK {
+            buf.fill(0.0);
+            v.render(&patch, &alg, 0.0, &sine, &mut buf);
+        }
+        let inc = patch.ops[0].freq(440.0) / SR;
+        let mut worst = 0.0f32;
+        for _ in 0..20 {
+            let p0 = v.phase[0];
+            assert_eq!(v.phase[1], p0, "ratio 1 + osc sync: operators in phase");
+            buf.fill(0.0);
+            v.render(&patch, &alg, 0.0, &sine, &mut buf);
+            for (i, &y) in buf.iter().enumerate() {
+                let p = p0 + i as f32 * inc;
+                let want = VOICE_GAIN * (TAU * (p + 2.0 * (TAU * p).sin())).sin();
+                worst = worst.max((y - want).abs());
+            }
+        }
+        assert!(worst < 2e-3, "max error {worst}");
     }
 }
