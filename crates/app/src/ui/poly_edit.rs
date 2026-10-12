@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Pure editing of note patterns for the poly piano roll, plus its
 //! geometry. Notes stay in insertion order (the engine scans them all),
 //! so an index stays valid for the whole of a drag.

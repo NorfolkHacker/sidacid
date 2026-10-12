@@ -7,10 +7,12 @@ mod files;
 mod keys;
 pub mod knob;
 mod mixer_panel;
+mod note_panel;
 mod pads;
 mod params_ui;
 mod pianoroll;
 mod poly_edit;
+mod polyroll;
 mod record;
 mod roll_edit;
 mod song_panel;
@@ -79,6 +81,15 @@ pub struct ViewState {
     /// Last step recorded for the held knob.
     pub rec_last: Option<(acid_engine::params::ParamId, u32)>,
     pub was_playing: bool,
+    /// Poly-roll drag per note machine (index 0 = FM, 1 = Sampler).
+    pub poly_drag: [Option<poly_edit::PolyDrag>; 2],
+    pub poly_snap: [poly_edit::Snap; 2],
+    /// Length in ticks of the last note drawn or resized (0 = one step).
+    pub poly_len: [u16; 2],
+    /// The roll has been scrolled to its starting pitch once.
+    pub poly_scrolled: [bool; 2],
+    /// Note held by a click on the roll's key strip: (machine, pitch).
+    pub audition: Option<(usize, u8)>,
 }
 
 pub struct SidAcidApp {
@@ -263,6 +274,13 @@ impl SidAcidApp {
             self.drum_panel(ui, kit);
             ui.add_space(6.0);
         }
+        for machine in [
+            acid_engine::machine::MachineId::Fm,
+            acid_engine::machine::MachineId::Sampler,
+        ] {
+            self.note_panel(ui, machine);
+            ui.add_space(6.0);
+        }
         self.mixer_panel(ui);
         self.song_panel(ui);
     }
@@ -285,6 +303,7 @@ pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acid_engine::project::Project;
 
     #[test]
     fn dice_and_drum_buttons_are_single_undo_steps() {
@@ -481,6 +500,40 @@ mod tests {
         doc.project.synths[0].view = acid_engine::project::SeqView::PianoRoll;
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 2);
+    }
+
+    #[test]
+    fn note_panels_and_poly_rolls_draw_headless() {
+        use acid_engine::project::Note;
+        let mut doc = Document::new(Project::default());
+        doc.project.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 8,
+            pitch: 60,
+            vel: 100,
+        });
+        doc.project.sampler.patterns[0].notes.push(Note {
+            start: 4,
+            len: 300,
+            pitch: 36,
+            vel: 20,
+        });
+        doc.project.sampler.patterns[0].length = 4;
+        let mut app = SidAcidApp::headless(doc);
+        run_frames(&mut app, 3);
+        assert!(app.view.poly_scrolled.iter().all(|s| *s));
+    }
+
+    #[test]
+    fn loading_a_document_resets_poly_roll_state() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.poly_drag = [Some(poly_edit::PolyDrag::Velocity); 2];
+        app.view.poly_scrolled = [true; 2];
+        app.view.audition = Some((4, 60));
+        app.load_document(Document::new(Project::default()));
+        assert_eq!(app.view.poly_drag, [None; 2]);
+        assert_eq!(app.view.poly_scrolled, [false; 2]);
+        assert_eq!(app.view.audition, None);
     }
 
     #[test]
