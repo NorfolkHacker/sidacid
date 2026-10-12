@@ -333,17 +333,90 @@ mod tests {
         assert!((s.voice_note(0) - 72.0).abs() < 0.01);
     }
 
+    /// Renders whole control blocks until the last sample is louder than
+    /// `min`, so a retrigger lands where a hard cut would click.
+    fn render_until_loud(s: &mut FmSynth, min: f32) -> Vec<f32> {
+        let mut x = render(s, 0.05);
+        for _ in 0..1000 {
+            if x[x.len() - 1].abs() > min {
+                return x;
+            }
+            x = render(s, BLOCK as f32 / SR);
+        }
+        panic!("never louder than {min}");
+    }
+
+    /// The largest sample-to-sample step in `x`.
+    fn max_step(x: &[f32]) -> f32 {
+        x.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
     #[test]
     fn stealing_does_not_click() {
         let mut s = FmSynth::new(SR);
         s.set_param(FmParam::Mono, 1.0);
         s.note_on(45, 127, false);
-        let before = render(&mut s, 0.2);
+        let before = render_until_loud(&mut s, 0.05);
+        let last = before[before.len() - 1];
+        assert!(last.abs() > 0.05, "precondition: loud at the cut ({last})");
         s.note_off(45, false);
         s.note_on(45, 127, false); // restarts voice 0 while it still sounds
         let after = render(&mut s, 0.002);
-        let jump = (after[0] - before[before.len() - 1]).abs();
+        let jump = (after[0] - last).abs();
         assert!(jump < 0.01, "jump {jump}");
+    }
+
+    #[test]
+    fn poly_steal_does_not_click() {
+        let mut s = FmSynth::new(SR);
+        // Twelve in-phase voices: the stolen one is a twelfth of the mix.
+        for _ in 0..VOICES {
+            s.note_on(45, 80, false);
+        }
+        let before = render_until_loud(&mut s, 0.3);
+        let last = before[before.len() - 1];
+        let step = max_step(&before);
+        s.note_on(80, 80, false); // steals the oldest held voice
+        assert_eq!(s.active_voices(), VOICES);
+        let after = render(&mut s, 0.002);
+        let jump = (after[0] - last).abs();
+        // The other eleven voices move by at most `step`; a hard cut would
+        // add the stolen voice's last sample (about last / 12) on top.
+        assert!(
+            jump < step * 1.25,
+            "jump {jump}, normal step {step}, last {last}"
+        );
+    }
+
+    #[test]
+    fn a_released_voice_is_stolen_before_a_held_one() {
+        let mut s = FmSynth::new(SR);
+        s.set_op_param(0, OpParam::R4, 0.1); // long release: released voices keep ringing
+        for p in 40..52 {
+            s.note_on(p, 100, false);
+            render(&mut s, 0.001);
+        }
+        s.note_off(43, false);
+        s.note_off(45, false);
+        render(&mut s, 0.01);
+        assert_eq!(s.active_voices(), VOICES, "released voices still ring");
+        s.note_on(80, 100, false);
+        assert_eq!(s.active_voices(), VOICES);
+        let mut held = s.sounding();
+        held.sort_unstable();
+        let mut want: Vec<u8> = (40..52).filter(|&p| p != 43 && p != 45).collect();
+        want.push(80);
+        assert_eq!(
+            held, want,
+            "every held note survives; a released voice was stolen"
+        );
+        s.note_on(81, 100, false);
+        let mut held = s.sounding();
+        held.sort_unstable();
+        want.push(81);
+        assert_eq!(held, want, "the second released voice goes next");
     }
 
     #[test]
