@@ -614,6 +614,9 @@ impl Project {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default project
 mod tests {
+    use super::*;
+    use crate::params::SynthParam;
+
     #[test]
     fn sampler_slots_round_trip_validate_and_place_zones() {
         use crate::sampler::slot::{SlotData, SlotMeta};
@@ -747,32 +750,33 @@ mod tests {
         assert!(Project::from_ron(&ron_with_slot_entries(&few)).is_ok());
     }
 
+    /// A project saved by Plan 4, before the FM voice name and bank and
+    /// the sampler slots existed, with its folded runs unfolded.
+    fn plan4_project_text() -> String {
+        let mut s = include_str!("../tests/fixtures/plan4.ron").to_string();
+        while let Some(open) = s.rfind("<<") {
+            let bar = open + s[open..].find('|').expect("run count");
+            let close = bar + s[bar..].find(">>").expect("run end");
+            let n: usize = s[open + 2..bar].parse().expect("run count");
+            let items = vec![&s[bar + 1..close]; n].join(",");
+            s.replace_range(open..close + 2, &items);
+        }
+        s
+    }
+
+    #[test]
+    fn a_plan_4_project_still_loads() {
+        let p = Project::from_ron(&plan4_project_text()).unwrap();
+        assert_eq!((p.name.as_str(), p.bpm), ("Plan 4", 130.0));
+        assert_eq!(p.synths[0].patterns[0].steps[0].gate, Gate::On);
+        assert_eq!(p.fm.patterns[0].notes.len(), 1);
+        assert_eq!(p.sampler.patterns[1].notes[0].pitch, 36);
+        p.validate().unwrap();
+    }
+
     #[test]
     fn projects_without_sampler_slots_still_load() {
-        let text = Project::default().to_ron();
-        let start = text.find("slots:").expect("slots field");
-        let open = start + text[start..].find('[').expect("slots list");
-        let mut depth = 0;
-        let mut close = open;
-        for (i, c) in text[open..].char_indices() {
-            match c {
-                '[' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = open + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let old = format!(
-            "{}{}",
-            &text[..start],
-            text[close + 1..].trim_start_matches(',')
-        );
-        let p = Project::from_ron(&old).unwrap();
+        let p = Project::from_ron(&plan4_project_text()).unwrap();
         assert_eq!(p.sampler.slots.len(), crate::sampler::SLOTS);
         assert!(p.sampler.slots.iter().all(Option::is_none));
     }
@@ -785,16 +789,7 @@ mod tests {
         p.fm.bank = Some(crate::fm::starter::starter_bank());
         let back = Project::from_ron(&p.to_ron()).unwrap();
         assert_eq!(back, p);
-        let old: String = Project::default()
-            .to_ron()
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                !t.starts_with("voice_name:") && !t.starts_with("bank:")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let loaded = Project::from_ron(&old).unwrap();
+        let loaded = Project::from_ron(&plan4_project_text()).unwrap();
         assert_eq!(loaded.fm.voice_name, "INIT VOICE");
         assert_eq!(loaded.fm.bank, None);
     }
@@ -809,9 +804,6 @@ mod tests {
         p.fm.bank = Some(vec![crate::fm::sysex::Dx7Voice::init(); 33]);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
     }
-
-    use super::*;
-    use crate::params::SynthParam;
 
     #[test]
     fn default_project_shape() {

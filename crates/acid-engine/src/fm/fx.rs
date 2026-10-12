@@ -7,8 +7,6 @@ use crate::params::exp;
 use sid_core::{FILTER_HP, FILTER_LP, Svf};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-/// Chorus delay line length: covers 20 ms at 192 kHz.
-const CHORUS_LEN: usize = 4096;
 const PHASER_STAGES: usize = 4;
 
 pub struct Chorus {
@@ -19,9 +17,12 @@ pub struct Chorus {
 }
 
 impl Chorus {
+    /// Sizes the delay line to cover the 20 ms maximum delay at
+    /// `sample_rate`. Allocates: call off the audio thread.
     pub fn new(sample_rate: f32) -> Self {
+        let len = ((0.021 * sample_rate.max(1.0)) as usize + 2).next_power_of_two();
         Self {
-            buf: vec![0.0; CHORUS_LEN],
+            buf: vec![0.0; len],
             write: 0,
             phase: 0.0,
             sample_rate,
@@ -34,11 +35,12 @@ impl Chorus {
     }
 
     fn read(&self, delay: f32) -> f32 {
-        let pos = self.write as f32 - delay + CHORUS_LEN as f32;
+        let len = self.buf.len();
+        let pos = self.write as f32 - delay + len as f32;
         let i = pos.floor();
         let f = pos - i;
-        let i = i as usize % CHORUS_LEN;
-        let j = (i + 1) % CHORUS_LEN;
+        let i = i as usize % len;
+        let j = (i + 1) % len;
         self.buf[i] + (self.buf[j] - self.buf[i]) * f
     }
 
@@ -54,7 +56,7 @@ impl Chorus {
         let dl = base + swing * 0.5 * (1.0 + (TAU * self.phase).sin());
         let dr = base + swing * 0.5 * (1.0 + (TAU * self.phase + FRAC_PI_2).sin());
         let out = (self.read(dl), self.read(dr));
-        self.write = (self.write + 1) % CHORUS_LEN;
+        self.write = (self.write + 1) % self.buf.len();
         out
     }
 }
@@ -112,6 +114,10 @@ pub struct FmFx {
     chorus: Chorus,
     phaser: Phaser,
     sample_rate: f32,
+    /// Whether the filter and phaser ran last block: a bypassed stage
+    /// starts from a clean state when it comes back on.
+    filter_was_on: bool,
+    phaser_was_on: bool,
 }
 
 impl FmFx {
@@ -122,6 +128,8 @@ impl FmFx {
             chorus: Chorus::new(sample_rate),
             phaser: Phaser::new(sample_rate),
             sample_rate,
+            filter_was_on: false,
+            phaser_was_on: false,
         }
     }
 
@@ -132,6 +140,15 @@ impl FmFx {
     }
 
     pub fn process(&mut self, p: &FmPatch, mono: &mut [f32], left: &mut [f32], right: &mut [f32]) {
+        if p.filter_on && !self.filter_was_on {
+            self.filter = Svf::new(self.sample_rate);
+        }
+        self.filter_was_on = p.filter_on;
+        let phaser_on = p.phaser_mix > 0.0;
+        if phaser_on && !self.phaser_was_on {
+            self.phaser.reset();
+        }
+        self.phaser_was_on = phaser_on;
         if p.filter_on {
             self.filter.mode = if p.filter_hp { FILTER_HP } else { FILTER_LP };
             self.filter.set(p.cutoff_hz(), p.resonance);
@@ -142,7 +159,7 @@ impl FmFx {
         for (i, &x) in mono.iter().enumerate() {
             let (wl, wr) = self.chorus.process(x, p.chorus_rate, p.chorus_depth);
             let mut s = [x + (wl - x) * p.chorus_mix, x + (wr - x) * p.chorus_mix];
-            if p.phaser_mix > 0.0 {
+            if phaser_on {
                 let w = self
                     .phaser
                     .process(s, p.phaser_rate, p.phaser_depth, p.phaser_feedback);
@@ -242,5 +259,74 @@ mod tests {
         p.phaser_depth = 1.0;
         let (l, r) = run(&p, &tone(1000.0, 48_000));
         assert!(all_finite(&l) && all_finite(&r));
+    }
+
+    #[test]
+    fn a_wide_sample_rate_chorus_does_not_wrap() {
+        let sr = 384_000.0;
+        let mut c = Chorus::new(sr);
+        let mut worst = 0.0f32;
+        for n in 0..(0.05 * sr) as usize {
+            let (l, r) = c.process(n as f32, 0.5, 1.0);
+            if n as f32 > 0.021 * sr {
+                // A delayed copy of the ramp: 12..20 ms behind.
+                for w in [l, r] {
+                    let delay = n as f32 - w;
+                    let off = (0.012 * sr - 1.0 - delay).max(delay - 0.020 * sr - 1.0);
+                    worst = worst.max(off);
+                }
+            }
+        }
+        assert!(
+            worst <= 0.0,
+            "the wet signal left the 12..20 ms window by {worst}"
+        );
+    }
+
+    /// Runs `fx` over `x` with `p`, returning the left output.
+    fn segment(fx: &mut FmFx, p: &FmPatch, x: &[f32]) -> Vec<f32> {
+        let mut mono = x.to_vec();
+        let (mut l, mut r) = (vec![0.0; x.len()], vec![0.0; x.len()]);
+        fx.process(p, &mut mono, &mut l, &mut r);
+        l
+    }
+
+    fn max_step(x: &[f32]) -> f32 {
+        x.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// Plays a 300 Hz tone with `on`, switches to `off` at a peak for one
+    /// second, and back to `on` at a zero crossing. Returns the step at
+    /// the switch back and the largest normal step, on or off.
+    fn reenable_step(on: &FmPatch, off: &FmPatch) -> (f32, f32) {
+        let x = tone(300.0, 60_000);
+        let mut fx = FmFx::new(SR);
+        let a = segment(&mut fx, on, &x[..4840]); // ends at a peak
+        let b = segment(&mut fx, off, &x[4840..52_880]); // ends at a zero crossing
+        let c = segment(&mut fx, on, &x[52_880..]);
+        let normal = max_step(&a[2400..]).max(max_step(&b));
+        ((c[0] - b[b.len() - 1]).abs(), normal)
+    }
+
+    #[test]
+    fn re_enabling_the_filter_starts_from_a_clean_state() {
+        let mut on = FmPatch::default();
+        on.filter_on = true;
+        on.cutoff = 1.0;
+        let off = FmPatch::default();
+        let (step, normal) = reenable_step(&on, &off);
+        assert!(step < normal * 1.5, "step {step}, normal {normal}");
+    }
+
+    #[test]
+    fn re_enabling_the_phaser_starts_from_a_clean_state() {
+        let mut on = FmPatch::default();
+        on.phaser_mix = 1.0;
+        on.phaser_feedback = 1.0;
+        let off = FmPatch::default();
+        let (step, normal) = reenable_step(&on, &off);
+        assert!(step < normal * 1.5, "step {step}, normal {normal}");
     }
 }

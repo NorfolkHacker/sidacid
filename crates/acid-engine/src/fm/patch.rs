@@ -267,6 +267,11 @@ mod tests {
         assert!(p.osc_sync && p.lfo_sync && !p.mono && !p.vintage);
         assert_eq!((p.transpose, p.pms, p.lfo_wave), (0, 3, 0));
         assert!((p.pitch_levels[0] - 50.0).abs() < 1e-3);
+        assert_eq!(p.feedback, 0);
+        assert!((p.volume - 0.7).abs() < 1e-6);
+        assert_eq!(p.glide, 0.0);
+        assert!(!p.filter_on);
+        assert_eq!((p.chorus_mix, p.phaser_mix), (0.0, 0.0));
     }
 
     #[test]

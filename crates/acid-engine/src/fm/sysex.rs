@@ -302,7 +302,7 @@ impl Dx7Voice {
             o.fine = d(id(O::Fine));
             o.detune = s(id(O::Detune), fm_steps::DETUNE);
         }
-        v
+        v.clamped()
     }
 }
 
@@ -636,5 +636,102 @@ mod tests {
         v.name = "PIANO   ".into();
         let back = unpack_voice(&pack_voice(&v));
         assert_eq!(back.name, "PIANO");
+        let printable = |n: &str| n.len() <= 10 && n.chars().all(|c| (' '..='~').contains(&c));
+        v.name = "ÉLAN PIANO EXTRA".into();
+        let back = unpack_voice(&pack_voice(&v));
+        assert_eq!(back.name, "LAN PIANO");
+        assert!(printable(&back.name) && back.is_valid());
+        let clamped = v.clone().clamped();
+        assert_eq!(clamped.name, "LAN PIANO");
+        assert!(printable(&clamped.name));
+        // DEL and NUL in the packed name read as spaces, trailing ones trimmed.
+        let mut b = pack_voice(&Dx7Voice::init());
+        b[118..128].copy_from_slice(b"AB\x7FC\0\0\0\0\0\0");
+        assert_eq!(unpack_voice(&b).name, "AB C");
+    }
+
+    #[test]
+    fn a_name_from_params_is_clamped() {
+        let init: std::collections::HashMap<ParamId, f32> =
+            Dx7Voice::init().to_params().into_iter().collect();
+        let v = Dx7Voice::from_params("ÄBCDEFGHIJKLMNOP  ", |id| init[&id]);
+        assert_eq!(v.name, "BCDEFGHIJK");
+        assert!(v.is_valid());
+    }
+
+    #[test]
+    fn packed_layout_is_the_dx7s() {
+        // Byte layout from the DX7 VMEM (packed 32-voice) format: OP6
+        // first, 17 bytes per operator, then the voice parameters.
+        let mut v = Dx7Voice::init();
+        let op6 = &mut v.ops[5];
+        op6.rates = [10, 20, 30, 40];
+        op6.levels = [91, 81, 71, 61];
+        op6.break_point = 45;
+        op6.left_depth = 12;
+        op6.right_depth = 34;
+        op6.left_curve = 1;
+        op6.right_curve = 2;
+        op6.rate_scaling = 5;
+        op6.detune = 9;
+        op6.amp_mod_sens = 2;
+        op6.vel_sens = 6;
+        op6.level = 88;
+        op6.fixed = true;
+        op6.coarse = 17;
+        op6.fine = 42;
+        v.ops[0].coarse = 3;
+        v.ops[0].level = 77;
+        v.pitch_rates = [1, 2, 3, 4];
+        v.pitch_levels = [5, 6, 7, 8];
+        v.algorithm = 21;
+        v.feedback = 5;
+        v.osc_sync = true;
+        v.lfo_speed = 11;
+        v.lfo_delay = 22;
+        v.lfo_pmd = 33;
+        v.lfo_amd = 44;
+        v.lfo_sync = true;
+        v.lfo_wave = 4;
+        v.pms = 6;
+        v.transpose = 30;
+        v.name = "ABC".into();
+        let b = pack_voice(&v);
+        assert_eq!(
+            &b[0..8],
+            &[10, 20, 30, 40, 91, 81, 71, 61],
+            "OP6 rates, levels"
+        );
+        assert_eq!(&b[8..11], &[45, 12, 34], "break point, depths");
+        assert_eq!(b[11], (2 << 2) | 1, "RC << 2 | LC");
+        assert_eq!(b[12], (9 << 3) | 5, "DET << 3 | RS");
+        assert_eq!(b[13], (6 << 2) | 2, "KVS << 2 | AMS");
+        assert_eq!(b[14], 88, "output level");
+        assert_eq!(b[15], (17 << 1) | 1, "FC << 1 | mode");
+        assert_eq!(b[16], 42, "fine");
+        assert_eq!(b[85 + 14], 77, "OP1 is last");
+        assert_eq!(b[85 + 15], 3 << 1, "OP1 coarse, ratio mode");
+        assert_eq!(&b[102..110], &[1, 2, 3, 4, 5, 6, 7, 8], "pitch EG");
+        assert_eq!(b[110], 21, "algorithm");
+        assert_eq!(b[111], (1 << 3) | 5, "OKS << 3 | FB");
+        assert_eq!(
+            &b[112..116],
+            &[11, 22, 33, 44],
+            "LFO speed, delay, PMD, AMD"
+        );
+        assert_eq!(
+            b[116],
+            (6 << 4) | (4 << 1) | 1,
+            "LPMS << 4 | LFW << 1 | LKS"
+        );
+        assert_eq!(b[117], 30, "transpose");
+        assert_eq!(&b[118..128], b"ABC       ", "name, space padded");
+
+        // Two's complement of the 7-bit sum: 1 + 2 + 3 = 6, 128 - 6 = 122.
+        assert_eq!(checksum(&[1, 2, 3]), 122);
+        // A bank of INIT voices, summed by hand from the layout above.
+        let bank = bank_sysex(&[]);
+        assert_eq!(bank[6 + 4095], b'E', "the last name byte of voice 32");
+        assert_eq!(bank[6 + 4096], 96, "the bank checksum");
     }
 }

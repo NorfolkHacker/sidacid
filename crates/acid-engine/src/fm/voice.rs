@@ -93,8 +93,8 @@ impl Voice {
         )
     }
 
-    /// Starts a note. A voice that is still sounding fades out over ~2 ms
-    /// instead of being cut.
+    /// Starts a note. A voice that is still sounding fades out with a
+    /// 0.5 ms time constant (inaudible within ~2 ms) instead of being cut.
     pub fn start(&mut self, patch: &FmPatch, pitch: u8, vel: u8, live: bool, age: u32) {
         self.declick = if self.active { self.last_out } else { 0.0 };
         self.active = true;

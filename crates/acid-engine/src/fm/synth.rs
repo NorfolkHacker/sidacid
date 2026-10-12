@@ -1,7 +1,10 @@
 //! The FM machine: 12 voices (or one in mono mode), the shared LFO, and
-//! the mix, which runs through the filter, chorus and phaser. Notes come from the pattern or from audition (`live`); a
+//! the mix, which runs through the filter, chorus and phaser.
+//!
+//! Notes come from the pattern or from audition (`live`). In poly mode a
 //! note-off only releases voices from its own source, and releases every
-//! voice of that pitch.
+//! voice of that pitch. Mono mode shares one key stack between both
+//! sources, so a note-off from either source releases that key.
 
 use super::algorithms::ALGORITHMS;
 use super::fx::FmFx;
@@ -158,7 +161,8 @@ impl FmSynth {
     /// Releases the pattern's notes; auditioned (live) notes keep sounding.
     /// Mono mode shares one key stack between both sources: a sounding
     /// audition note stays and the keys under it are forgotten, otherwise
-    /// everything is released.
+    /// everything is released. So in mono, a pattern note played on top of
+    /// a held audition releases both.
     pub fn pattern_off(&mut self) {
         if self.patch.mono {
             let v = &self.voices[0];
@@ -229,6 +233,16 @@ impl FmSynth {
         self.voices
             .iter()
             .filter(|v| v.active && v.held)
+            .map(|v| v.pitch)
+            .collect()
+    }
+
+    /// Pitches of every active voice, released ones included.
+    #[cfg(test)]
+    pub(crate) fn active_pitches(&self) -> Vec<u8> {
+        self.voices
+            .iter()
+            .filter(|v| v.active)
             .map(|v| v.pitch)
             .collect()
     }
@@ -442,6 +456,9 @@ mod tests {
             held, want,
             "every held note survives; a released voice was stolen"
         );
+        let active = s.active_pitches();
+        assert!(!active.contains(&43), "the older released voice went first");
+        assert!(active.contains(&45), "the newer released voice still rings");
         s.note_on(81, 100, false);
         let mut held = s.sounding();
         held.sort_unstable();

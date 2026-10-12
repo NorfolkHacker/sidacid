@@ -163,6 +163,22 @@ fn audition_and_pattern_swaps_do_not_allocate() {
 }
 
 #[test]
+fn toggling_fm_effects_does_not_allocate() {
+    use acid_engine::params::FmParam;
+    let mut e = Engine::from_project(SR, &busy_project());
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    e.play();
+    let n = count_allocs(|| {
+        for on in [1.0, 0.0, 1.0, 0.0, 1.0] {
+            e.set_param(ParamId::Fm(FmParam::FilterOn), on);
+            e.set_param(ParamId::Fm(FmParam::PhaserMix), on);
+            render_seconds(&mut e, &mut l, &mut r, 0.2);
+        }
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn the_counter_sees_allocations() {
     let n = count_allocs(|| {
         drop(std::hint::black_box(Vec::<u8>::with_capacity(16)));

@@ -126,4 +126,16 @@ mod tests {
         assert_eq!(ALGORITHMS[31].mods, [0; 6]);
         assert_eq!(ALGORITHMS[17].feedback, 2, "algorithm 18 feeds back on OP3");
     }
+
+    #[test]
+    fn feedback_operators_match_the_dx7() {
+        // From the DX7 algorithm chart (operators numbered 1-6). Algorithms
+        // 4 and 6 have a two-operator feedback loop on the real DX7; here
+        // they use OP6 self-feedback, as the module doc says.
+        let want = [
+            6, 2, 6, 6, 6, 6, 6, 4, 2, 3, 6, 2, 6, 6, 2, 6, 2, 3, 6, 3, 3, 6, 6, 6, 6, 6, 3, 5, 6,
+            5, 6, 6,
+        ];
+        assert_eq!(ALGORITHMS.map(|a| a.feedback + 1), want);
+    }
 }

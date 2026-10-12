@@ -48,6 +48,8 @@ fn voice(name: &str, algorithm: u8, feedback: u8, ops: [Dx7Op; 6]) -> Dx7Voice {
     v
 }
 
+/// The 16 starter voices (original, not Yamaha ROM), in browser order.
+/// Allocates: build once off the audio thread.
 pub fn starter_bank() -> Vec<Dx7Voice> {
     let sustain = [99, 99, 99, 0];
     let mut kick = voice(

@@ -211,7 +211,7 @@ impl ParamId {
                     F::PitchL1 | F::PitchL2 | F::PitchL3 | F::PitchL4 => cont(n, of99(50.0)),
                     F::LfoSpeed => cont(n, of99(35.0)),
                     F::LfoWave => disc(n, 0.0, fm_steps::LFO_WAVES as u8),
-                    F::PitchModSens => cont(n, 3.0 / 7.0),
+                    F::PitchModSens => cont(n, 3.0 / (fm_steps::PITCH_MOD_SENS - 1) as f32),
                     F::Transpose => cont(n, 0.5),
                     F::Mono | F::Vintage | F::FilterOn | F::FilterMode => disc(n, 0.0, 2),
                     F::Glide | F::Resonance | F::ChorusMix | F::PhaserMix => cont(n, 0.0),
@@ -231,7 +231,7 @@ impl ParamId {
                     O::LeftCurve | O::RightCurve => disc(n, 0.0, fm_steps::CURVES as u8),
                     O::Level => cont(n, if op == 0 { 1.0 } else { 0.0 }),
                     O::FixedFreq => disc(n, 0.0, 2),
-                    O::Coarse => cont(n, 1.0 / 31.0),
+                    O::Coarse => cont(n, 1.0 / (fm_steps::COARSE - 1) as f32),
                     O::Detune => cont(n, 0.5),
                     O::On => disc(n, 1.0, 2),
                 }
@@ -467,6 +467,19 @@ mod tests {
         assert_eq!(d(ParamId::FmOp(3, OpParam::R1)), 1.0);
         assert_eq!(d(ParamId::FmOp(3, OpParam::L4)), 0.0);
         assert!((d(ParamId::FmOp(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
+        // Decoded through the step counts, the defaults are the DX7 INIT
+        // values: changing an fm_steps constant must change its default too.
+        let step = |id: ParamId, steps: usize| step_index(d(id), steps as u8);
+        assert_eq!(step(ParamId::FmOp(2, OpParam::Coarse), fm_steps::COARSE), 1);
+        assert_eq!(step(ParamId::FmOp(2, OpParam::Detune), fm_steps::DETUNE), 7);
+        assert_eq!(
+            step(ParamId::Fm(FmParam::PitchModSens), fm_steps::PITCH_MOD_SENS),
+            3
+        );
+        assert_eq!(
+            step(ParamId::Fm(FmParam::Transpose), fm_steps::TRANSPOSE),
+            24
+        );
         assert_eq!(d(ParamId::FmOp(2, OpParam::Detune)), 0.5);
         assert_eq!(d(ParamId::FmOp(5, OpParam::On)), 1.0);
         assert!((d(ParamId::Fm(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);

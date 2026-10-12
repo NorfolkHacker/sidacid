@@ -43,15 +43,19 @@ impl Default for Lfo {
 
 impl Lfo {
     pub fn new() -> Self {
-        Self {
+        let mut l = Self {
             phase: 0.0,
             held: 0.0,
             rng: 0x1234_5678,
-        }
+        };
+        l.held = l.next_random();
+        l
     }
 
+    /// Restarts the cycle (key sync); sample & hold draws a fresh value.
     pub fn reset(&mut self) {
         self.phase = 0.0;
+        self.held = self.next_random();
     }
 
     /// Advances by `seconds`; returns the value in -1..=1.
@@ -175,6 +179,16 @@ mod tests {
         sh.tick(1.0, 5, 1.0);
         let held = sh.tick(1.0, 5, 0.1);
         assert_eq!(sh.tick(1.0, 5, 0.1), held, "S&H holds within a cycle");
+    }
+
+    #[test]
+    fn sample_and_hold_draws_a_value_when_the_cycle_starts() {
+        let mut l = Lfo::new();
+        let first = l.tick(1.0, 5, 0.01);
+        assert_ne!(first, 0.0, "the first cycle holds a random value");
+        l.reset();
+        let synced = l.tick(1.0, 5, 0.01);
+        assert_ne!(synced, first, "a key-synced note gets a fresh value");
     }
 
     #[test]

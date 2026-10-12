@@ -279,6 +279,40 @@ mod tests {
     }
 
     #[test]
+    fn rate_timing_matches_msfa_reference() {
+        // msfa (env.cc): qrate = rate * 41 >> 6 and each 64-sample block at
+        // 44.1 kHz moves the level by (4 + (qrate & 3)) << (2 + 6 +
+        // (qrate >> 2)) in Q24 units of 1/256 of an envelope unit.
+        // R=50: qrate 32, so 4 << 16 per block = 1/64 unit per 64 samples,
+        // 44100 / 64 / 64 = 10.766 units/s. L1=99 to L2=0 at full output
+        // level spans 15.0 - 16/256 = 14.9375 units: 1.387 s.
+        let reference = 14.9375 / (44_100.0 / 64.0 / 64.0);
+        let mut e = full_env([99.0, 50.0, 99.0, 99.0], [99.0, 0.0, 0.0, 0.0]);
+        let mut attack = None;
+        let mut decay_end = None;
+        for b in 1..=blocks(5.0) {
+            e.tick(BLOCK);
+            if attack.is_none() && e.stage >= 1 {
+                attack = Some(b);
+            }
+            if e.stage >= 2 {
+                decay_end = Some(b);
+                break;
+            }
+        }
+        let secs = |b: usize| (b * BLOCK) as f32 / SR;
+        // R1=99: qrate 63, a jump to the onset then one 64-sample step at
+        // 44.1 kHz covers the rest, so the attack is done in under 2 ms.
+        let attack = secs(attack.unwrap());
+        assert!(attack < 0.002, "attack took {attack} s");
+        let decay = secs(decay_end.unwrap()) - attack;
+        assert!(
+            (decay - reference).abs() < reference * 0.1,
+            "decay {decay} s, msfa reference {reference} s"
+        );
+    }
+
+    #[test]
     fn a_zero_level_is_silent() {
         let mut e = Env::new(SR);
         e.start(
