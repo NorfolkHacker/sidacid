@@ -7,6 +7,7 @@
 pub mod demo;
 pub mod drums;
 pub mod engine;
+pub mod fm;
 pub mod fx;
 pub mod host;
 pub mod machine;
