@@ -8,6 +8,7 @@ use acid_engine::project::{
     BANK_SIZE, DrumPattern, NotePattern, PatternRef, Project, SynthPattern,
 };
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 const EXTENSION: &str = "sidacid";
@@ -29,6 +30,32 @@ pub enum Clip {
 
 fn project_dialog() -> rfd::FileDialog {
     rfd::FileDialog::new().add_filter("SidAcid project", &[EXTENSION])
+}
+
+/// `path` ending in `.sidacid`: appended unless the name already ends with
+/// it (any case), so "beat.v2" saves as "beat.v2.sidacid".
+pub fn with_project_extension(path: PathBuf) -> PathBuf {
+    let has_it = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION));
+    let Some(name) = path.file_name().filter(|_| !has_it) else {
+        return path;
+    };
+    let mut name = name.to_os_string();
+    name.push(".");
+    name.push(EXTENSION);
+    path.with_file_name(name)
+}
+
+/// A save waiting for its "Saving…" status to reach the screen.
+pub struct PendingSave {
+    path: PathBuf,
+    /// Action to run once the save succeeds.
+    then: Option<Pending>,
+    /// Frames finished since the save was asked for.
+    frames: u8,
+    /// Status line to restore afterwards.
+    prev_status: Option<String>,
 }
 
 pub fn export_status(song: bool, bars: u32, progress: Option<f32>) -> String {
@@ -59,7 +86,13 @@ impl SidAcidApp {
                 self.save(true);
             }
             ui.separator();
-            if ui.button("Export to WAV…").clicked() {
+            if ui
+                .add_enabled(
+                    self.view.export_rx.is_none(),
+                    egui::Button::new("Export to WAV…"),
+                )
+                .clicked()
+            {
                 ui.close_menu();
                 if self.view.export_bars == 0 {
                     self.view.export_bars = DEFAULT_EXPORT_BARS;
@@ -103,7 +136,7 @@ impl SidAcidApp {
 
     /// Runs `action` now, or asks first if there are unsaved changes.
     pub(crate) fn request(&mut self, action: Pending) {
-        if self.doc.dirty {
+        if self.doc.is_dirty() {
             self.view.confirm = Some(action);
         } else {
             self.perform(action);
@@ -134,6 +167,14 @@ impl SidAcidApp {
 
     pub(crate) fn load_document(&mut self, doc: Document) {
         self.doc = doc;
+        // An empty imported bank is no bank (the Imported tab stays off).
+        if self.doc.project.fm.bank.as_ref().is_some_and(Vec::is_empty) {
+            self.doc.project.fm.bank = None;
+        }
+        // A queued save belonged to the old document.
+        if let Some(save) = self.view.saving.take() {
+            self.view.status_line = save.prev_status;
+        }
         self.view.writers = [None; 2];
         self.view.roll_drag = [None; 2];
         self.view.scroll_accum = [0.0; 2];
@@ -168,8 +209,25 @@ impl SidAcidApp {
         }
     }
 
-    /// Saves to the current path (or asks for one). Returns true on success.
+    /// Saves to the current path (or asks for one). Returns true when a
+    /// save was queued: it runs a frame later, once "Saving…" shows.
     pub(crate) fn save(&mut self, save_as: bool) -> bool {
+        self.queue_save(save_as, None)
+    }
+
+    /// The unsaved-changes question's "Save": save, then run `action`.
+    pub(crate) fn save_then(&mut self, action: Pending) -> bool {
+        let queued = self.queue_save(false, Some(action));
+        if queued {
+            self.view.confirm = None;
+        }
+        queued
+    }
+
+    fn queue_save(&mut self, save_as: bool, then: Option<Pending>) -> bool {
+        if self.view.saving.is_some() {
+            return false;
+        }
         let path = if save_as || self.doc.path.is_none() {
             project_dialog()
                 .set_file_name(format!("{}.{EXTENSION}", self.doc.project.name))
@@ -177,14 +235,49 @@ impl SidAcidApp {
         } else {
             self.doc.path.clone()
         };
-        let Some(mut path) = path else { return false };
-        if path.extension().is_none() {
-            path.set_extension(EXTENSION);
+        let Some(path) = path else { return false };
+        let prev_status = self.view.status_line.replace("Saving…".into());
+        self.view.saving = Some(PendingSave {
+            path: with_project_extension(path),
+            then,
+            frames: 0,
+            prev_status,
+        });
+        true
+    }
+
+    /// Start of a frame: runs a queued save once a finished frame has
+    /// shown its status. Saving blocks the UI thread for a moment.
+    pub(crate) fn run_queued_save(&mut self) {
+        if self.view.saving.as_ref().is_none_or(|s| s.frames < 2) {
+            return;
         }
+        let Some(save) = self.view.saving.take() else {
+            return;
+        };
+        self.view.status_line = save.prev_status;
+        let saved = self.write_project(save.path);
+        match save.then {
+            Some(action) if saved => self.perform(action),
+            // A failed save puts the unsaved-changes question back.
+            Some(action) => self.view.confirm = Some(action),
+            None => {}
+        }
+    }
+
+    /// End of a frame: counts it toward a queued save and asks for the next.
+    pub(crate) fn tick_queued_save(&mut self, ctx: &egui::Context) {
+        if let Some(save) = self.view.saving.as_mut() {
+            save.frames = save.frames.saturating_add(1);
+            ctx.request_repaint();
+        }
+    }
+
+    fn write_project(&mut self, path: PathBuf) -> bool {
         match self.doc.project.save(&path) {
             Ok(()) => {
                 self.doc.path = Some(path);
-                self.doc.dirty = false;
+                self.doc.mark_saved();
                 true
             }
             Err(e) => {
@@ -253,18 +346,30 @@ impl SidAcidApp {
         self.send(cmds);
     }
 
-    pub(crate) fn window_title(&self) -> String {
-        let name = self
-            .doc
+    /// The file's name without extension, or the project name if unsaved.
+    pub(crate) fn document_name(&self) -> String {
+        self.doc
             .path
             .as_ref()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.doc.project.name.clone());
-        format!("{name}{} — SidAcid", if self.doc.dirty { "*" } else { "" })
+            .unwrap_or_else(|| self.doc.project.name.clone())
+    }
+
+    pub(crate) fn window_title(&self) -> String {
+        let name = self.document_name();
+        format!(
+            "{name}{} — SidAcid",
+            if self.doc.is_dirty() { "*" } else { "" }
+        )
     }
 
     pub(crate) fn start_export(&mut self) {
+        // One export at a time: a second would drop the first one's result.
+        if self.view.export_rx.is_some() {
+            self.view.message = Some("An export is already running.".into());
+            return;
+        }
         let song = self.view.export_song;
         let kind = if song { "song" } else { "loop" };
         let Some(path) = rfd::FileDialog::new()
@@ -306,9 +411,14 @@ impl SidAcidApp {
         if self.view.export_rx.is_none() {
             return;
         }
+        // While a save is queued its "Saving…" status stays up.
+        let status = match self.view.saving.as_mut() {
+            Some(save) => &mut save.prev_status,
+            None => &mut self.view.status_line,
+        };
         if let Some(p) = &self.view.export_progress {
             let f = f32::from_bits(p.load(std::sync::atomic::Ordering::Relaxed));
-            self.view.status_line = Some(export_status(true, 0, Some(f)));
+            *status = Some(export_status(true, 0, Some(f)));
         }
         let Some(rx) = &self.view.export_rx else {
             return;
@@ -316,7 +426,10 @@ impl SidAcidApp {
         if let Ok(result) = rx.try_recv() {
             self.view.export_rx = None;
             self.view.export_progress = None;
-            self.view.status_line = None;
+            match self.view.saving.as_mut() {
+                Some(save) => save.prev_status = None,
+                None => self.view.status_line = None,
+            }
             self.view.message = Some(match result {
                 Ok(path) => format!("Exported {}", path.display()),
                 Err(e) => format!("Export failed: {e}"),
@@ -326,20 +439,15 @@ impl SidAcidApp {
 
     pub(crate) fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(action) = self.view.confirm {
-            let name = self
-                .window_title()
-                .trim_end_matches(" — SidAcid")
-                .trim_end_matches('*')
-                .to_string();
+            let name = self.document_name();
             egui::Window::new("Unsaved changes")
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(format!("Save changes to \"{name}\" first?"));
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() && self.save(false) {
-                            self.view.confirm = None;
-                            self.perform(action);
+                        if ui.button("Save").clicked() {
+                            self.save_then(action);
                         }
                         if ui.button("Don't save").clicked() {
                             self.dont_save(action);
@@ -408,5 +516,161 @@ mod tests {
         assert_eq!(export_status(false, 8, None), "Exporting 8 bars…");
         assert_eq!(export_status(true, 0, Some(0.425)), "Exporting song 42%…");
         assert_eq!(export_status(true, 0, None), "Exporting song…");
+    }
+
+    use crate::document::Edit;
+    use crate::ui::run_frames;
+    use std::path::Path;
+
+    fn app() -> SidAcidApp {
+        SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()))
+    }
+
+    /// A fresh path in the temp directory, removed when dropped.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sidacid-test-{}-{name}.{EXTENSION}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_project_extension_is_appended_unless_present() {
+        let ext = |p: &str| with_project_extension(PathBuf::from(p));
+        assert_eq!(ext("/x/a"), PathBuf::from("/x/a.sidacid"));
+        assert_eq!(ext("/x/a.v2"), PathBuf::from("/x/a.v2.sidacid"));
+        assert_eq!(ext("/x/a.SIDACID"), PathBuf::from("/x/a.SIDACID"));
+        assert_eq!(ext("/x/a.sidacid"), PathBuf::from("/x/a.sidacid"));
+    }
+
+    #[test]
+    fn the_document_name_keeps_a_trailing_star() {
+        let mut app = app();
+        app.doc.project.name = "Beat*".into();
+        app.doc.mark_dirty();
+        assert_eq!(app.document_name(), "Beat*");
+        app.doc.path = Some(PathBuf::from("/tmp/loop*.sidacid"));
+        assert_eq!(app.document_name(), "loop*");
+    }
+
+    #[test]
+    fn a_second_export_is_refused_while_one_runs() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        app.view.export_rx = Some(rx);
+        app.start_export();
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("An export is already running.")
+        );
+        tx.send(Ok(PathBuf::from("first.wav"))).unwrap();
+        let first = app.view.export_rx.as_ref().unwrap().try_recv();
+        assert_eq!(first, Ok(Ok(PathBuf::from("first.wav"))), "same channel");
+    }
+
+    #[test]
+    fn save_and_reload_round_trip() {
+        let file = TempFile::new("round-trip");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        let cmds = app.doc.apply(Edit::Bpm(151.0), false);
+        app.send(cmds);
+        assert!(app.save(false));
+        assert!(!file.0.exists(), "the save waits for the status to show");
+        assert_eq!(app.view.status_line.as_deref(), Some("Saving…"));
+        run_frames(&mut app, 3);
+        assert!(file.0.exists());
+        assert!(!app.doc.is_dirty());
+        assert_eq!(app.view.status_line, None);
+        let saved = app.doc.project.clone();
+        let loaded = Project::load(&file.0).unwrap();
+        assert_eq!(loaded, saved);
+        let mut doc = Document::new(loaded);
+        doc.path = Some(file.0.clone());
+        app.load_document(doc);
+        assert_eq!(app.doc.project, saved);
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn a_failed_save_reports_and_stays_dirty() {
+        let mut app = app();
+        app.doc.path = Some(PathBuf::from("/nonexistent-sidacid-dir/x.sidacid"));
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        run_frames(&mut app, 3);
+        assert!(
+            app.view
+                .message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Could not save"))
+        );
+        assert!(app.doc.is_dirty());
+        assert!(!Path::new("/nonexistent-sidacid-dir").exists());
+    }
+
+    #[test]
+    fn save_from_the_unsaved_changes_question_then_runs_the_action() {
+        let file = TempFile::new("then-new");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        app.doc.mark_dirty();
+        app.request(Pending::New);
+        assert_eq!(app.view.confirm, Some(Pending::New));
+        assert!(app.save_then(Pending::New));
+        assert!(app.view.confirm.is_none());
+        assert_eq!(app.doc.project.name, "Demo", "not before the save");
+        run_frames(&mut app, 3);
+        assert!(file.0.exists());
+        assert_eq!(app.doc.project.name, "Untitled");
+    }
+
+    #[test]
+    fn a_failed_save_from_the_question_asks_again() {
+        let mut app = app();
+        app.doc.path = Some(PathBuf::from("/nonexistent-sidacid-dir/x.sidacid"));
+        app.doc.mark_dirty();
+        app.view.confirm = Some(Pending::Quit);
+        assert!(app.save_then(Pending::Quit));
+        run_frames(&mut app, 3);
+        assert!(app.view.message.is_some());
+        assert_eq!(app.view.confirm, Some(Pending::Quit));
+        assert!(!app.view.quit);
+    }
+
+    #[test]
+    fn a_one_voice_bank_draws_and_loads() {
+        use acid_engine::fm::sysex::Dx7Voice;
+        let voice: Dx7Voice = crate::ui::fm_voices::starter()[3].clone();
+        let mut project = Project::default();
+        project.fm.bank = Some(vec![voice.clone()]);
+        let mut app = SidAcidApp::headless(Document::new(project));
+        app.view.fm_browser = crate::ui::fm_voices::FmBrowser::Imported;
+        run_frames(&mut app, 2);
+        app.load_fm_voice(&app.doc.project.fm.bank.as_ref().unwrap()[0].clone());
+        assert_eq!(app.doc.project.fm.voice_name, voice.name);
+    }
+
+    #[test]
+    fn an_empty_bank_loads_as_no_bank() {
+        let mut project = Project::default();
+        project.fm.bank = Some(Vec::new());
+        let mut app = app();
+        app.load_document(Document::new(project));
+        assert_eq!(app.doc.project.fm.bank, None);
+        assert!(!app.doc.is_dirty());
+        run_frames(&mut app, 1);
     }
 }

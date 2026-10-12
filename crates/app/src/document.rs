@@ -14,6 +14,12 @@ use std::sync::Arc;
 
 pub const UNDO_LIMIT: usize = 200;
 
+/// One change to the project. Indices must be in range, or `Document::apply`
+/// panics: `synth` and `kit` < 2, `slot` < `PATTERNS` (a sampler `slot` <
+/// `SLOTS`), `step` < `STEPS`, `inst` < `DRUM_INSTRUMENTS`, and `machine` a
+/// note machine (FM or Sampler). Values are clamped: params to 0..=1,
+/// lengths to 1..=`STEPS`, transpose to -12..=12, BPM and swing to their
+/// ranges.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
     Param {
@@ -78,6 +84,7 @@ pub enum Edit {
         song: Box<Song>,
     },
     /// Loading an FM voice: many params and the voice name, one undo step.
+    /// Values apply in order; a repeated id ends on its last value.
     FmVoice {
         name: String,
         values: Vec<(ParamId, f32)>,
@@ -152,46 +159,199 @@ fn merge_key(edit: &Edit) -> MergeKey {
     }
 }
 
+/// One undo or redo step: the edit that reverses it, and the generation
+/// of the document state the step leads to when redone.
+struct Step {
+    edit: Edit,
+    generation: u64,
+}
+
+/// Approximate size of the sample data an edit holds.
+fn edit_bytes(edit: &Edit) -> usize {
+    match edit {
+        Edit::SamplerSlot { data: Some(d), .. } => d.pcm.len() * std::mem::size_of::<i16>(),
+        _ => 0,
+    }
+}
+
 pub struct Document {
     pub project: Project,
     pub path: Option<PathBuf>,
-    pub dirty: bool,
-    undo: Vec<Edit>,
-    redo: Vec<Edit>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     /// Merge key of the open gesture, if the last edit was a merging one.
     gesture: Option<MergeKey>,
+    /// Generation of the state at the bottom of the undo history.
+    base_generation: u64,
+    /// Last generation handed out; every edit gets a fresh one.
+    last_generation: u64,
+    /// Generation of the state last saved (or loaded).
+    saved_generation: u64,
+    /// A change outside undo (a pattern selection) since the last save.
+    unsaved_selection: bool,
+    /// Sample bytes the undo history may hold; see `UNDO_SAMPLE_BYTES`.
+    undo_byte_budget: usize,
 }
+
+/// Sample data (PCM in `SlotData`) the undo history may hold. Twice the
+/// 64 MB the sampler allows in a project, so a few full reloads stay
+/// undoable. Past it the oldest steps are dropped, the newest always kept.
+pub const UNDO_SAMPLE_BYTES: usize = 128 * 1024 * 1024;
 
 impl Document {
     pub fn new(project: Project) -> Self {
         Self {
             project,
             path: None,
-            dirty: false,
             undo: Vec::new(),
             redo: Vec::new(),
             gesture: None,
+            base_generation: 0,
+            last_generation: 0,
+            saved_generation: 0,
+            unsaved_selection: false,
+            undo_byte_budget: UNDO_SAMPLE_BYTES,
         }
     }
 
     /// Applies `edit` and returns the engine commands to send. With
     /// `merge`, consecutive edits to the same target form one undo step
-    /// until `end_gesture`.
+    /// until `end_gesture`. An edit that changes nothing adds no step and
+    /// leaves the dirty state alone.
+    ///
+    /// Indices must be in range: `synth`/`kit` < 2, `slot` < `PATTERNS`
+    /// (sampler `slot` < `SLOTS`), `step` < `STEPS`, `inst` <
+    /// `DRUM_INSTRUMENTS`, and `machine` must be a note machine. Out of
+    /// range indices panic. Values are clamped to their valid ranges.
     pub fn apply(&mut self, edit: Edit, merge: bool) -> Vec<Command> {
         let key = merge_key(&edit);
         let continuing = merge && self.gesture == Some(key) && !self.undo.is_empty();
         let inverse = self.apply_raw(edit);
         let cmds = self.commands_for(&inverse);
-        if !continuing {
-            self.undo.push(inverse);
-            if self.undo.len() > UNDO_LIMIT {
-                self.undo.remove(0);
+        if self.is_no_op(&inverse) {
+            if !continuing {
+                self.gesture = None;
             }
+            return cmds;
+        }
+        self.last_generation += 1;
+        let generation = self.last_generation;
+        if continuing {
+            if let Some(top) = self.undo.last_mut() {
+                top.generation = generation;
+            }
+        } else {
+            self.undo.push(Step {
+                edit: inverse,
+                generation,
+            });
         }
         self.gesture = merge.then_some(key);
         self.redo.clear();
-        self.dirty = true;
+        self.trim_undo();
         cmds
+    }
+
+    /// Drops the oldest steps past `UNDO_LIMIT` or the sample byte budget.
+    fn trim_undo(&mut self) {
+        let mut bytes: usize = self.undo_sample_bytes();
+        let mut drop = 0;
+        while self.undo.len() - drop > 1
+            && (self.undo.len() - drop > UNDO_LIMIT || bytes > self.undo_byte_budget)
+        {
+            bytes -= edit_bytes(&self.undo[drop].edit);
+            drop += 1;
+        }
+        if drop > 0 {
+            self.base_generation = self.undo[drop - 1].generation;
+            self.undo.drain(..drop);
+        }
+    }
+
+    /// Sample bytes held by the undo and redo history.
+    pub(crate) fn undo_sample_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|s| edit_bytes(&s.edit))
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_undo_byte_budget(&mut self, bytes: usize) {
+        self.undo_byte_budget = bytes;
+    }
+
+    /// Whether `inverse` (just returned by `apply_raw`) restores what is
+    /// already there: the edit changed nothing. Only cheap targets are
+    /// compared; the rest always count as a change.
+    fn is_no_op(&self, inverse: &Edit) -> bool {
+        let p = &self.project;
+        match inverse {
+            Edit::Param { id, value } => p.param(*id) == *value,
+            Edit::Bpm(bpm) => p.bpm == *bpm,
+            Edit::Swing(swing) => p.swing == *swing,
+            Edit::SynthStep {
+                synth,
+                slot,
+                step,
+                value,
+            } => p.synths[*synth].patterns[*slot as usize].steps[*step] == *value,
+            Edit::SynthLength {
+                synth,
+                slot,
+                length,
+            } => p.synths[*synth].patterns[*slot as usize].length == *length,
+            Edit::SynthTranspose {
+                synth,
+                slot,
+                transpose,
+            } => p.synths[*synth].patterns[*slot as usize].transpose == *transpose,
+            Edit::DrumHit {
+                kit,
+                slot,
+                step,
+                inst,
+                hit,
+            } => p.drums[*kit].patterns[*slot as usize].steps[*step][*inst] == *hit,
+            Edit::DrumLength { kit, slot, length } => {
+                p.drums[*kit].patterns[*slot as usize].length == *length
+            }
+            Edit::NoteLength {
+                machine,
+                slot,
+                length,
+            } => p
+                .note_patterns(*machine)
+                .is_some_and(|pats| pats[*slot as usize].length == *length),
+            Edit::View { synth, view } => p.synths[*synth].view == *view,
+            _ => false,
+        }
+    }
+
+    /// The state the document is in: the generation of the newest undo step.
+    fn generation(&self) -> u64 {
+        self.undo
+            .last()
+            .map_or(self.base_generation, |s| s.generation)
+    }
+
+    /// Unsaved changes: the state differs from the one last saved (undoing
+    /// or redoing back to it counts as clean), or a pattern was selected.
+    pub fn is_dirty(&self) -> bool {
+        self.unsaved_selection || self.generation() != self.saved_generation
+    }
+
+    /// The current state is now the saved one.
+    pub fn mark_saved(&mut self) {
+        self.saved_generation = self.generation();
+        self.unsaved_selection = false;
+    }
+
+    /// Marks unsaved changes without an edit (tests).
+    #[cfg(test)]
+    pub(crate) fn mark_dirty(&mut self) {
+        self.unsaved_selection = true;
     }
 
     pub fn end_gesture(&mut self) {
@@ -208,32 +368,38 @@ impl Document {
 
     pub fn undo(&mut self) -> Vec<Command> {
         self.gesture = None;
-        let Some(edit) = self.undo.pop() else {
+        let Some(step) = self.undo.pop() else {
             return Vec::new();
         };
-        let inverse = self.apply_raw(edit);
+        let inverse = self.apply_raw(step.edit);
         let cmds = self.commands_for(&inverse);
-        self.redo.push(inverse);
-        self.dirty = true;
+        self.redo.push(Step {
+            edit: inverse,
+            generation: step.generation,
+        });
         cmds
     }
 
     pub fn redo(&mut self) -> Vec<Command> {
         self.gesture = None;
-        let Some(edit) = self.redo.pop() else {
+        let Some(step) = self.redo.pop() else {
             return Vec::new();
         };
-        let inverse = self.apply_raw(edit);
+        let inverse = self.apply_raw(step.edit);
         let cmds = self.commands_for(&inverse);
-        self.undo.push(inverse);
-        self.dirty = true;
+        self.undo.push(Step {
+            edit: inverse,
+            generation: step.generation,
+        });
         cmds
     }
 
     /// Selecting a pattern is a transport action: saved, not undoable.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
-        self.project.selected[machine] = slot;
-        self.dirty = true;
+        if self.project.selected[machine] != slot {
+            self.project.selected[machine] = slot;
+            self.unsaved_selection = true;
+        }
         vec![Command::SelectPattern {
             machine: machine as u8,
             slot,
@@ -297,7 +463,11 @@ impl Document {
                 slot,
                 pattern,
             } => {
-                let old = std::mem::replace(&mut p.synths[synth].patterns[slot as usize], *pattern);
+                let mut pattern = *pattern;
+                pattern.length = pattern.length.clamp(1, STEPS as u8);
+                pattern.transpose = pattern.transpose.clamp(-12, 12);
+                debug_assert!(pattern.is_well_formed(), "malformed synth pattern");
+                let old = std::mem::replace(&mut p.synths[synth].patterns[slot as usize], pattern);
                 Edit::SynthPattern {
                     synth,
                     slot,
@@ -333,7 +503,10 @@ impl Document {
                 }
             }
             Edit::DrumPattern { kit, slot, pattern } => {
-                let old = std::mem::replace(&mut p.drums[kit].patterns[slot as usize], *pattern);
+                let mut pattern = *pattern;
+                pattern.length = pattern.length.clamp(1, STEPS as u8);
+                debug_assert!(pattern.is_well_formed(), "malformed drum pattern");
+                let old = std::mem::replace(&mut p.drums[kit].patterns[slot as usize], pattern);
                 Edit::DrumPattern {
                     kit,
                     slot,
@@ -345,8 +518,11 @@ impl Document {
                 slot,
                 pattern,
             } => {
+                let mut pattern = *pattern;
+                pattern.length = pattern.length.clamp(1, STEPS as u8);
+                debug_assert!(pattern.is_well_formed(), "malformed note pattern");
                 let pats = p.note_patterns_mut(machine).expect("note machine");
-                let old = std::mem::replace(&mut pats[slot as usize], *pattern);
+                let old = std::mem::replace(&mut pats[slot as usize], pattern);
                 Edit::NotePattern {
                     machine,
                     slot,
@@ -379,7 +555,7 @@ impl Document {
             },
             Edit::FmVoice { name, values } => {
                 let old_name = std::mem::replace(&mut p.fm.voice_name, name);
-                let old_values = values
+                let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
                         let old = p.param(id);
@@ -387,6 +563,8 @@ impl Document {
                         (id, old)
                     })
                     .collect();
+                // Undo in reverse order, so a repeated id ends on its first old value.
+                old_values.reverse();
                 Edit::FmVoice {
                     name: old_name,
                     values: old_values,
@@ -394,7 +572,7 @@ impl Document {
             }
             Edit::SamplerSlot { slot, data, values } => {
                 let old = std::mem::replace(&mut p.sampler.slots[slot], data.map(|d| *d));
-                let old_values = values
+                let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
                         let before = p.param(id);
@@ -402,6 +580,7 @@ impl Document {
                         (id, before)
                     })
                     .collect();
+                old_values.reverse();
                 Edit::SamplerSlot {
                     slot,
                     data: old.map(Box::new),
@@ -543,7 +722,7 @@ mod tests {
         assert!(
             matches!(cmds.as_slice(), [Command::SetParam(id, v)] if *id == CUTOFF && *v == 0.9)
         );
-        assert!(d.dirty);
+        assert!(d.is_dirty());
     }
 
     #[test]
@@ -893,7 +1072,7 @@ mod tests {
                 slot: 17
             }]
         ));
-        assert!(d.dirty);
+        assert!(d.is_dirty());
     }
 
     #[test]
@@ -947,5 +1126,295 @@ mod tests {
         d.undo();
         assert_eq!(d.project.sampler.slots[2], None);
         assert_eq!(d.project.param(choke), 0.0);
+    }
+
+    #[test]
+    fn a_no_op_edit_is_not_an_undo_step_and_leaves_the_document_clean() {
+        let mut d = doc();
+        let start = d.project.param(CUTOFF);
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: start,
+            },
+            false,
+        );
+        assert!(!d.can_undo() && !d.is_dirty());
+        // A clamped value equal to the stored one is also no change.
+        d.apply(Edit::Bpm(300.0), false);
+        d.apply(Edit::Bpm(1000.0), false);
+        d.undo();
+        assert!(!d.can_undo(), "the clamped repeat added no step");
+        let step = d.project.synths[0].patterns[0].steps[3];
+        d.apply(
+            Edit::SynthStep {
+                synth: 0,
+                slot: 0,
+                step: 3,
+                value: step,
+            },
+            false,
+        );
+        d.apply(
+            Edit::View {
+                synth: 0,
+                view: d.project.synths[0].view,
+            },
+            false,
+        );
+        assert!(!d.can_undo() && !d.is_dirty());
+    }
+
+    #[test]
+    fn a_no_op_never_merges_into_an_unrelated_step() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(150.0), false);
+        let start = d.project.param(CUTOFF);
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: start,
+            },
+            true,
+        );
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.9,
+            },
+            true,
+        );
+        d.end_gesture();
+        d.undo();
+        assert_eq!(d.project.param(CUTOFF), start);
+        assert_eq!(d.project.bpm, 150.0, "the bpm step is separate");
+    }
+
+    #[test]
+    fn undoing_back_to_the_saved_state_clears_dirty() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(150.0), false);
+        d.mark_saved();
+        assert!(!d.is_dirty());
+        d.apply(Edit::Bpm(160.0), false);
+        assert!(d.is_dirty());
+        d.undo();
+        assert!(!d.is_dirty(), "back at the saved state");
+        d.undo();
+        assert!(d.is_dirty(), "before the saved state");
+        d.redo();
+        assert!(!d.is_dirty(), "redo back to the saved state");
+        d.redo();
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn a_fresh_document_undone_back_to_its_start_is_clean() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(150.0), false);
+        assert!(d.is_dirty());
+        d.undo();
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn a_new_edit_after_undoing_past_the_save_keeps_the_document_dirty() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(150.0), false);
+        d.mark_saved();
+        d.undo();
+        d.apply(Edit::Swing(0.3), false);
+        d.undo();
+        assert!(d.is_dirty(), "the saved state is unreachable now");
+        d.apply(Edit::Bpm(150.0), false);
+        assert!(d.is_dirty(), "same content, but a different history step");
+    }
+
+    #[test]
+    fn continuing_a_gesture_after_a_save_is_dirty() {
+        let mut d = doc();
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.3,
+            },
+            true,
+        );
+        d.mark_saved();
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.4,
+            },
+            true,
+        );
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn selecting_a_pattern_stays_dirty_through_undo() {
+        let mut d = doc();
+        d.apply(Edit::Bpm(150.0), false);
+        d.mark_saved();
+        d.select_pattern(0, 3);
+        assert!(d.is_dirty());
+        d.apply(Edit::Bpm(160.0), false);
+        d.undo();
+        assert!(d.is_dirty(), "the selection change is not undoable");
+        d.mark_saved();
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn the_saved_state_trimmed_off_the_history_is_unreachable() {
+        let mut d = doc();
+        d.mark_saved();
+        for i in 0..(UNDO_LIMIT + 5) {
+            d.apply(Edit::Bpm(60.0 + i as f32), false);
+        }
+        while d.can_undo() {
+            d.undo();
+        }
+        assert!(d.is_dirty(), "the oldest steps were dropped");
+    }
+
+    #[test]
+    fn whole_pattern_edits_are_clamped() {
+        use acid_engine::project::{DrumPattern, NotePattern};
+        let mut d = doc();
+        let mut p = SynthPattern {
+            length: 0,
+            transpose: 40,
+            ..Default::default()
+        };
+        d.apply(
+            Edit::SynthPattern {
+                synth: 0,
+                slot: 0,
+                pattern: Box::new(p.clone()),
+            },
+            false,
+        );
+        assert_eq!(d.project.synths[0].patterns[0].length, 1);
+        assert_eq!(d.project.synths[0].patterns[0].transpose, 12);
+        p.length = 200;
+        p.transpose = -40;
+        d.apply(
+            Edit::SynthPattern {
+                synth: 0,
+                slot: 0,
+                pattern: Box::new(p),
+            },
+            false,
+        );
+        assert_eq!(d.project.synths[0].patterns[0].length, STEPS as u8);
+        assert_eq!(d.project.synths[0].patterns[0].transpose, -12);
+        let drums = DrumPattern {
+            length: 0,
+            ..Default::default()
+        };
+        d.apply(
+            Edit::DrumPattern {
+                kit: 1,
+                slot: 2,
+                pattern: Box::new(drums),
+            },
+            false,
+        );
+        assert_eq!(d.project.drums[1].patterns[2].length, 1);
+        let notes = NotePattern {
+            length: 99,
+            ..Default::default()
+        };
+        d.apply(
+            Edit::NotePattern {
+                machine: 4,
+                slot: 0,
+                pattern: Box::new(notes),
+            },
+            false,
+        );
+        assert_eq!(d.project.fm.patterns[0].length, STEPS as u8);
+    }
+
+    #[test]
+    fn repeated_ids_in_a_voice_load_undo_to_the_original_value() {
+        use acid_engine::params::FmParam;
+        let mut d = doc();
+        let alg = ParamId::Fm(FmParam::Algorithm);
+        d.apply(
+            Edit::FmVoice {
+                name: "TWICE".into(),
+                values: vec![(alg, 0.2), (alg, 0.9)],
+            },
+            false,
+        );
+        assert_eq!(d.project.param(alg), 0.9);
+        d.undo();
+        assert_eq!(d.project.param(alg), alg.info().default);
+        d.redo();
+        assert_eq!(d.project.param(alg), 0.9);
+    }
+
+    #[test]
+    fn repeated_ids_in_a_slot_load_undo_to_the_original_value() {
+        use acid_engine::params::SlotParam;
+        let mut d = doc();
+        let choke = ParamId::SamplerSlot(0, SlotParam::Choke);
+        d.apply(
+            Edit::SamplerSlot {
+                slot: 0,
+                data: None,
+                values: vec![(choke, 0.5), (choke, 1.0)],
+            },
+            false,
+        );
+        d.undo();
+        assert_eq!(d.project.param(choke), choke.info().default);
+    }
+
+    fn slot_load(samples: usize) -> Edit {
+        use acid_engine::sampler::slot::SlotMeta;
+        let data = SlotData {
+            name: "Big".into(),
+            meta: SlotMeta::sliced(36, vec![0], 120.0, samples as u32),
+            sample_rate: 44_100,
+            channels: 1,
+            pcm: vec![1; samples],
+        };
+        Edit::SamplerSlot {
+            slot: 0,
+            data: Some(Box::new(data)),
+            values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sample_data_in_the_undo_history_stays_within_the_byte_budget() {
+        let mut d = doc();
+        // Each load is 1000 bytes of PCM; the budget fits three of them.
+        d.set_undo_byte_budget(3_500);
+        for _ in 0..10 {
+            d.apply(slot_load(500), false);
+        }
+        assert!(d.undo_sample_bytes() <= 3_500);
+        let mut n = 0;
+        while d.can_undo() {
+            d.undo();
+            n += 1;
+        }
+        assert_eq!(n, 3, "only the newest three loads fit");
+        assert!(d.project.sampler.slots[0].is_some(), "oldest loads dropped");
+    }
+
+    #[test]
+    fn the_newest_step_is_kept_even_when_over_budget() {
+        let mut d = doc();
+        d.set_undo_byte_budget(100);
+        d.apply(slot_load(500), false);
+        d.apply(slot_load(600), false);
+        assert!(d.can_undo());
+        d.undo();
+        assert_eq!(d.project.sampler.slots[0].as_ref().unwrap().pcm.len(), 500);
     }
 }

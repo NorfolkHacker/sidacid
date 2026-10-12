@@ -150,6 +150,10 @@ pub fn fill_interleaved<T>(
         }
         done += n;
     }
+    // A partial frame at the end (data.len() not a multiple of channels).
+    for s in &mut data[frames * channels..] {
+        *s = T::EQUILIBRIUM;
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +212,15 @@ mod tests {
         let mut data = vec![0i16; 2 * 8];
         fill_interleaved(&mut constant, &mut l, &mut r, &mut data, 2);
         assert!(data[0] > 16_000 && data[1] < -8_000);
+    }
+
+    #[test]
+    fn a_partial_trailing_frame_is_silenced() {
+        let mut l = vec![0.0; 64];
+        let mut r = vec![0.0; 64];
+        let mut data = vec![1.0f32; 2 * 10 + 1];
+        fill_interleaved(&mut constant, &mut l, &mut r, &mut data, 2);
+        assert_eq!(data[19], -0.25);
+        assert_eq!(data[20], 0.0);
     }
 }

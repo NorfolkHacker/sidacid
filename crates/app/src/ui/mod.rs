@@ -73,6 +73,8 @@ pub struct ViewState {
     pub touched_knob: Option<acid_engine::params::ParamId>,
     /// Non-blocking progress text shown at the right of the transport.
     pub status_line: Option<String>,
+    /// Save waiting for its "Saving…" status to show.
+    pub saving: Option<files::PendingSave>,
     /// The audio stream reported a failure that has not been handled yet.
     pub audio_lost: bool,
     /// One automatic restart was tried since audio last ran fine.
@@ -233,6 +235,7 @@ impl SidAcidApp {
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.pump(ctx.input(|i| i.time));
+        self.run_queued_save();
         if self.view.audio_lost {
             self.view.audio_lost = false;
             if !self.view.auto_retried {
@@ -251,7 +254,7 @@ impl SidAcidApp {
             ctx.copy_text(t);
         }
         self.poll_export();
-        if ctx.input(|i| i.viewport().close_requested()) && self.doc.dirty && !self.view.quit {
+        if ctx.input(|i| i.viewport().close_requested()) && self.doc.is_dirty() && !self.view.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.view.confirm = Some(files::Pending::Quit);
         }
@@ -280,6 +283,7 @@ impl SidAcidApp {
                 .show(ui, |ui| self.rack(ui));
         });
         self.dialogs(ctx);
+        self.tick_queued_save(ctx);
         self.flush_pending();
         if self.audio.is_some() {
             let ms = if self.status.playing { 16 } else { 150 };
@@ -648,7 +652,7 @@ mod tests {
     fn title_shows_name_and_dirty_mark() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         assert_eq!(app.window_title(), "Demo — SidAcid");
-        app.doc.dirty = true;
+        app.doc.mark_dirty();
         app.doc.path = Some(std::path::PathBuf::from("/tmp/acid line.sidacid"));
         assert_eq!(app.window_title(), "acid line* — SidAcid");
     }
@@ -656,12 +660,12 @@ mod tests {
     #[test]
     fn new_with_unsaved_changes_asks_first() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.doc.dirty = true;
+        app.doc.mark_dirty();
         app.request(files::Pending::New);
         assert!(app.view.confirm.is_some());
         assert_eq!(app.doc.project.name, "Demo");
         app.view.confirm = None;
-        app.doc.dirty = false;
+        app.doc.mark_saved();
         app.request(files::Pending::New);
         assert_eq!(app.doc.project.name, "Untitled");
     }
@@ -669,10 +673,10 @@ mod tests {
     #[test]
     fn dont_save_keeps_the_document_dirty_and_quit_closes_once() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.doc.dirty = true;
+        app.doc.mark_dirty();
         app.view.confirm = Some(files::Pending::Quit);
         app.dont_save(files::Pending::Quit);
-        assert!(app.doc.dirty);
+        assert!(app.doc.is_dirty());
         assert!(app.view.confirm.is_none());
         assert!(app.view.quit);
     }
@@ -712,7 +716,7 @@ mod tests {
         doc.project.bpm = 133.37;
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 3);
-        assert!(!app.doc.dirty && !app.doc.can_undo());
+        assert!(!app.doc.is_dirty() && !app.doc.can_undo());
         assert_eq!(app.doc.project.swing, 0.153);
         assert_eq!(app.doc.project.bpm, 133.37);
     }
