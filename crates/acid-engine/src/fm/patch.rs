@@ -10,6 +10,16 @@ pub fn d99(v: f32) -> f32 {
     (v.clamp(0.0, 1.0) * 99.0).round()
 }
 
+/// The Glide knob (0..1) in seconds.
+pub fn glide_seconds(v: f32) -> f32 {
+    v.clamp(0.0, 1.0).powi(2) * 2.0
+}
+
+/// The filter Cutoff knob (0..1) in Hz.
+pub fn cutoff_hz(v: f32) -> f32 {
+    exp(v, 40.0, 18_000.0)
+}
+
 /// A 0..1 knob as one of `n` positions.
 pub fn pick(v: f32, n: usize) -> usize {
     step_index(v, n as u8)
@@ -194,7 +204,7 @@ impl FmPatch {
             F::PitchModSens => self.pms = pick(v, fm_steps::PITCH_MOD_SENS),
             F::Transpose => self.transpose = pick(v, fm_steps::TRANSPOSE) as i32 - 24,
             F::Mono => self.mono = on(v),
-            F::Glide => self.glide = v.clamp(0.0, 1.0).powi(2) * 2.0,
+            F::Glide => self.glide = glide_seconds(v),
             F::Vintage => self.vintage = on(v),
             F::FilterOn => self.filter_on = on(v),
             F::FilterMode => self.filter_hp = on(v),
@@ -219,7 +229,7 @@ impl FmPatch {
 
     /// Filter cutoff in Hz.
     pub fn cutoff_hz(&self) -> f32 {
-        exp(self.cutoff, 40.0, 18_000.0)
+        cutoff_hz(self.cutoff)
     }
 }
 

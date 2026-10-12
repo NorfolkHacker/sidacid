@@ -2,6 +2,7 @@
 
 use super::{SidAcidApp, knob};
 use crate::document::Edit;
+use acid_engine::fm::patch;
 use acid_engine::host::Command;
 use acid_engine::params::{FmParam, FxParam, OpParam, ParamId, SynthParam, fm_steps, step_index};
 use eframe::egui;
@@ -24,8 +25,8 @@ pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
     }
 }
 
-/// The value a knob shows in its tooltip: DX7 units for FM controls, a
-/// percentage otherwise.
+/// The value a knob shows in its tooltip: DX7 units for FM controls
+/// (seconds for Glide, Hz for Cutoff), a percentage otherwise.
 pub fn value_text(id: ParamId, v: f32) -> String {
     use FmParam as F;
     use OpParam as O;
@@ -47,6 +48,8 @@ pub fn value_text(id: ParamId, v: f32) -> String {
         ParamId::FmOp(_, O::RateScaling) => pick(fm_steps::RATE_SCALING).to_string(),
         ParamId::FmOp(_, O::AmpModSens) => pick(fm_steps::AMP_MOD_SENS).to_string(),
         ParamId::FmOp(_, O::VelSens) => pick(fm_steps::VEL_SENS).to_string(),
+        ParamId::Fm(F::Glide) => format!("{:.2} s", patch::glide_seconds(v)),
+        ParamId::Fm(F::Cutoff) => format!("{:.0} Hz", patch::cutoff_hz(v)),
         ParamId::Fm(
             F::PitchR1
             | F::PitchR2
@@ -61,7 +64,7 @@ pub fn value_text(id: ParamId, v: f32) -> String {
             | F::LfoPmd
             | F::LfoAmd,
         )
-        | ParamId::FmOp(_, _) => format!("{:.0}", v.clamp(0.0, 1.0) * 99.0),
+        | ParamId::FmOp(_, _) => format!("{:.0}", patch::d99(v)),
         _ => format!("{:.0}%", v * 100.0),
     }
 }
@@ -250,6 +253,11 @@ mod tests {
         assert_eq!(value_text(ParamId::FmOp(0, OpParam::Detune), 0.0), "-7");
         assert_eq!(value_text(ParamId::Fm(FmParam::Transpose), 1.0), "+24");
         assert_eq!(value_text(ParamId::FmOp(0, OpParam::R1), 1.0), "99");
+        assert_eq!(value_text(ParamId::FmOp(0, OpParam::L1), 0.5), "50");
+        assert_eq!(value_text(ParamId::Fm(FmParam::Glide), 0.5), "0.50 s");
+        assert_eq!(value_text(ParamId::Fm(FmParam::Glide), 1.0), "2.00 s");
+        assert_eq!(value_text(ParamId::Fm(FmParam::Cutoff), 0.0), "40 Hz");
+        assert_eq!(value_text(ParamId::Fm(FmParam::Cutoff), 1.0), "18000 Hz");
         assert_eq!(
             value_text(ParamId::Synth(0, SynthParam::Cutoff), 0.5),
             "50%"
