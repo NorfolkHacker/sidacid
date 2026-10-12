@@ -1,0 +1,14 @@
+Plan 6 (sampler) — deferred minor findings from task and final reviews.
+
+Task 1: minor (deferred): SAMPLER_SLOTS inserted between PARAM_COUNT's doc comment and PARAM_COUNT (misattached doc); sampler_map tests skip level_gain(1)/decay/clamping
+Task 2: minor (deferred): to_sample relies on is_valid (pcm divisible by channels)
+Task 3: minor (deferred): filter path untested and keeps stale state when toggled; stereo/pan render untested; crossfade reads before loop_start for loops < 10 ms
+Task 4: minor (deferred): no test of two same-key voices from one source released by one note_off; steal order under-tested; stale grit_hold on re-enable
+Task 5: minor (deferred): engine tests duplicate tone-slot construction 3×; stop() doc comment omits sampler reset; note_panel.rs doc still says placeholder (Task 9 rewrites it)
+Task 6: minor (deferred): cap skipped while sample_rate==0; mid-stream spec change mixes layouts; truncated file returns partial audio silently; no malformed/non-WAV tests
+Task 7: minor (deferred): edit_slot_meta refuses malformed metas silently (doc says "with a message"); dead_code attr placement above doc comments; no tests for memory refusal, catch_unwind, redo, clear undo
+Task 8: minor (deferred): x_to_frame/frame_to_x asymmetric zero-width guard; "·" glyph availability unchecked
+Task 9: minor (deferred): load_document drops pad_note without NoteOff (engine replaced anyway); end_gesture on every waveform drag_stopped; wave cache key ptr/len collision; manual GUI check not done — surface to user
+Final: parked — every meta edit (marker/zone drag) kills the slot's sounding voices — Ruling: acceptable stutter while editing; later fix updates play without killing when only markers move.
+Final: parked — undo stack holds full SlotData outside the 64 MB accounting; save deflates on UI thread; voice steal hard-restarts — Ruling: fine for typical use, revisit later.
+Final fix wave: re-review clean (9/9). Minor: Level/Pan applied live without smoothing (can click on big jumps); backstop message generic.
