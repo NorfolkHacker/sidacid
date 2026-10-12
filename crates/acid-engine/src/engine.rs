@@ -577,6 +577,33 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_sounding_note_while_playing_releases_it() {
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.fm.patterns[0].length = 64;
+        p.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 8,
+            pitch: 60,
+            vel: 120,
+        });
+        let mut e = Engine::from_project(SR, &p);
+        e.play();
+        render(&mut e, 0.1);
+        let mut empty = NotePattern {
+            length: 64,
+            ..NotePattern::default()
+        };
+        assert!(e.swap_note_pattern(4, 0, &mut empty));
+        render(&mut e, 0.5);
+        let (l, _) = render(&mut e, 0.05);
+        assert!(
+            peak(&l) < 1e-4,
+            "the deleted note stops well before the loop end"
+        );
+    }
+
+    #[test]
     fn fm_volume_knob_reaches_the_voice() {
         use crate::params::FmParam;
         use crate::project::Note;

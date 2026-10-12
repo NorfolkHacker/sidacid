@@ -599,14 +599,23 @@ impl Sequencer {
             if t.pos == 0 {
                 release_all(t, m, out);
             } else {
+                // Release every held pitch no note sounds through this tick:
+                // notes that end here, and notes deleted, moved or re-pitched
+                // by an edit while they rang. A note starting here doesn't
+                // count, so back-to-back notes retrigger (off, then on).
+                let mut want = 0u128;
                 for n in &pat.notes {
-                    if n.start.saturating_add(n.len).min(ticks) == t.pos {
-                        let pitch = transposed(n.pitch, t.transpose_add);
-                        if t.held & (1u128 << pitch) != 0 {
-                            t.held &= !(1u128 << pitch);
-                            out.push(SeqEvent::PolyOff { machine: m, pitch });
-                        }
+                    let end = n.start.saturating_add(n.len).min(ticks);
+                    if n.start < t.pos && t.pos < end {
+                        want |= 1u128 << transposed(n.pitch, t.transpose_add);
                     }
+                }
+                let mut stale = t.held & !want;
+                t.held &= want;
+                while stale != 0 {
+                    let pitch = stale.trailing_zeros() as u8;
+                    stale &= !(1u128 << pitch);
+                    out.push(SeqEvent::PolyOff { machine: m, pitch });
                 }
             }
             for n in &pat.notes {
@@ -1442,6 +1451,72 @@ mod tests {
             ))
         );
         assert!(!s.is_playing());
+    }
+
+    /// Plays a 4-step FM note at pitch 60 up to mid-pattern, applies
+    /// `edit` to the pattern (as a live edit or undo swap would), then
+    /// returns the poly events of the next tick.
+    fn after_live_edit(edit: impl FnOnce(&mut NotePattern)) -> Vec<SeqEvent> {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 16, 60));
+        let mut s = new_seq();
+        s.play();
+        let ev = poly(&f.run(&mut s, 5600)); // pos is 5 (step 1, first quarter)
+        assert_eq!(ev.len(), 1, "only the note-on so far: {ev:?}");
+        edit(&mut f.notes[0][0]);
+        poly(&f.run(&mut s, 1400))
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
+    }
+
+    const OFF_60: SeqEvent = SeqEvent::PolyOff {
+        machine: 4,
+        pitch: 60,
+    };
+
+    #[test]
+    fn deleting_a_sounding_note_releases_it_on_the_next_tick() {
+        assert_eq!(after_live_edit(|p| p.notes.clear()), vec![OFF_60]);
+    }
+
+    #[test]
+    fn repitching_a_sounding_note_releases_the_old_pitch() {
+        assert_eq!(after_live_edit(|p| p.notes[0].pitch = 72), vec![OFF_60]);
+    }
+
+    #[test]
+    fn shortening_a_note_behind_the_playhead_releases_it() {
+        assert_eq!(after_live_edit(|p| p.notes[0].len = 2), vec![OFF_60]);
+    }
+
+    #[test]
+    fn moving_a_note_off_the_playhead_releases_it() {
+        assert_eq!(after_live_edit(|p| p.notes[0].start = 32), vec![OFF_60]);
+    }
+
+    #[test]
+    fn an_untouched_sounding_note_keeps_ringing() {
+        assert_eq!(after_live_edit(|_| {}), vec![]);
+    }
+
+    #[test]
+    fn back_to_back_notes_of_one_pitch_retrigger() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 4, 60));
+        f.notes[0][0].notes.push(note(4, 4, 60));
+        let mut s = new_seq();
+        s.play();
+        let ev: Vec<_> = poly(&f.run(&mut s, 5600))
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        let on = SeqEvent::PolyOn {
+            machine: 4,
+            pitch: 60,
+            vel: 100,
+        };
+        assert_eq!(ev, vec![on, OFF_60, on]);
     }
 
     #[test]
