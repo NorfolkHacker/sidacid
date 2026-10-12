@@ -18,5 +18,6 @@ pub const OPS: usize = crate::params::FM_OPS;
 pub const BLOCK: usize = 32;
 
 pub mod synth;
+pub mod sysex;
 mod voice;
 pub use synth::FmSynth;
