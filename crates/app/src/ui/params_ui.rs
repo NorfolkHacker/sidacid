@@ -4,7 +4,9 @@ use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
-use acid_engine::params::{FmParam, FxParam, OpParam, ParamId, SynthParam, fm_steps, step_index};
+use acid_engine::params::{
+    FmParam, FxParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map, step_index,
+};
 use eframe::egui;
 
 /// Display names for each position of a named switch; empty for a knob.
@@ -22,6 +24,15 @@ pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
         ParamId::FmOp(_, OpParam::FixedFreq) => &["Ratio", "Fixed"],
         _ if id.info().steps == 2 => &["Off", "On"],
         _ => &[],
+    }
+}
+
+/// "12 ms" below a second, "1.50 s" from a second up.
+fn seconds_text(s: f32) -> String {
+    if s < 1.0 {
+        format!("{:.0} ms", s * 1000.0)
+    } else {
+        format!("{s:.2} s")
     }
 }
 
@@ -48,6 +59,18 @@ pub fn value_text(id: ParamId, v: f32) -> String {
         ParamId::FmOp(_, O::RateScaling) => pick(fm_steps::RATE_SCALING).to_string(),
         ParamId::FmOp(_, O::AmpModSens) => pick(fm_steps::AMP_MOD_SENS).to_string(),
         ParamId::FmOp(_, O::VelSens) => pick(fm_steps::VEL_SENS).to_string(),
+        ParamId::SamplerSlot(_, SlotParam::Tune) => signed(sampler_map::tune_semitones(v)),
+        ParamId::SamplerSlot(_, SlotParam::Fine) => {
+            format!("{} c", signed(sampler_map::fine_cents(v) as i32))
+        }
+        ParamId::SamplerSlot(_, SlotParam::Attack) => seconds_text(sampler_map::attack_seconds(v)),
+        ParamId::SamplerSlot(_, SlotParam::Decay) => seconds_text(sampler_map::decay_seconds(v)),
+        ParamId::SamplerSlot(_, SlotParam::Release) => {
+            seconds_text(sampler_map::release_seconds(v))
+        }
+        ParamId::SamplerSlot(_, SlotParam::Cutoff) => {
+            format!("{:.0} Hz", sampler_map::cutoff_hz(v))
+        }
         ParamId::Fm(F::Glide) => format!("{:.2} s", patch::glide_seconds(v)),
         ParamId::Fm(F::Cutoff) => format!("{:.0} Hz", patch::cutoff_hz(v)),
         ParamId::Fm(
@@ -92,6 +115,7 @@ pub fn param_label(id: ParamId) -> String {
         ParamId::Fm(p) => format!("FM {}", p.name()),
         ParamId::Sampler(p) => format!("Sampler {}", p.name()),
         ParamId::FmOp(op, p) => format!("FM OP{} {}", op + 1, p.name()),
+        ParamId::SamplerSlot(s, p) => format!("Sampler Slot {} {}", s + 1, p.name()),
     }
 }
 
@@ -201,6 +225,47 @@ mod tests {
         app.knob_gesture(id, idle, true);
         assert_eq!(app.view.touched_knob, None, "released on the next frame");
         assert!(matches!(app.pending.last(), Some(Command::Touch(t, false)) if *t == id));
+    }
+
+    #[test]
+    fn sampler_labels_and_values() {
+        use acid_engine::params::SamplerParam;
+        assert_eq!(
+            param_label(ParamId::SamplerSlot(2, SlotParam::Tune)),
+            "Sampler Slot 3 Tune"
+        );
+        assert_eq!(
+            param_label(ParamId::Sampler(SamplerParam::Grit)),
+            "Sampler Grit"
+        );
+        assert_eq!(
+            discrete_names(ParamId::SamplerSlot(0, SlotParam::Reverse)),
+            &["Off", "On"]
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Tune), 1.0),
+            "+24"
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Fine), 0.0),
+            "-50 c"
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Attack), 0.0),
+            "1 ms"
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Release), 1.0),
+            "4.00 s"
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Cutoff), 1.0),
+            "18000 Hz"
+        );
+        assert_eq!(
+            value_text(ParamId::SamplerSlot(0, SlotParam::Level), 0.5),
+            "50%"
+        );
     }
 
     #[test]

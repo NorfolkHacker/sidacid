@@ -10,7 +10,10 @@ pub const DRUM_INSTRUMENTS: usize = 8;
 /// Operators in the FM synth.
 pub const FM_OPS: usize = 6;
 /// Number of entries in `ParamId::all()`.
-pub const PARAM_COUNT: usize = 380;
+/// Sample slots in the sampler.
+pub const SAMPLER_SLOTS: usize = 16;
+
+pub const PARAM_COUNT: usize = 589;
 
 /// Positions of the FM controls that pick from a list. The numeric ones
 /// are continuous knobs the synth rounds with `step_index(v, N)`.
@@ -83,7 +86,12 @@ param_enum!(OpParam {
     AmpModSens => "Amp Mod Sens", VelSens => "Velocity", Level => "Level",
     FixedFreq => "Fixed Freq", Coarse => "Coarse", Fine => "Fine", Detune => "Detune", On => "On",
 });
-param_enum!(SamplerParam { Volume => "Volume" });
+param_enum!(SamplerParam { Volume => "Volume", Grit => "Grit" });
+param_enum!(SlotParam {
+    Level => "Level", Pan => "Pan", Tune => "Tune", Fine => "Fine", Cutoff => "Cutoff",
+    Resonance => "Resonance", Attack => "Attack", Decay => "Decay", Sustain => "Sustain",
+    Release => "Release", Reverse => "Reverse", Choke => "Choke", TempoLock => "Tempo Lock",
+});
 param_enum!(MasterParam {
     CompOn => "Comp On", CompThreshold => "Threshold", CompRatio => "Ratio",
     CompAttack => "Attack", CompRelease => "Release", CompMakeup => "Makeup",
@@ -101,6 +109,7 @@ pub enum ParamId {
     Fm(FmParam),
     Sampler(SamplerParam),
     FmOp(u8, OpParam),
+    SamplerSlot(u8, SlotParam),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -228,7 +237,22 @@ impl ParamId {
                     O::On => disc(n, 1.0, 2),
                 }
             }
-            ParamId::Sampler(p) => cont(p.name(), 0.7),
+            ParamId::Sampler(p) => match p {
+                SamplerParam::Volume => cont(p.name(), 0.7),
+                SamplerParam::Grit => disc(p.name(), 0.0, 2),
+            },
+            ParamId::SamplerSlot(_, p) => {
+                use SlotParam as S;
+                let n = p.name();
+                match p {
+                    S::Level => cont(n, 0.8),
+                    S::Pan | S::Tune | S::Fine | S::Decay => cont(n, 0.5),
+                    S::Cutoff | S::Sustain => cont(n, 1.0),
+                    S::Resonance | S::Attack => cont(n, 0.0),
+                    S::Release => cont(n, 0.3),
+                    S::Reverse | S::Choke | S::TempoLock => disc(n, 0.0, 2),
+                }
+            }
             ParamId::Master(p) => {
                 let n = p.name();
                 match p {
@@ -253,6 +277,7 @@ impl ParamId {
             ParamId::Kit(k, _) => (k as usize) < KITS,
             ParamId::Channel(c, _) => (c as usize) < CHANNELS,
             ParamId::FmOp(op, _) => (op as usize) < FM_OPS,
+            ParamId::SamplerSlot(s, _) => (s as usize) < SAMPLER_SLOTS,
             ParamId::Fm(_) | ParamId::Sampler(_) | ParamId::Fx(_) | ParamId::Master(_) => true,
         }
     }
@@ -272,6 +297,7 @@ impl ParamId {
         let fm_base = master_base + MasterParam::ALL.len();
         let sampler_base = fm_base + FmParam::ALL.len();
         let fm_op_base = sampler_base + SamplerParam::ALL.len();
+        let slot_base = fm_op_base + FM_OPS * OpParam::ALL.len();
         Some(match self {
             ParamId::Synth(s, p) => s as usize * synth_n + p as usize,
             ParamId::Drum(k, i, p) => {
@@ -288,6 +314,9 @@ impl ParamId {
             ParamId::Fm(p) => fm_base + p as usize,
             ParamId::Sampler(p) => sampler_base + p as usize,
             ParamId::FmOp(op, p) => fm_op_base + op as usize * OpParam::ALL.len() + p as usize,
+            ParamId::SamplerSlot(s, p) => {
+                slot_base + s as usize * SlotParam::ALL.len() + p as usize
+            }
         })
     }
 
@@ -311,6 +340,9 @@ impl ParamId {
         v.extend(SamplerParam::ALL.iter().map(|&p| ParamId::Sampler(p)));
         for op in 0..FM_OPS as u8 {
             v.extend(OpParam::ALL.iter().map(|&p| ParamId::FmOp(op, p)));
+        }
+        for s in 0..SAMPLER_SLOTS as u8 {
+            v.extend(SlotParam::ALL.iter().map(|&p| ParamId::SamplerSlot(s, p)));
         }
         v
     }
@@ -337,6 +369,41 @@ pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
+/// Sampler slot knobs in real units. The engine and the UI share these.
+pub mod sampler_map {
+    use super::{exp, step_index};
+
+    pub const TUNE_STEPS: usize = 49;
+
+    pub fn level_gain(v: f32) -> f32 {
+        v.clamp(0.0, 1.0).powi(2) * 1.25
+    }
+
+    pub fn tune_semitones(v: f32) -> i32 {
+        step_index(v, TUNE_STEPS as u8) as i32 - 24
+    }
+
+    pub fn fine_cents(v: f32) -> f32 {
+        (v.clamp(0.0, 1.0) * 100.0 - 50.0).round()
+    }
+
+    pub fn cutoff_hz(v: f32) -> f32 {
+        exp(v, 40.0, 18_000.0)
+    }
+
+    pub fn attack_seconds(v: f32) -> f32 {
+        exp(v, 0.001, 2.0)
+    }
+
+    pub fn decay_seconds(v: f32) -> f32 {
+        exp(v, 0.005, 4.0)
+    }
+
+    pub fn release_seconds(v: f32) -> f32 {
+        exp(v, 0.005, 4.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,7 +414,7 @@ mod tests {
         let all = ParamId::all();
         assert_eq!(
             all.len(),
-            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 34 + 1 + 6 * 22
+            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 34 + 2 + 6 * 22 + 16 * 13
         );
         let unique: HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
@@ -362,9 +429,35 @@ mod tests {
             .unwrap();
         assert_eq!(all[first_fm], ParamId::Fm(FmParam::Volume));
         assert!(matches!(all[first_fm - 1], ParamId::Master(_)));
-        assert_eq!(all[all.len() - 1], ParamId::FmOp(5, OpParam::On));
+        assert!(all.contains(&ParamId::FmOp(5, OpParam::On)));
+        assert_eq!(
+            all[all.len() - 1],
+            ParamId::SamplerSlot(15, SlotParam::TempoLock)
+        );
         assert!(all.contains(&ParamId::Sampler(SamplerParam::Volume)));
         assert_eq!(ParamId::Fm(FmParam::Volume).info().default, 0.7);
+    }
+
+    #[test]
+    fn sampler_params_and_maps() {
+        assert!(ParamId::SamplerSlot(15, SlotParam::Level).is_valid());
+        assert!(!ParamId::SamplerSlot(16, SlotParam::Level).is_valid());
+        assert_eq!(ParamId::SamplerSlot(16, SlotParam::Level).index(), None);
+        assert_eq!(ParamId::Sampler(SamplerParam::Grit).info().steps, 2);
+        assert_eq!(ParamId::SamplerSlot(3, SlotParam::Choke).info().steps, 2);
+        assert_eq!(
+            ParamId::SamplerSlot(3, SlotParam::Release).info().default,
+            0.3
+        );
+        assert_eq!(sampler_map::tune_semitones(0.5), 0);
+        assert_eq!(sampler_map::tune_semitones(1.0), 24);
+        assert_eq!(sampler_map::tune_semitones(0.0), -24);
+        assert_eq!(sampler_map::fine_cents(0.5), 0.0);
+        assert_eq!(sampler_map::fine_cents(1.0), 50.0);
+        assert!((sampler_map::level_gain(0.8) - 0.8).abs() < 1e-6);
+        assert!((sampler_map::attack_seconds(0.0) - 0.001).abs() < 1e-6);
+        assert!((sampler_map::release_seconds(1.0) - 4.0).abs() < 1e-3);
+        assert!((sampler_map::cutoff_hz(1.0) - 18_000.0).abs() < 1.0);
     }
 
     #[test]
