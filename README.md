@@ -4,6 +4,11 @@ A ReBirth-style acid groovebox built on a C64 SID-style sound engine. It runs as
 
 ![SidAcid](docs/images/screenshot.png)
 
+<p>
+  <img src="docs/images/fm.png" alt="The FM synth: algorithm diagram, operator editor, voice browser and poly piano roll" width="49%">
+  <img src="docs/images/sampler.png" alt="The sampler: slot pads, a sliced break with markers, and labelled piano-roll rows" width="49%">
+</p>
+
 ## What's in the box
 
 - **Two SID bass synths with 303-style controls:**
