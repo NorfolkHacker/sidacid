@@ -1,0 +1,19 @@
+Plan 4 (groundwork) — deferred minor findings and parked items from task and final reviews.
+Carry into Plans 5–6 where relevant.
+
+Task 2: minor (deferred): NotePattern::ticks clamps length although validated (harmless defensive)
+Task 3: minor (deferred): sequencer len_of duplicates Banks::length clamp
+Task 3: minor (deferred): no host-level test for Command::NotePattern → DisposeNotePattern
+Task 3: minor (deferred): engine.rs module doc still says two synths two kits (update in Task 5)
+Task 4: minor (deferred): no test of note tracks under swing / pattern shrink mid-play
+Task 5: minor (deferred): play/stop also release auditioned notes; steal clicks (placeholder only)
+Task 6: minor (deferred): no positive-control test proving the counter fires (implementer sanity-checked manually)
+Task 7: minor (deferred): refusal test asserts message.is_some() (could be stale); prefer project-unchanged assert
+Task 8: minor (deferred): note_rect `n.start + 1` unchecked (start always < ticks); move/resize may create same-pitch overlap (engine tolerates via held bits + note_off-all-of-pitch)
+Task 9: minor (deferred): collapsing a panel while key/drag held leaves audition note sounding / gesture open
+Task 9: minor (deferred, plan-mandated pattern also used by synth Len): Len DragValue gesture may stay open on arrow/typing
+Task 9: minor (deferred): no unit tests for audition pairing / one-undo-per-drag
+Task 10: minor (deferred): no test of FM transpose editing in bar editor
+Final: parked — SineVoices note_off also cuts a held audition of same pitch — Ruling: placeholder only; Plans 5–6 real engines must keep audition voices separate — if wrong: audition cut short while pattern plays same pitch.
+Final: parked — poly_edit::add overlap retain can delete a same-pitch note hidden past a shortened end — Ruling: undo restores it; rare — if wrong: a hidden note vanishes until undo.
+Final fix wave: re-review clean (5/5 addressed). Note for Plans 5–6: real voices must keep release-all-voices-of-pitch on note_off (overlapping same-pitch double PolyOn).
