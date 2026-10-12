@@ -9,10 +9,9 @@ pub const CHANNELS: usize = 6;
 pub const DRUM_INSTRUMENTS: usize = 8;
 /// Operators in the FM synth.
 pub const FM_OPS: usize = 6;
-/// Number of entries in `ParamId::all()`.
 /// Sample slots in the sampler.
 pub const SAMPLER_SLOTS: usize = 16;
-
+/// Number of entries in `ParamId::all()`.
 pub const PARAM_COUNT: usize = 589;
 
 /// Positions of the FM controls that pick from a list. The numeric ones
