@@ -450,15 +450,14 @@ impl Project {
     pub fn from_ron(text: &str) -> Result<Project, ProjectError> {
         let parse = |e: ron::error::SpannedError| ProjectError::Parse(e.to_string());
         let head: VersionOnly = ron::from_str(text).map_err(parse)?;
-        if head.version > PROJECT_VERSION {
-            return Err(ProjectError::TooNew(head.version));
-        }
-        let p = if head.version < PROJECT_VERSION {
-            ron::from_str::<crate::migrate::ProjectV1>(text)
+        // Each known version is matched explicitly, so bumping
+        // PROJECT_VERSION without an upgrade path can't misread old files.
+        let p = match head.version {
+            0 | 1 => ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
-                .upgrade()
-        } else {
-            ron::from_str::<Project>(text).map_err(parse)?
+                .upgrade(),
+            PROJECT_VERSION => ron::from_str::<Project>(text).map_err(parse)?,
+            v => return Err(ProjectError::TooNew(v)),
         };
         p.validate()?;
         Ok(p)
