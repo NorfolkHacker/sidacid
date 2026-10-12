@@ -53,6 +53,16 @@ pub enum Command {
     Touch(ParamId, bool),
     /// Sound follows the knob without changing its saved value (record mode).
     SetParamLive(ParamId, f32),
+    /// Audition: play a note on a note machine now.
+    NoteOn {
+        machine: u8,
+        pitch: u8,
+        vel: u8,
+    },
+    NoteOff {
+        machine: u8,
+        pitch: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -189,6 +199,14 @@ impl EngineHost {
                 Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
+                Command::NoteOn {
+                    machine,
+                    pitch,
+                    vel,
+                } => self.engine.note_on(machine as usize, pitch, vel),
+                Command::NoteOff { machine, pitch } => {
+                    self.engine.note_off(machine as usize, pitch)
+                }
             }
         }
     }
