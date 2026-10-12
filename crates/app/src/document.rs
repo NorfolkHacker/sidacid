@@ -2,6 +2,7 @@
 //! applying one returns the engine `Command`s that bring the audio
 //! thread in line. Undo stores the inverse edit.
 
+use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::Command;
 use acid_engine::params::ParamId;
 use acid_engine::project::{
@@ -74,6 +75,14 @@ pub enum Edit {
     Song {
         song: Box<Song>,
     },
+    /// Loading an FM voice: many params and the voice name, one undo step.
+    FmVoice {
+        name: String,
+        values: Vec<(ParamId, f32)>,
+    },
+    FmBank {
+        bank: Option<Vec<Dx7Voice>>,
+    },
 }
 
 /// Which edits may fold into one undo step during a gesture.
@@ -93,6 +102,8 @@ enum MergeKey {
     Swing,
     View(usize),
     Song,
+    FmVoice,
+    FmBank,
 }
 
 fn merge_key(edit: &Edit) -> MergeKey {
@@ -119,6 +130,8 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::Swing(_) => MergeKey::Swing,
         Edit::View { synth, .. } => MergeKey::View(*synth),
         Edit::Song { .. } => MergeKey::Song,
+        Edit::FmVoice { .. } => MergeKey::FmVoice,
+        Edit::FmBank { .. } => MergeKey::FmBank,
     }
 }
 
@@ -347,6 +360,24 @@ impl Document {
             Edit::Song { song } => Edit::Song {
                 song: Box::new(std::mem::replace(&mut p.song, *song)),
             },
+            Edit::FmVoice { name, values } => {
+                let old_name = std::mem::replace(&mut p.fm.voice_name, name);
+                let old_values = values
+                    .into_iter()
+                    .map(|(id, v)| {
+                        let old = p.param(id);
+                        p.params.insert(id, v.clamp(0.0, 1.0));
+                        (id, old)
+                    })
+                    .collect();
+                Edit::FmVoice {
+                    name: old_name,
+                    values: old_values,
+                }
+            }
+            Edit::FmBank { bank } => Edit::FmBank {
+                bank: std::mem::replace(&mut p.fm.bank, bank),
+            },
         }
     }
 
@@ -385,6 +416,11 @@ impl Document {
             Edit::Swing(_) => vec![Command::SetSwing(p.swing)],
             Edit::View { .. } => Vec::new(),
             Edit::Song { .. } => vec![Command::Song(Box::new(p.song.clone()))],
+            Edit::FmVoice { values, .. } => values
+                .iter()
+                .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
+                .collect(),
+            Edit::FmBank { .. } => Vec::new(),
         }
     }
 }
@@ -400,6 +436,29 @@ mod tests {
     }
 
     const CUTOFF: ParamId = ParamId::Synth(0, SynthParam::Cutoff);
+
+    #[test]
+    fn loading_an_fm_voice_is_one_undo_step() {
+        use acid_engine::params::{FmParam, OpParam};
+        let mut d = doc();
+        let alg = ParamId::Fm(FmParam::Algorithm);
+        let lvl = ParamId::FmOp(2, OpParam::Level);
+        let cmds = d.apply(
+            Edit::FmVoice {
+                name: "BRASS".into(),
+                values: vec![(alg, 1.0), (lvl, 0.5)],
+            },
+            false,
+        );
+        assert_eq!(d.project.fm.voice_name, "BRASS");
+        assert_eq!(d.project.param(alg), 1.0);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds.iter().all(|c| matches!(c, Command::SetParam(..))));
+        d.undo();
+        assert_eq!(d.project.fm.voice_name, "INIT VOICE");
+        assert_eq!(d.project.param(alg), alg.info().default);
+        assert_eq!(d.project.param(lvl), lvl.info().default);
+    }
 
     #[test]
     fn param_edit_updates_project_and_emits_command() {

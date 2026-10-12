@@ -4,6 +4,7 @@
 
 mod drum_panel;
 mod files;
+mod fm_voices;
 mod keys;
 pub mod knob;
 mod mixer_panel;
@@ -90,6 +91,9 @@ pub struct ViewState {
     pub poly_scrolled: [bool; 2],
     /// Note held by a click on the roll's key strip: (machine, pitch).
     pub audition: Option<(usize, u8)>,
+    pub fm_browser: fm_voices::FmBrowser,
+    /// Operator shown in the FM operator editor (0..6).
+    pub fm_op: usize,
 }
 
 pub struct SidAcidApp {
@@ -780,5 +784,34 @@ mod tests {
         assert_eq!(bar.patterns[4], Some(acid_engine::project::PatternRef(3)));
         assert_eq!(bar.patterns[5], Some(acid_engine::project::PatternRef(17)));
         run_frames(&mut app, 2);
+    }
+
+    #[test]
+    fn importing_a_bank_and_loading_voices() {
+        use acid_engine::fm::sysex::{bank_sysex, single_sysex};
+        use acid_engine::params::{FmParam, ParamId};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let bank = fm_voices::starter().to_vec();
+        app.import_syx_bytes(&bank_sysex(&bank));
+        assert_eq!(app.doc.project.fm.bank.as_ref().map(Vec::len), Some(32));
+        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Imported);
+        app.doc.undo();
+        assert_eq!(app.doc.project.fm.bank, None);
+
+        app.import_syx_bytes(&single_sysex(&bank[5]));
+        assert_eq!(app.doc.project.fm.voice_name, bank[5].name);
+        let alg = ParamId::Fm(FmParam::Algorithm);
+        assert!((app.doc.project.param(alg) - bank[5].algorithm as f32 / 31.0).abs() < 1e-6);
+
+        let before = app.doc.project.clone();
+        app.import_syx_bytes(b"not sysex");
+        assert!(app.view.message.as_deref().unwrap_or("").contains("DX7"));
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn the_starter_bank_is_built_once() {
+        assert!(std::ptr::eq(fm_voices::starter(), fm_voices::starter()));
+        assert_eq!(fm_voices::starter().len(), 16);
     }
 }

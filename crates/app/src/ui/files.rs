@@ -141,6 +141,8 @@ impl SidAcidApp {
         self.view.poly_drag = [None; 2];
         self.view.poly_scrolled = [false; 2];
         self.view.audition = None;
+        self.view.fm_op = 0;
+        self.view.fm_browser = Default::default();
         self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
