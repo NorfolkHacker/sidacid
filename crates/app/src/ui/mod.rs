@@ -994,6 +994,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sampler_roll_starts_at_the_lowest_zone() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        assert_eq!(app.roll_start_pitch(0), 48, "FM starts at C3");
+        assert_eq!(app.roll_start_pitch(1), 24, "C1 with no slot loaded");
+        app.load_sample_bytes(3, "A", Some("wav"), &test_wav(0.5));
+        assert!(app.move_zone(3, 70, false));
+        app.load_sample_bytes(5, "B", Some("wav"), &test_wav(0.5));
+        let low = app.doc.project.sampler.slots[5]
+            .as_ref()
+            .unwrap()
+            .meta
+            .base_key;
+        assert!(low < 70);
+        assert_eq!(app.roll_start_pitch(1), low);
+        app.clear_slot(5);
+        assert_eq!(app.roll_start_pitch(1), 70);
+    }
+
+    #[test]
     fn sampler_panel_draws_empty_and_loaded_slots_in_both_modes() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         run_frames(&mut app, 1);

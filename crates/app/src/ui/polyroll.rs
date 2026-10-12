@@ -20,8 +20,8 @@ const KEY_W: f32 = 30.0;
 const VEL_H: f32 = 32.0;
 const VIEW_H: f32 = 260.0;
 const NEW_VEL: u8 = 100;
-/// Pitch the roll first scrolls to: C3 (MIDI 48) for FM, C2 for the sampler.
-const START_PITCH: [u8; 2] = [48, 36];
+/// Pitch the FM roll first scrolls to: C3 (MIDI 48).
+const FM_START_PITCH: u8 = 48;
 const BLACK_KEYS: [bool; 12] = [
     false, true, false, true, false, false, true, false, true, false, true, false,
 ];
@@ -33,6 +33,23 @@ fn vel_from_y(y: f32, top: f32) -> u8 {
 }
 
 impl SidAcidApp {
+    /// Pitch roll `n` (0 FM, 1 sampler) first centres on: C3 for FM; for
+    /// the sampler the lowest loaded zone's base key, or C1 with none.
+    pub(crate) fn roll_start_pitch(&self, n: usize) -> u8 {
+        if n == 0 {
+            return FM_START_PITCH;
+        }
+        self.doc
+            .project
+            .sampler
+            .slots
+            .iter()
+            .flatten()
+            .map(|d| d.meta.base_key)
+            .min()
+            .unwrap_or(acid_engine::sampler::FIRST_KEY)
+    }
+
     pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, machine: usize) {
         let n = machine - MachineId::Fm.index();
         let slot = self.doc.project.selected[machine];
@@ -60,7 +77,8 @@ impl SidAcidApp {
                     .id_salt(("poly_v", machine))
                     .max_height(VIEW_H);
                 if !self.view.poly_scrolled[n] {
-                    let y = (ROWS - 1 - START_PITCH[n] as usize) as f32 * ROW_H - VIEW_H / 2.0;
+                    let pitch = self.roll_start_pitch(n) as usize;
+                    let y = (ROWS - 1 - pitch) as f32 * ROW_H - VIEW_H / 2.0;
                     scroll = scroll.vertical_scroll_offset(y.max(0.0));
                     self.view.poly_scrolled[n] = true;
                 }
