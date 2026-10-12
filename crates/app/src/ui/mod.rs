@@ -10,6 +10,7 @@ mod mixer_panel;
 mod pads;
 mod params_ui;
 mod pianoroll;
+mod poly_edit;
 mod record;
 mod roll_edit;
 mod song_panel;
