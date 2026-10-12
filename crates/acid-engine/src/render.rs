@@ -194,8 +194,10 @@ mod tests {
     #[test]
     fn song_export_keeps_the_fm_release_tail() {
         use crate::params::{OpParam, ParamId};
-        let mut p = Project::default();
-        p.bpm = 120.0; // 1 bar = 2 s
+        let mut p = Project {
+            bpm: 120.0, // 1 bar = 2 s
+            ..Project::default()
+        };
         p.fm.patterns[0].notes.push(crate::project::Note {
             start: 0,
             len: 8,
