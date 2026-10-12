@@ -1,5 +1,5 @@
 //! The whole groovebox: two bass synths, two drum kits, the FM and Sampler
-//! note slots (the FM synth and the sampler's sine placeholder), the mixer and the
+//! note slots (the FM synth and the sample player), the mixer and the
 //! sequencer, rendered sample-accurately. process() is real-time safe:
 //! no allocation, locking or I/O.
 
@@ -7,12 +7,15 @@ use crate::drums::{DrumKit, KitKind};
 use crate::fm::FmSynth;
 use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
-use crate::params::{CHANNELS, PARAM_COUNT, ParamId, SamplerParam};
-use crate::placeholder::SineVoices;
+use crate::params::{CHANNELS, PARAM_COUNT, ParamId};
 use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
+use crate::sampler::sample::SampleData;
+use crate::sampler::slot::SlotPlay;
+use crate::sampler::{SLOTS, Sampler};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
 use crate::song::{Banks, MAX_BARS};
 use crate::synth::BassSynth;
+use std::sync::Arc;
 
 /// Upper bound on sequencer ticks fired without time advancing; guards
 /// against a sequencer that never moves forward.
@@ -26,8 +29,8 @@ pub struct Engine {
     synths: [BassSynth; 2],
     kits: [DrumKit; 2],
     fm: FmSynth,
-    /// The sampler slot's placeholder until the sampler engine arrives.
-    sampler: SineVoices,
+    /// The sample player behind the Sampler slot.
+    sampler: Sampler,
     mixer: Mixer,
     seq: Sequencer,
     synth_patterns: [Vec<SynthPattern>; 2],
@@ -60,7 +63,7 @@ impl Engine {
                 DrumKit::new(KitKind::K909, sample_rate),
             ],
             fm: FmSynth::new(sample_rate),
-            sampler: SineVoices::new(sample_rate),
+            sampler: Sampler::new(sample_rate),
             mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
             seq: Sequencer::new(sample_rate),
             synth_patterns: [
@@ -93,6 +96,13 @@ impl Engine {
         self.note_patterns = [p.fm.patterns.clone(), p.sampler.patterns.clone()];
         for id in ParamId::all() {
             self.set_param(id, p.param(id));
+        }
+        for i in 0..SLOTS {
+            let data = p.sampler.slots.get(i).and_then(Option::as_ref);
+            let mut sample = data.map(|d| Arc::new(d.to_sample()));
+            self.sampler.swap_sample(i, &mut sample);
+            let mut play = data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta));
+            self.sampler.swap_play(i, &mut play);
         }
         self.song = p.song.clone();
         self.set_bpm(p.bpm);
@@ -127,7 +137,8 @@ impl Engine {
             ParamId::Kit(k, p) => self.kits[k as usize].set_kit_param(p, v),
             ParamId::Fm(p) => self.fm.set_param(p, v),
             ParamId::FmOp(op, p) => self.fm.set_op_param(op as usize, p, v),
-            ParamId::Sampler(SamplerParam::Volume) => self.sampler.set_volume(v),
+            ParamId::Sampler(p) => self.sampler.set_param(p, v),
+            ParamId::SamplerSlot(s, p) => self.sampler.set_slot_param(s as usize, p, v),
             _ => self.mixer.set_param(id, v),
         }
     }
@@ -149,6 +160,21 @@ impl Engine {
     pub fn set_bpm(&mut self, bpm: f32) {
         self.seq.set_bpm(bpm);
         self.mixer.set_bpm(self.seq.bpm());
+        self.sampler.set_bpm(self.seq.bpm());
+    }
+
+    /// Exchanges a sampler slot's audio (real-time safe; the old sample
+    /// comes back for disposal off the audio thread).
+    pub fn swap_sampler_sample(
+        &mut self,
+        slot: usize,
+        sample: &mut Option<Arc<SampleData>>,
+    ) -> bool {
+        self.sampler.swap_sample(slot, sample)
+    }
+
+    pub fn swap_sampler_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
+        self.sampler.swap_play(slot, play)
     }
 
     pub fn set_swing(&mut self, swing: f32) {
@@ -180,7 +206,7 @@ impl Engine {
         }
         match MachineId::from_index(machine) {
             Some(MachineId::Fm) => self.fm.note_on(pitch, vel.min(127), live),
-            Some(MachineId::Sampler) => self.sampler.note_on(pitch, vel.min(127)),
+            Some(MachineId::Sampler) => self.sampler.note_on(pitch, vel.min(127), live),
             _ => {}
         }
     }
@@ -188,7 +214,7 @@ impl Engine {
     fn poly_off(&mut self, machine: usize, pitch: u8, live: bool) {
         match MachineId::from_index(machine) {
             Some(MachineId::Fm) => self.fm.note_off(pitch, live),
-            Some(MachineId::Sampler) => self.sampler.note_off(pitch),
+            Some(MachineId::Sampler) => self.sampler.note_off(pitch, live),
             _ => {}
         }
     }
@@ -199,6 +225,7 @@ impl Engine {
     pub fn stop(&mut self) {
         if !self.seq.is_playing() {
             self.fm.reset();
+            self.sampler.reset();
         }
         self.end_playback();
     }
@@ -525,10 +552,95 @@ mod tests {
         e
     }
 
+    fn sampler_project() -> Project {
+        use crate::project::Note;
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let mut p = Project::default();
+        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        p.sampler.slots[0] = Some(SlotData::new(
+            "Tone",
+            44_100,
+            1,
+            &tone,
+            SlotMeta::sliced(36, vec![0, 11_025, 22_050, 33_075], 120.0, 44_100),
+        ));
+        p.sampler.patterns[0].notes.push(Note {
+            start: 0,
+            len: 4,
+            pitch: 37,
+            vel: 120,
+        });
+        p
+    }
+
+    #[test]
+    fn the_sampler_plays_loaded_slots_on_channel_5() {
+        let mut e = Engine::from_project(SR, &sampler_project());
+        e.play();
+        render(&mut e, 0.2);
+        let m = e.take_meters();
+        assert!(m[5] > 0.01, "{m:?}");
+        assert!(m[..5].iter().all(|v| *v == 0.0), "{m:?}");
+    }
+
+    #[test]
+    fn sampler_audition_and_slot_swaps() {
+        let mut e = Engine::from_project(SR, &sampler_project());
+        e.note_on(5, 38, 100);
+        let (l, _) = render(&mut e, 0.1);
+        assert!(peak(&l) > 0.01, "audition plays slice 3");
+        let mut none = None;
+        assert!(e.swap_sampler_sample(0, &mut none));
+        assert!(none.is_some());
+        let (l, _) = render(&mut e, 0.05);
+        assert!(peak(&l) < 1e-3, "slot emptied");
+        let mut play = crate::sampler::slot::SlotPlay::EMPTY;
+        assert!(e.swap_sampler_play(0, &mut play));
+        assert!(!e.swap_sampler_play(16, &mut play));
+    }
+
+    #[test]
+    fn stopping_twice_silences_sampler_loops() {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let mut p = Project::default();
+        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        let mut meta = SlotMeta::chromatic(48, 71, 60, 44_100);
+        meta.loop_on = true;
+        meta.loop_start = 10_000;
+        meta.loop_end = 30_000;
+        p.sampler.slots[0] = Some(SlotData::new("Loop", 44_100, 1, &tone, meta));
+        p.params.insert(
+            ParamId::SamplerSlot(0, crate::params::SlotParam::Release),
+            1.0,
+        );
+        let mut e = Engine::from_project(SR, &p);
+        e.note_on(5, 60, 100);
+        render(&mut e, 0.1);
+        e.stop();
+        e.stop();
+        let (l, _) = render(&mut e, 0.05);
+        assert_eq!(peak(&l), 0.0);
+    }
+
+    /// A project whose sampler slot 0 holds a chromatic tone (keys 36..=96).
+    fn tone_slot_project() -> Project {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let mut p = Project::default();
+        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        p.sampler.slots[0] = Some(SlotData::new(
+            "Tone",
+            44_100,
+            1,
+            &tone,
+            SlotMeta::chromatic(36, 96, 60, 44_100),
+        ));
+        p
+    }
+
     #[test]
     fn note_patterns_play_on_their_own_channels() {
         use crate::project::Note;
-        let mut p = Project::default();
+        let mut p = tone_slot_project();
         p.fm.patterns[0].notes.push(Note {
             start: 0,
             len: 32,
@@ -551,7 +663,7 @@ mod tests {
 
     #[test]
     fn live_notes_audition_while_stopped() {
-        let mut e = Engine::new(SR);
+        let mut e = Engine::from_project(SR, &tone_slot_project());
         e.note_on(0, 60, 100);
         e.note_on(4, 200, 100);
         e.note_on(5, 60, 0);

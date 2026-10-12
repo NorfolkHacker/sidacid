@@ -76,6 +76,23 @@ fn busy_project() -> Project {
             vel: 90,
         });
     }
+    let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
+    let slices: Vec<u32> = (0..12).map(|i| i * 3675).collect();
+    p.sampler.slots[0] = Some(acid_engine::sampler::slot::SlotData::new(
+        "Busy",
+        44_100,
+        1,
+        &tone,
+        acid_engine::sampler::slot::SlotMeta::sliced(36, slices, 120.0, 44_100),
+    ));
+    p.params.insert(
+        ParamId::SamplerSlot(0, acid_engine::params::SlotParam::Choke),
+        1.0,
+    );
+    p.params.insert(
+        ParamId::Sampler(acid_engine::params::SamplerParam::Grit),
+        1.0,
+    );
     let bar = Bar {
         patterns: [Some(PatternRef(0)); acid_engine::machine::MACHINES],
         ..Bar::default()

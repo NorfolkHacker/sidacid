@@ -14,7 +14,6 @@ pub mod machine;
 mod migrate;
 pub mod mixer;
 pub mod params;
-pub mod placeholder;
 pub mod project;
 pub mod random;
 pub mod render;

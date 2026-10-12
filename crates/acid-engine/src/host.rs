@@ -8,8 +8,11 @@ use crate::engine::Engine;
 use crate::machine::MACHINES;
 use crate::params::{CHANNELS, ParamId};
 use crate::project::{DrumPattern, NotePattern, Song, SynthPattern};
+use crate::sampler::sample::SampleData;
+use crate::sampler::slot::SlotPlay;
 use crate::sequencer::Mode;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
+use std::sync::Arc;
 
 pub const COMMAND_CAPACITY: usize = 4096;
 pub const EVENT_CAPACITY: usize = 1024;
@@ -29,6 +32,14 @@ pub enum Command {
     SelectPattern {
         machine: u8,
         slot: u8,
+    },
+    SamplerSample {
+        slot: u8,
+        sample: Option<Arc<SampleData>>,
+    },
+    SamplerPlay {
+        slot: u8,
+        play: Box<SlotPlay>,
     },
     SynthPattern {
         synth: u8,
@@ -89,6 +100,8 @@ pub enum Event {
     DisposeNotePattern(Box<NotePattern>),
     DisposeEngine(Box<Engine>),
     DisposeSong(Box<Song>),
+    DisposeSample(Option<Arc<SampleData>>),
+    DisposeSlotPlay(Box<SlotPlay>),
 }
 
 pub struct EngineHost {
@@ -159,6 +172,14 @@ impl EngineHost {
                 Command::Stop => self.engine.stop(),
                 Command::SelectPattern { machine, slot } => {
                     self.engine.select_pattern(machine as usize, slot)
+                }
+                Command::SamplerSample { slot, mut sample } => {
+                    self.engine.swap_sampler_sample(slot as usize, &mut sample);
+                    self.dispose(Event::DisposeSample(sample));
+                }
+                Command::SamplerPlay { slot, mut play } => {
+                    self.engine.swap_sampler_play(slot as usize, &mut play);
+                    self.dispose(Event::DisposeSlotPlay(play));
                 }
                 Command::SynthPattern {
                     synth,
@@ -294,6 +315,42 @@ mod tests {
             }
         }
         assert!(found);
+    }
+
+    #[test]
+    fn replaced_samples_and_play_data_come_back_for_disposal() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let mk = || {
+            Some(Arc::new(SampleData {
+                sample_rate: 44_100,
+                left: vec![0.5; 64].into(),
+                right: None,
+            }))
+        };
+        tx.push(Command::SamplerSample {
+            slot: 0,
+            sample: mk(),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        tx.push(Command::SamplerSample {
+            slot: 0,
+            sample: mk(),
+        })
+        .unwrap();
+        tx.push(Command::SamplerPlay {
+            slot: 0,
+            play: Box::new(SlotPlay::EMPTY),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        let evs: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        let samples = evs
+            .iter()
+            .filter(|e| matches!(e, Event::DisposeSample(Some(_))))
+            .count();
+        assert_eq!(samples, 1);
+        assert!(evs.iter().any(|e| matches!(e, Event::DisposeSlotPlay(_))));
     }
 
     #[test]
