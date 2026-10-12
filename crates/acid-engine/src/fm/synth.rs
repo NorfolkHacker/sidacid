@@ -14,6 +14,8 @@ use crate::params::{FmParam, OpParam};
 
 pub const VOICES: usize = 12;
 const MONO_STACK: usize = 16;
+/// Full scale of the Vintage 12-bit quantiser (headroom for chords).
+const VINTAGE_RANGE: f32 = 4.0;
 
 pub struct FmSynth {
     sample_rate: f32,
@@ -186,7 +188,9 @@ impl FmSynth {
             }
             for x in buf.iter_mut() {
                 if self.patch.vintage {
-                    *x = (x.clamp(-1.0, 1.0) * 2048.0).round() / 2048.0;
+                    // 12-bit DAC with headroom for chords: ±VINTAGE_RANGE.
+                    let q = (*x / VINTAGE_RANGE).clamp(-1.0, 1.0);
+                    *x = (q * 2048.0).round() / 2048.0 * VINTAGE_RANGE;
                 }
                 *x *= gain;
             }
@@ -434,9 +438,38 @@ mod tests {
         let x = render(&mut s, 0.05);
         assert!(peak(&x) > 0.05);
         for v in x {
-            let steps = v * 2048.0;
+            // 12 bits across ±4.0 of headroom: steps of 4/2048.
+            let steps = v * 2048.0 / 4.0;
             assert!((steps - steps.round()).abs() < 1e-3, "{v}");
         }
+    }
+
+    #[test]
+    fn vintage_does_not_clip_chords() {
+        let chord = |vintage: bool| {
+            let mut s = FmSynth::new(SR);
+            s.set_param(FmParam::Vintage, if vintage { 1.0 } else { 0.0 });
+            s.set_param(FmParam::Volume, 1.0);
+            s.set_param(FmParam::Algorithm, 1.0); // 32: every operator a carrier
+            for op in 0..3 {
+                s.set_op_param(op, OpParam::Level, 1.0);
+            }
+            for p in [48, 52, 55, 60] {
+                s.note_on(p, 110, false);
+            }
+            render(&mut s, 0.2)
+        };
+        let clean = peak(&chord(false));
+        let vintage = peak(&chord(true));
+        assert!(
+            clean > 1.2,
+            "precondition: the chord sums above 1.0 ({clean})"
+        );
+        assert!(vintage < 3.5, "well below the ±4.0 bound: {vintage}");
+        assert!(
+            (vintage - clean).abs() < clean * 0.05,
+            "vintage {vintage} vs clean {clean}: not clipped"
+        );
     }
 
     #[test]
