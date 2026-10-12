@@ -38,7 +38,7 @@ impl SidAcidApp {
         let m = MachineId::Sampler.index();
         let slot = self.doc.project.selected[m];
         let title = format!("SAMPLER   {}", PatternRef(slot).label());
-        let resp = egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+        egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt("sampler")
             .default_open(true)
             .show(ui, |ui| {
@@ -58,12 +58,7 @@ impl SidAcidApp {
                 self.note_pattern_row(ui, m);
                 self.poly_roll(ui, m);
             });
-        self.sampler_drop(
-            ui,
-            resp.header_response
-                .rect
-                .union(resp.body_response.map_or(egui::Rect::NOTHING, |b| b.rect)),
-        );
+        self.sampler_drop(ui);
         self.release_pad_note(ui);
     }
 
@@ -86,6 +81,7 @@ impl SidAcidApp {
                     let shift = ui.input(|inp| inp.modifiers.shift);
                     if shift
                         && r.is_pointer_button_down_on()
+                        && ui.input(|inp| inp.pointer.primary_down())
                         && self.view.pad_note.is_none()
                         && let Some(d) = self.doc.project.sampler.slots[i].as_ref()
                     {
@@ -121,17 +117,25 @@ impl SidAcidApp {
 
     fn sampler_slot_row(&mut self, ui: &mut egui::Ui) {
         let s = self.view.sampler_slot.min(SLOTS - 1);
-        let data = self.doc.project.sampler.slots[s].clone();
+        let info = self.doc.project.sampler.slots[s].as_ref().map(|d| {
+            (
+                d.name.clone(),
+                d.meta.clone(),
+                d.frames(),
+                d.channels,
+                d.sample_rate,
+            )
+        });
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(format!("Slot {}", s + 1)).strong());
             if ui.button("Load…").clicked() {
                 self.load_sample_dialog(s);
             }
-            let Some(d) = data else {
+            let Some((name, meta, frames, channels, sample_rate)) = info else {
                 ui.weak("Empty — load or drop an audio file (WAV, FLAC, MP3, OGG).");
                 return;
             };
-            ui.label(&d.name);
+            ui.label(&name);
             if ui.button("Clear").clicked() {
                 self.clear_slot(s);
                 return;
@@ -141,8 +145,7 @@ impl SidAcidApp {
                 (SlotMode::Slice, "Slice"),
                 (SlotMode::Chromatic, "Chromatic"),
             ] {
-                if ui.selectable_label(d.meta.mode == mode, label).clicked() && d.meta.mode != mode
-                {
+                if ui.selectable_label(meta.mode == mode, label).clicked() && meta.mode != mode {
                     self.edit_slot_meta(s, false, |m| {
                         m.mode = mode;
                         if mode == SlotMode::Chromatic {
@@ -152,14 +155,14 @@ impl SidAcidApp {
                     });
                 }
             }
-            let mut base = d.meta.base_key;
+            let mut base = meta.base_key;
             let r = ui.add(
                 egui::DragValue::new(&mut base)
                     .range(0..=127)
                     .prefix("Zone "),
             );
             if r.changed() {
-                let shift = base as i16 - d.meta.base_key as i16;
+                let shift = base as i16 - meta.base_key as i16;
                 self.edit_slot_meta(s, r.dragged(), |m| {
                     m.base_key = base;
                     m.high_key = (m.high_key as i16 + shift).clamp(base as i16, 127) as u8;
@@ -169,13 +172,12 @@ impl SidAcidApp {
             if r.drag_stopped() || r.lost_focus() {
                 self.doc.end_gesture();
             }
-            ui.label(zone_text(&d.meta));
+            ui.label(zone_text(&meta));
             ui.separator();
-            match d.meta.mode {
+            match meta.mode {
                 SlotMode::Slice => {
                     for n in [4usize, 8, 16, 32] {
                         if ui.button(format!("÷{n}")).clicked() {
-                            let frames = d.frames();
                             self.edit_slot_meta(s, false, |m| m.slices = equal_slices(frames, n));
                         }
                     }
@@ -186,18 +188,15 @@ impl SidAcidApp {
                     {
                         self.view.sampler_sensitivity = Some(sens);
                     }
-                    if ui.button("Detect").clicked() {
-                        let mono = mono_mix(
-                            &d.pcm
-                                .iter()
-                                .map(|&x| x as f32 / 32_768.0)
-                                .collect::<Vec<_>>(),
-                            d.channels as usize,
-                        );
-                        let slices = detect_slices(&mono, d.sample_rate, sens);
+                    if ui.button("Detect").clicked()
+                        && let Some(d) = self.doc.project.sampler.slots[s].as_ref()
+                    {
+                        let pcm: Vec<f32> = d.pcm.iter().map(|&x| x as f32 / 32_768.0).collect();
+                        let slices =
+                            detect_slices(&mono_mix(&pcm, channels as usize), sample_rate, sens);
                         self.edit_slot_meta(s, false, |m| m.slices = slices);
                     }
-                    let mut bpm = d.meta.original_bpm;
+                    let mut bpm = meta.original_bpm;
                     let r = ui.add(
                         egui::DragValue::new(&mut bpm)
                             .range(20.0..=400.0)
@@ -212,7 +211,7 @@ impl SidAcidApp {
                     }
                 }
                 SlotMode::Chromatic => {
-                    let mut root = d.meta.root;
+                    let mut root = meta.root;
                     let r = ui.add(
                         egui::DragValue::new(&mut root)
                             .range(0..=127)
@@ -222,10 +221,10 @@ impl SidAcidApp {
                     if r.changed() {
                         self.edit_slot_meta(s, r.dragged(), |m| m.root = root);
                     }
-                    let mut top = d.meta.high_key;
+                    let mut top = meta.high_key;
                     let r2 = ui.add(
                         egui::DragValue::new(&mut top)
-                            .range(d.meta.base_key as u32..=127)
+                            .range(meta.base_key as u32..=127)
                             .custom_formatter(|v, _| key_name(v as u8))
                             .prefix("Top "),
                     );
@@ -235,7 +234,7 @@ impl SidAcidApp {
                     if r.drag_stopped() || r.lost_focus() || r2.drag_stopped() || r2.lost_focus() {
                         self.doc.end_gesture();
                     }
-                    let mut looping = d.meta.loop_on;
+                    let mut looping = meta.loop_on;
                     if ui.checkbox(&mut looping, "Loop").changed() {
                         self.edit_slot_meta(s, false, |m| m.loop_on = looping);
                     }
@@ -247,6 +246,7 @@ impl SidAcidApp {
     fn sampler_waveform(&mut self, ui: &mut egui::Ui) {
         let s = self.view.sampler_slot.min(SLOTS - 1);
         let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
+            self.view.wave_drag = None;
             return;
         };
         let width = ui.available_width().clamp(200.0, 900.0);
@@ -296,11 +296,10 @@ impl SidAcidApp {
             );
         }
         let pointer = resp.interact_pointer_pos();
-        if resp.drag_started()
-            && let Some(p) = pointer
-            && let Some(i) = nearest_marker(&xs, p.x, MARKER_GRAB_PX)
-        {
-            self.view.wave_drag = Some((s, marks[i].0));
+        if resp.drag_started() {
+            self.view.wave_drag = pointer
+                .and_then(|p| nearest_marker(&xs, p.x, MARKER_GRAB_PX))
+                .map(|i| (s, marks[i].0));
         }
         if resp.dragged()
             && let Some(p) = pointer
@@ -318,18 +317,17 @@ impl SidAcidApp {
         }
     }
 
-    fn sampler_drop(&mut self, ui: &egui::Ui, panel: egui::Rect) {
-        let dropped = ui.ctx().input(|i| i.raw.dropped_files.clone());
-        let over = ui
-            .ctx()
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| panel.contains(p));
-        let Some(file) = dropped.into_iter().next() else {
-            return;
-        };
-        if !over {
-            return;
+    fn sampler_drop(&mut self, ui: &egui::Ui) {
+        // The sampler is the app's only drop target, and OS file drags
+        // rarely report a pointer position, so any drop loads here.
+        let file = ui.ctx().input(|i| i.raw.dropped_files.first().cloned());
+        if let Some(file) = file {
+            self.load_dropped_file(&file);
         }
+    }
+
+    /// Loads a file dropped on the window into the selected slot.
+    pub(crate) fn load_dropped_file(&mut self, file: &egui::DroppedFile) {
         let slot = self.view.sampler_slot.min(SLOTS - 1);
         if let Some(path) = &file.path {
             self.load_sample_file(slot, path);

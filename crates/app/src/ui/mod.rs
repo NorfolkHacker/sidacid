@@ -952,4 +952,29 @@ mod tests {
         assert!(app.view.wave_cache.contains_key(&0) && app.view.wave_cache.contains_key(&1));
         assert!(app.view.poly_scrolled[1], "the sampler roll is drawn");
     }
+
+    #[test]
+    fn a_dropped_audio_file_loads_into_the_selected_slot() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.sampler_slot = 3;
+        let file = egui::DroppedFile {
+            name: "x.wav".into(),
+            bytes: Some(test_wav(0.5).into()),
+            ..Default::default()
+        };
+        app.load_dropped_file(&file);
+        let d = app.doc.project.sampler.slots[3]
+            .as_ref()
+            .expect("slot 3 is loaded");
+        assert_eq!(d.name, "x");
+        assert!(
+            app.doc
+                .project
+                .sampler
+                .slots
+                .iter()
+                .enumerate()
+                .all(|(i, s)| i == 3 || s.is_none())
+        );
+    }
 }
