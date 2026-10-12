@@ -81,13 +81,16 @@ impl Sampler {
     }
 
     /// Exchanges a slot's sample with `sample`. The caller disposes of
-    /// what comes back off the audio thread. False for a bad slot.
+    /// what comes back off the audio thread. False for a bad slot. The
+    /// slot's play is cleared so the old slices never play the new audio;
+    /// the `swap_play` that follows a new sample restores it.
     pub fn swap_sample(&mut self, slot: usize, sample: &mut Option<Arc<SampleData>>) -> bool {
         if slot >= SLOTS {
             return false;
         }
         self.kill_slot(slot);
         std::mem::swap(&mut self.samples[slot], sample);
+        self.plays[slot] = SlotPlay::EMPTY;
         true
     }
 
@@ -309,6 +312,24 @@ mod tests {
         s.note_on(36, 100, false);
         assert_eq!(s.active_voices(), 0, "empty slot");
         assert!(!s.swap_sample(16, &mut None));
+    }
+
+    #[test]
+    fn a_new_sample_is_silent_until_its_play_arrives() {
+        let mut s = loaded();
+        let mut short = Some(sine(1_000));
+        assert!(s.swap_sample(0, &mut short));
+        s.note_on(37, 100, false);
+        assert_eq!(
+            s.active_voices(),
+            0,
+            "the old slices don't play the new sample"
+        );
+        let mut play = SlotPlay::from_meta(&SlotMeta::sliced(36, vec![0, 500], 120.0, 1_000));
+        assert!(s.swap_play(0, &mut play));
+        assert_eq!(play, SlotPlay::EMPTY, "the reset play comes back");
+        s.note_on(37, 100, false);
+        assert_eq!(s.active_voices(), 1);
     }
 
     #[test]
