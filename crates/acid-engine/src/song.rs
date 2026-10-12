@@ -4,8 +4,8 @@
 use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, Song, SynthPattern,
-    steps_of,
+    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
+    SynthPattern, steps_of,
 };
 use std::collections::BTreeMap;
 
@@ -102,15 +102,22 @@ pub fn is_automated(song: &Song, param: ParamId) -> bool {
     lane(song, param).is_some_and(|l| !l.points.is_empty())
 }
 
+/// Steps in the longest possible song: `MAX_BARS` bars of `STEPS` steps.
+pub const MAX_SONG_STEPS: usize = MAX_BARS * STEPS;
+
 /// Writes `value` at every step from `from` to `to` (inclusive, either order)
 /// in `param`'s lane, creating the lane if needed. A non-finite value is
-/// ignored.
+/// ignored. At most `MAX_SONG_STEPS` points are written: a wilder range
+/// stops after that many steps from its low end.
 pub fn write_automation(song: &mut Song, param: ParamId, from: u32, to: u32, value: f32) {
     if !value.is_finite() {
         return;
     }
     let value = value.clamp(0.0, 1.0);
-    let (a, b) = (from.min(to), from.max(to));
+    let a = from.min(to);
+    let b = from
+        .max(to)
+        .min(a.saturating_add(MAX_SONG_STEPS as u32 - 1));
     let index = match song.automation.iter().position(|l| l.param == param) {
         Some(i) => i,
         None => {
@@ -164,6 +171,11 @@ fn shift_automation(song: &mut Song, from: u32, delta: i64) {
     }
 }
 
+/// Inserts `bars` before bar `at` (clamped to the song end), moving later
+/// automation along. The loop range follows: inserting before or at the
+/// loop's first bar shifts the loop; inserting inside it, or right after
+/// its last bar, extends it to include the new bars; inserting further on
+/// leaves it alone. Paste and Duplicate go through here too.
 pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
     let at = at.min(song.bars.len());
     let room = MAX_BARS.saturating_sub(song.bars.len());
@@ -177,8 +189,14 @@ pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
     song.bars.splice(at..at, bars.iter().copied());
     if let Some((a, b)) = song.loop_range {
         let n = bars.len() as u16;
-        let bump = |i: u16| if i as usize >= at { i + n } else { i };
-        song.loop_range = Some((bump(a), bump(b)));
+        let (a_at, b_at) = (a as usize, b as usize);
+        song.loop_range = Some(if at <= a_at {
+            (a + n, b + n)
+        } else if at <= b_at + 1 {
+            (a, b + n)
+        } else {
+            (a, b)
+        });
     }
 }
 
@@ -487,6 +505,60 @@ mod tests {
         assert_eq!(song.bars[2].patterns[5], Some(PatternRef(7)));
         write_pattern_ref(&mut song, 0, 6, 7);
         assert!(song.bars[0].patterns.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn write_automation_caps_a_runaway_range() {
+        let mut song = Song::default();
+        let id = ParamId::Master(MasterParam::Level);
+        let cap = MAX_BARS * STEPS;
+        write_automation(&mut song, id, 0, cap as u32 + 1000, 0.5);
+        assert_eq!(lane(&song, id).unwrap().points.len(), cap);
+        clear_automation(&mut song, id);
+        write_automation(&mut song, id, 0, u32::MAX, 0.5);
+        assert_eq!(lane(&song, id).unwrap().points.len(), cap, "no 4G fill");
+        clear_automation(&mut song, id);
+        write_automation(&mut song, id, u32::MAX, u32::MAX - 3, 0.5);
+        assert_eq!(
+            lane(&song, id).unwrap().points.len(),
+            4,
+            "no overflow at the top"
+        );
+    }
+
+    #[test]
+    fn bar_steps_ignores_bad_slots_and_clamps_lengths() {
+        let mut p = Project::default();
+        p.synths[0].patterns[1].length = 0;
+        p.drums[0].patterns[2].length = 255;
+        let b = Banks::of(&p);
+        assert_eq!(b.length(0, 200), None, "slot past the bank");
+        assert_eq!(b.length(0, 1), Some(1), "length 0 counts as 1");
+        assert_eq!(b.length(2, 2), Some(STEPS), "length past STEPS is clamped");
+        assert_eq!(
+            bar_steps(&bar([Some(200), None, None, None]), b),
+            DEFAULT_BAR_STEPS
+        );
+        assert_eq!(bar_steps(&bar([Some(1), None, None, None]), b), 1);
+        assert_eq!(bar_steps(&bar([Some(1), None, Some(2), None]), b), STEPS);
+    }
+
+    #[test]
+    fn inserting_inside_or_at_the_end_of_the_loop_extends_it() {
+        let (p, _) = sixteen_step_song(5);
+        let b = Banks::of(&p);
+        let insert_at = |at: usize| {
+            let mut song = p.song.clone();
+            song.loop_range = Some((1, 3));
+            insert_bars(&mut song, at, &[Bar::default()], b);
+            song.loop_range
+        };
+        assert_eq!(insert_at(0), Some((2, 4)), "before the loop: shifts");
+        assert_eq!(insert_at(1), Some((2, 4)), "at the loop start: shifts");
+        assert_eq!(insert_at(2), Some((1, 4)), "inside: extends");
+        assert_eq!(insert_at(3), Some((1, 4)), "before the last bar: extends");
+        assert_eq!(insert_at(4), Some((1, 4)), "right after the end: extends");
+        assert_eq!(insert_at(5), Some((1, 3)), "past the end: unchanged");
     }
 
     #[test]

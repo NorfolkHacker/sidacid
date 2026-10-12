@@ -533,6 +533,11 @@ impl Sequencer {
                     }
                     let pat = &banks.synths[s][t.pattern as usize];
                     let len = steps_of(pat.length);
+                    // The hold looks at this pattern's own next step, even
+                    // on a bar's last step or before a queued switch (the
+                    // 303 way): a held gate then runs into whatever plays
+                    // next. Its first note slides in (legato), a Tie keeps
+                    // the old pitch, and a silent bar cuts it at its start.
                     if t.gate_open {
                         let step = pat.steps[t.step];
                         let next = pat.steps[(t.step + 1) % len];
@@ -1404,6 +1409,118 @@ mod tests {
         assert_eq!(s.queued_pattern(4), None);
     }
 
+    fn synth_events(ev: &[(usize, SeqEvent)]) -> Vec<(usize, SeqEvent)> {
+        ev.iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    SeqEvent::Note { synth: 0, .. } | SeqEvent::NoteOff { synth: 0 }
+                )
+            })
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn a_song_ending_with_the_gate_open_sends_a_note_off() {
+        let mut f = Fixture::new();
+        f.synths[0][0].steps[0] = SynthStep {
+            gate: Gate::Tie,
+            ..on(0)
+        };
+        f.synths[0][0].steps[15] = on(3);
+        f.song.bars = vec![song_bar([Some(0), None, None, None])];
+        let mut s = song_seq();
+        s.play();
+        let ev = synth_events(&f.run(&mut s, 17 * 5513));
+        assert_eq!(
+            ev.last(),
+            Some(&(88_200, SeqEvent::NoteOff { synth: 0 })),
+            "step 15 ties into the wrap, so only the song end closes it: {ev:?}"
+        );
+        assert!(!s.is_playing());
+    }
+
+    #[test]
+    fn a_track_turning_silent_restores_its_lane_param() {
+        use crate::params::{ParamId, SynthParam};
+        use crate::project::ParamLane;
+        let mut f = Fixture::new();
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut values = vec![None; 64];
+        values[15] = Some(0.8);
+        f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
+        f.song.bars = vec![song_bar([Some(0), None, None, None]), song_bar([None; 4])];
+        let mut s = song_seq();
+        s.play();
+        let ev: Vec<_> = f
+            .run(&mut s, 17 * 5513)
+            .into_iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Param { .. } | SeqEvent::ParamRestore { .. }))
+            .collect();
+        assert_eq!(
+            ev,
+            vec![
+                (82_688, SeqEvent::Param { id, value: 0.8 }),
+                (88_200, SeqEvent::ParamRestore { id }),
+            ]
+        );
+    }
+
+    /// One song bar playing synth pattern 0, whose last step slides into
+    /// its own step 0, followed by `next`.
+    fn slide_across_the_bar_line(next: crate::project::Bar) -> Vec<(usize, SeqEvent)> {
+        let mut f = Fixture::new();
+        f.synths[0][0].steps[0] = on(0);
+        f.synths[0][0].steps[15] = SynthStep {
+            slide: true,
+            ..on(3)
+        };
+        f.synths[0][1].steps[0] = on(7);
+        f.synths[0][2].steps[0] = SynthStep {
+            gate: Gate::Tie,
+            ..on(9)
+        };
+        f.song.bars = vec![song_bar([Some(0), None, None, None]), next];
+        let mut s = song_seq();
+        s.play();
+        synth_events(&f.run(&mut s, 89_000))
+            .into_iter()
+            .filter(|(p, _)| *p >= 82_688)
+            .collect()
+    }
+
+    // Decision #5 (303-like): the hold on a bar's last step looks at the
+    // current pattern's own wrap, and the held gate runs into whatever the
+    // next bar plays.
+    #[test]
+    fn a_slide_on_a_bars_last_step_runs_into_the_next_bar() {
+        let note = |midi, legato| SeqEvent::Note {
+            synth: 0,
+            midi,
+            accent: false,
+            legato,
+        };
+        assert_eq!(
+            slide_across_the_bar_line(song_bar([Some(1), None, None, None])),
+            vec![(82_688, note(39, false)), (88_200, note(43, true))],
+            "the next bar's first note slides in (legato)"
+        );
+        assert_eq!(
+            slide_across_the_bar_line(song_bar([Some(2), None, None, None])),
+            vec![(82_688, note(39, false))],
+            "a Tie in the next bar keeps the old pitch sounding"
+        );
+        assert_eq!(
+            slide_across_the_bar_line(song_bar([None; 4])),
+            vec![
+                (82_688, note(39, false)),
+                (88_200, SeqEvent::NoteOff { synth: 0 })
+            ],
+            "a silent next bar cuts the note at its start, not mid-step"
+        );
+    }
+
     use crate::project::Note;
 
     fn note(start: u16, len: u16, pitch: u8) -> Note {
@@ -1642,5 +1759,42 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn poly_notes_follow_swing() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(TICKS_PER_STEP, 2, 60));
+        f.drums[0][0].steps[1][0] = DrumHit::On;
+        let mut s = new_seq();
+        s.set_swing(0.5);
+        s.play();
+        let ev = f.run(&mut s, 8000);
+        let at = |want: fn(&SeqEvent) -> bool| ev.iter().find(|(_, e)| want(e)).map(|(p, _)| *p);
+        let drum = at(|e| matches!(e, SeqEvent::Drum { .. }));
+        let poly_on = at(|e| matches!(e, SeqEvent::PolyOn { .. }));
+        assert_eq!(drum, Some(6891), "the swung odd step");
+        assert_eq!(poly_on, drum, "the note on step 1 lands with the drum");
+    }
+
+    #[test]
+    fn shrinking_the_pattern_past_the_playhead_wraps_and_releases() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 64, 60));
+        let mut s = new_seq();
+        s.play();
+        let ev = poly(&f.run(&mut s, 10 * 5513)); // into step 10
+        assert_eq!(ev.len(), 1, "only the note-on so far: {ev:?}");
+        f.notes[0][0].length = 4;
+        let ev: Vec<_> = poly(&f.run(&mut s, 1400))
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        let on = SeqEvent::PolyOn {
+            machine: 4,
+            pitch: 60,
+            vel: 100,
+        };
+        assert_eq!(ev, vec![OFF_60, on], "wraps to tick 0 and retriggers");
     }
 }
