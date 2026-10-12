@@ -56,7 +56,8 @@ fn render_tail<E>(
 /// 0..=1 and finishes with 1.0.
 pub fn render_song(project: &Project, progress: impl FnMut(f32)) -> (Vec<f32>, Vec<f32>) {
     let (mut l, mut r) = (Vec::new(), Vec::new());
-    let _ = render_song_to(project, progress, |cl: &[f32], cr: &[f32]| {
+    let cap = MAX_SONG_SECONDS * EXPORT_SAMPLE_RATE as usize;
+    let _ = render_song_to(project, cap, progress, |cl: &[f32], cr: &[f32]| {
         l.extend_from_slice(cl);
         r.extend_from_slice(cr);
         Ok::<(), std::convert::Infallible>(())
@@ -68,6 +69,7 @@ pub fn render_song(project: &Project, progress: impl FnMut(f32)) -> (Vec<f32>, V
 /// at the first sink error.
 fn render_song_to<E>(
     project: &Project,
+    cap: usize,
     mut progress: impl FnMut(f32),
     mut sink: impl FnMut(&[f32], &[f32]) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -81,7 +83,6 @@ fn render_song_to<E>(
     let steps = song::total_steps(&p.song, song::Banks::of(&p)).max(1) as f64;
     let step_samples = 60.0 / p.bpm.clamp(40.0, 300.0) as f64 / 4.0 * sr as f64;
     let expected = steps * step_samples;
-    let cap = MAX_SONG_SECONDS * EXPORT_SAMPLE_RATE as usize;
     let mut rendered = 0;
     let mut cl = vec![0.0; CHUNK];
     let mut cr = vec![0.0; CHUNK];
@@ -110,7 +111,8 @@ pub fn render_song_wav(
     progress: impl FnMut(f32),
 ) -> Result<(), hound::Error> {
     let mut w = hound::WavWriter::create(path, wav_spec())?;
-    render_song_to(project, progress, |l: &[f32], r: &[f32]| {
+    let cap = MAX_SONG_SECONDS * EXPORT_SAMPLE_RATE as usize;
+    render_song_to(project, cap, progress, |l: &[f32], r: &[f32]| {
         write_frames(&mut w, l, r)
     })?;
     w.finalize()
@@ -228,8 +230,34 @@ mod tests {
 
     #[test]
     fn empty_song_renders_almost_nothing() {
-        let (l, _) = render_song(&crate::demo::demo_project(), |_| {});
-        assert!(l.len() <= 2 * EXPORT_SAMPLE_RATE as usize);
+        let mut seen = Vec::new();
+        let (l, _) = render_song(&crate::demo::demo_project(), |f| seen.push(f));
+        assert!(l.len() <= 2 * CHUNK);
+        assert!(rms(&l) < 1e-3, "an empty song is silent");
+        assert_eq!(seen.last().copied(), Some(1.0));
+    }
+
+    #[test]
+    fn the_song_length_cap_stops_a_runaway_render() {
+        let mut p = two_bar_song();
+        let bar = p.song.bars[0];
+        p.song.bars = vec![bar; 999];
+        let cap = 2 * CHUNK;
+        let (mut n, mut seen) = (0, Vec::new());
+        render_song_to(
+            &p,
+            cap,
+            |f| seen.push(f),
+            |l: &[f32], _: &[f32]| {
+                n += l.len();
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
+        .unwrap();
+        let tail = 10 * EXPORT_SAMPLE_RATE as usize;
+        assert!(n >= cap, "rendered up to the cap ({n})");
+        assert!(n <= cap + tail, "capped, then only the tail ({n})");
+        assert_eq!(seen.last().copied(), Some(1.0));
     }
 
     #[test]

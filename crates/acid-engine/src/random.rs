@@ -117,6 +117,13 @@ pub fn randomise_synth(
             while semis > HIGHEST {
                 semis -= 12;
             }
+            // The range clamp can undo the fold at the edges; repeating
+            // the previous (in-scale, in-range) note keeps the leap legal.
+            if let Some(p) = prev
+                && (semis - p).abs() > MAX_LEAP
+            {
+                semis = p;
+            }
             prev = Some(semis);
             step.octave = semis.div_euclid(12) as i8;
             step.note = semis.rem_euclid(12) as u8;
@@ -166,10 +173,12 @@ const HATS: [(&[usize], &[usize]); 4] = [
 /// How likely each instrument is to gain a hit when evolving.
 const INST_WEIGHTS: [f32; 8] = [1.0, 0.8, 0.4, 0.4, 0.5, 0.4, 2.0, 1.0];
 /// Downbeats over offbeats over the rest.
+/// Upper bound on tries when looking for effective edits.
+const MAX_EVOLVE_ATTEMPTS: u32 = 16;
 const STEP_WEIGHTS: [f32; 4] = [3.0, 1.0, 2.0, 1.0];
 
-fn open_mutes_closed(p: &mut DrumPattern) {
-    for step in &mut p.steps {
+fn open_mutes_closed(p: &mut DrumPattern, len: usize) {
+    for step in &mut p.steps[..len] {
         if step[OH] != DrumHit::Off {
             step[CH] = DrumHit::Off;
         }
@@ -244,7 +253,7 @@ pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
             put(s, OH, DrumHit::On);
         }
     }
-    open_mutes_closed(&mut p);
+    open_mutes_closed(&mut p, len);
     p
 }
 
@@ -255,13 +264,22 @@ pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
     let step_weights: Vec<f32> = (0..len)
         .map(|i| STEP_WEIGHTS[i % STEP_WEIGHTS.len()])
         .collect();
-    for _ in 0..rng.gen_range(1..=3) {
+    // Aim for 1..=3 edits that survive `open_mutes_closed`: a closed hat
+    // on an open-hat step would be muted straight away, so it is skipped
+    // (and retried) rather than counted.
+    let target = rng.gen_range(1..=3);
+    let (mut done, mut attempts) = (0, 0);
+    while done < target && attempts < MAX_EVOLVE_ATTEMPTS {
+        attempts += 1;
         let op: f32 = rng.r#gen();
         if op < 0.5 {
             let inst = weighted(&mut rng, &INST_WEIGHTS);
             let step = weighted(&mut rng, &step_weights);
-            if out.steps[step][inst] == DrumHit::Off {
+            if out.steps[step][inst] == DrumHit::Off
+                && !(inst == CH && out.steps[step][OH] != DrumHit::Off)
+            {
                 out.steps[step][inst] = DrumHit::On;
+                done += 1;
             }
         } else if op < 0.8 {
             if let Some((step, inst)) = random_hit(&mut rng, &out, len) {
@@ -270,9 +288,12 @@ pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
                 } else {
                     (step + len - 1) % len
                 };
-                if out.steps[to][inst] == DrumHit::Off {
+                if out.steps[to][inst] == DrumHit::Off
+                    && !(inst == CH && out.steps[to][OH] != DrumHit::Off)
+                {
                     out.steps[to][inst] = out.steps[step][inst];
                     out.steps[step][inst] = DrumHit::Off;
+                    done += 1;
                 }
             }
         } else if let Some((step, inst)) = random_hit(&mut rng, &out, len) {
@@ -280,9 +301,10 @@ pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
                 DrumHit::On => DrumHit::Accent,
                 _ => DrumHit::On,
             };
+            done += 1;
         }
     }
-    open_mutes_closed(&mut out);
+    open_mutes_closed(&mut out, len);
     out
 }
 
@@ -375,6 +397,162 @@ mod tests {
         assert!(hits(&e) >= 1);
     }
 
+    #[test]
+    fn evolving_an_empty_pattern_adds_hits_for_every_seed() {
+        for seed in 0..50 {
+            let e = evolve_drums(&DrumPattern::default(), seed);
+            assert!(hits(&e) >= 1, "seed {seed}");
+        }
+    }
+
+    fn open_hat_base() -> DrumPattern {
+        let mut p = DrumPattern::default();
+        for s in [0, 4, 8, 12] {
+            p.steps[s][CH] = DrumHit::On;
+        }
+        for s in [2, 6, 10, 14] {
+            p.steps[s][OH] = DrumHit::On;
+        }
+        p
+    }
+
+    #[test]
+    fn evolve_always_changes_a_pattern_with_open_hats() {
+        let base = open_hat_base();
+        for seed in 0..200 {
+            assert_ne!(evolve_drums(&base, seed), base, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn evolve_leaves_steps_beyond_the_length_alone() {
+        let mut base = open_hat_base();
+        base.length = 8;
+        base.steps[20][OH] = DrumHit::On;
+        base.steps[20][CH] = DrumHit::On;
+        for seed in 0..100 {
+            let e = evolve_drums(&base, seed);
+            assert_eq!(e.steps[20], base.steps[20], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn templates_vary_across_seeds() {
+        let ts: Vec<DrumPattern> = (0..50).map(|s| drum_template(s, 16)).collect();
+        let unique = (0..ts.len()).filter(|&i| !ts[..i].contains(&ts[i])).count();
+        assert!(unique >= 3, "only {unique} distinct templates");
+        assert!(ts.iter().any(|p| p.steps[4][SD] != DrumHit::Off));
+        assert!(ts.iter().any(|p| p.steps[4][CP] != DrumHit::Off));
+    }
+
+    #[test]
+    fn short_lengths_stay_inside_the_length() {
+        for seed in 0..50 {
+            let t = drum_template(seed, 3);
+            assert_eq!(t.length, 3);
+            assert!(t.steps[3..].iter().flatten().all(|h| *h == DrumHit::Off));
+            for len in [1u8, 3] {
+                let base = DrumPattern {
+                    length: len,
+                    ..DrumPattern::default()
+                };
+                let mut base = base;
+                base.steps[0][BD] = DrumHit::On;
+                let e = evolve_drums(&base, seed);
+                assert!(
+                    e.steps[len as usize..]
+                        .iter()
+                        .flatten()
+                        .all(|h| *h == DrumHit::Off),
+                    "seed {seed} len {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slide_only_dice_clear_accents_after_slides() {
+        let mut base = SynthPattern::default();
+        for s in base.steps.iter_mut() {
+            s.accent = true;
+        }
+        let g = groove_four_on_floor();
+        let mut any_slide = false;
+        for seed in 0..100 {
+            let r = randomise_synth(
+                &base,
+                Dice {
+                    slide: true,
+                    ..Dice::default()
+                },
+                &g,
+                seed,
+            );
+            for i in 0..16 {
+                let after_slide = i > 0 && r.steps[i - 1].slide;
+                any_slide |= r.steps[i].slide;
+                assert_eq!(r.steps[i].accent, !after_slide, "seed {seed} step {i}");
+            }
+        }
+        assert!(any_slide);
+    }
+
+    #[test]
+    fn octave_die_stays_within_one_octave_and_changes_something() {
+        let mut changed = false;
+        for seed in 0..100 {
+            let mut base = SynthPattern::default();
+            for (i, s) in base.steps.iter_mut().enumerate() {
+                s.octave = [-1, 0, 1][i % 3];
+            }
+            let r = randomise_synth(
+                &base,
+                Dice {
+                    octave: true,
+                    ..Dice::default()
+                },
+                &groove_four_on_floor(),
+                seed,
+            );
+            for (a, b) in base.steps.iter().zip(&r.steps).take(16) {
+                assert!((-1..=1).contains(&b.octave), "seed {seed}");
+                changed |= a.octave != b.octave;
+            }
+        }
+        assert!(changed);
+    }
+
+    #[test]
+    fn a_short_groove_wraps_over_a_longer_synth_pattern() {
+        let mut g = DrumPattern {
+            length: 4,
+            ..DrumPattern::default()
+        };
+        g.steps[0][BD] = DrumHit::On;
+        let mut on = [0u32; 16];
+        for seed in 0..300 {
+            let r = randomise_synth(
+                &SynthPattern::default(),
+                Dice {
+                    rest: true,
+                    ..Dice::default()
+                },
+                &g,
+                seed,
+            );
+            for (i, c) in on.iter_mut().enumerate() {
+                if r.steps[i].gate != Gate::Off {
+                    *c += 1;
+                }
+            }
+        }
+        for hit in [0, 4, 8, 12] {
+            for off in [1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
+                assert!(on[hit] > on[off] + 60, "step {hit} vs {off}: {on:?}");
+            }
+        }
+    }
+
     fn groove_four_on_floor() -> DrumPattern {
         let mut g = DrumPattern::default();
         for s in [0, 4, 8, 12] {
@@ -459,7 +637,10 @@ mod tests {
                 seed,
             );
             for w in n.steps[..16].windows(2) {
-                assert!((semis(&w[1]) - semis(&w[0])).abs() <= 12, "seed {seed}");
+                assert!(
+                    (semis(&w[1]) - semis(&w[0])).abs() <= MAX_LEAP,
+                    "seed {seed}"
+                );
             }
         }
     }
