@@ -2866,6 +2866,7 @@ dependencies = [
  "acid-engine",
  "cpal",
  "eframe",
+ "hound",
  "rfd",
  "rtrb",
 ]

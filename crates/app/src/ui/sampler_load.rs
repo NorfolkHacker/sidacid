@@ -140,6 +140,7 @@ impl SidAcidApp {
         self.view.sampler_slot = slot;
     }
 
+    #[allow(dead_code)] // used by the sampler panel (Task 9)
     pub(crate) fn clear_slot(&mut self, slot: usize) {
         if self
             .doc
@@ -161,6 +162,7 @@ impl SidAcidApp {
         }
     }
 
+    #[allow(dead_code)] // used by the sampler panel (Task 9)
     /// Applies `change` to a copy of the slot's meta; refuses zone clashes and malformed metas with a message.
     pub(crate) fn edit_slot_meta(
         &mut self,

@@ -92,6 +92,8 @@ pub enum Edit {
         values: Vec<(ParamId, f32)>,
     },
     /// Changing a loaded slot's zone, slices, mode or markers.
+    #[allow(dead_code)]
+    // constructed by edit_slot_meta once the sampler panel uses it (Task 9)
     SlotMeta {
         slot: usize,
         meta: Box<SlotMeta>,
