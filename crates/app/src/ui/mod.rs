@@ -2,8 +2,10 @@
 //! panels below. The UI owns the project (`Document`); every change goes
 //! to the audio thread as `Command`s through `AudioLink`.
 
+mod alg_diagram;
 mod drum_panel;
 mod files;
+mod fm_panel;
 mod fm_voices;
 mod keys;
 pub mod knob;
@@ -278,13 +280,10 @@ impl SidAcidApp {
             self.drum_panel(ui, kit);
             ui.add_space(6.0);
         }
-        for machine in [
-            acid_engine::machine::MachineId::Fm,
-            acid_engine::machine::MachineId::Sampler,
-        ] {
-            self.note_panel(ui, machine);
-            ui.add_space(6.0);
-        }
+        self.fm_panel(ui);
+        ui.add_space(6.0);
+        self.note_panel(ui, acid_engine::machine::MachineId::Sampler);
+        ui.add_space(6.0);
         self.mixer_panel(ui);
         self.song_panel(ui);
     }
@@ -807,6 +806,19 @@ mod tests {
         app.import_syx_bytes(b"not sysex");
         assert!(app.view.message.as_deref().unwrap_or("").contains("DX7"));
         assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn fm_panel_draws_headless_with_a_bank_and_each_operator() {
+        let mut doc = Document::new(Project::default());
+        doc.project.fm.bank = Some(fm_voices::starter().to_vec());
+        let mut app = SidAcidApp::headless(doc);
+        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        for op in 0..6 {
+            app.view.fm_op = op;
+            run_frames(&mut app, 1);
+        }
+        assert!(app.view.poly_scrolled[0], "the FM roll is still drawn");
     }
 
     #[test]

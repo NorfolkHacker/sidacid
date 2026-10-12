@@ -1,4 +1,3 @@
-#![allow(dead_code)] // used by the FM panel (next task)
 //! Loading FM voices: from the starter bank, an imported DX7 bank, or a
 //! .syx file. A load is one undoable edit.
 

@@ -15,9 +15,14 @@ A ReBirth-style acid groovebox built on a C64 SID-style sound engine. It runs as
   - An 808-flavoured and a 909-flavoured kit: BD, SD, LT, HT, CP, RS, CH and OH.
   - Tune, Decay, Tone and Level per instrument.
   - Closed hat chokes open hat.
-- **FM synth and Sampler slots** with a **polyphonic piano roll**:
-  - Chords, 1/16–1/64 snap, a velocity lane, and click-to-audition keys.
-  - For now each plays a simple sine voice. The 6-operator FM engine and the 16-slot sampler are coming next.
+- **FM synth** in the style of the DX7 / M-VAVE FM-1:
+  - 6 operators, 32 algorithms with a live algorithm diagram, DX7 envelopes, keyboard and velocity scaling.
+  - LFO and pitch EG.
+  - 12-voice poly, or mono with glide.
+  - Filter, chorus and phaser, plus a Vintage switch for 12-bit grit.
+  - A 16-voice starter bank, and **DX7 .syx import** (32-voice banks or single voices).
+- **Sampler slot** (placeholder sine voice for now, the sampler is coming next).
+- Both use a **polyphonic piano roll**: chords, 1/16 to 1/64 snap, a velocity lane, and click-to-audition keys.
 - **Two sequencer views per synth,** swappable at any time over the same pattern:
   - The classic **303 step editor**, with tracker-style step-write.
   - A **piano roll**: click to add, drag to move or stretch, right-click to delete, plus accent and slide lanes.
