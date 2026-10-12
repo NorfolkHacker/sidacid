@@ -1,11 +1,12 @@
 //! Pattern-mode sequencer. Sample-accurate: the engine asks how many
 //! samples until the next tick, renders that many, then calls tick().
-//! Each 16th step has a start tick (notes, drums, param lane) and a mid
-//! tick (gate off unless sliding/tied into the next step).
+//! Each 16th step has four ticks: the start tick (notes, drums, param
+//! lane), the mid tick (gate off unless sliding/tied into the next step),
+//! and on every tick the poly note tracks (FM, Sampler).
 
-use crate::machine::{MACHINES, MachineId};
+use crate::machine::{MACHINES, MachineId, NOTE_MACHINES};
 use crate::params::ParamId;
-use crate::project::{DrumHit, Gate, PatternRef, Song};
+use crate::project::{DrumHit, Gate, PatternRef, Song, TICKS_PER_STEP};
 use crate::song::{Banks, DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,13 +49,20 @@ pub enum SeqEvent {
     AutomationReset {
         id: ParamId,
     },
+    /// A note machine (4 = FM, 5 = Sampler) starts a note.
+    PolyOn {
+        machine: usize,
+        pitch: u8,
+        vel: u8,
+    },
+    PolyOff {
+        machine: usize,
+        pitch: u8,
+    },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
-    StepStart,
-    Mid,
-}
+/// Sequencer ticks per step: the step's quarters.
+const SUBS: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Track {
@@ -69,6 +77,10 @@ struct Track {
     silent: bool,
     /// The bar's synth transpose.
     transpose_add: i8,
+    /// Note tracks: tick position in the pattern.
+    pos: u16,
+    /// Note tracks: pitches sounding now, one bit per MIDI note.
+    held: u128,
 }
 
 pub struct Sequencer {
@@ -77,7 +89,8 @@ pub struct Sequencer {
     swing: f32,
     playing: bool,
     global_step: u64,
-    phase: Phase,
+    /// The quarter of the current step (0 = step start, 2 = mid-step).
+    sub: u8,
     samples_to_next: f64,
     /// Indexed by `MachineId::index`.
     tracks: [Track; MACHINES],
@@ -104,6 +117,22 @@ fn len_of(length: u8) -> usize {
     (length as usize).clamp(1, crate::project::STEPS)
 }
 
+/// Track indices of the note machines (FM, Sampler).
+const NOTE_TRACKS: std::ops::Range<usize> = 4..4 + NOTE_MACHINES;
+
+fn transposed(pitch: u8, add: i8) -> u8 {
+    (pitch as i16 + add as i16).clamp(0, 127) as u8
+}
+
+/// Note-offs for every pitch the track holds.
+fn release_all(t: &mut Track, machine: usize, out: &mut Vec<SeqEvent>) {
+    while t.held != 0 {
+        let pitch = t.held.trailing_zeros() as u8;
+        t.held &= !(1u128 << pitch);
+        out.push(SeqEvent::PolyOff { machine, pitch });
+    }
+}
+
 impl Sequencer {
     pub fn new(sample_rate: f32) -> Self {
         Self {
@@ -112,7 +141,7 @@ impl Sequencer {
             swing: 0.0,
             playing: false,
             global_step: 0,
-            phase: Phase::StepStart,
+            sub: 0,
             samples_to_next: 0.0,
             tracks: [Track::default(); MACHINES],
             mode: Mode::Pattern,
@@ -164,7 +193,7 @@ impl Sequencer {
     pub fn play(&mut self) {
         self.playing = true;
         self.global_step = 0;
-        self.phase = Phase::StepStart;
+        self.sub = 0;
         self.samples_to_next = 0.0;
         self.ended = false;
         if self.mode == Mode::Song {
@@ -180,6 +209,8 @@ impl Sequencer {
             t.lane_override = None;
             t.silent = false;
             t.transpose_add = 0;
+            t.pos = 0;
+            t.held = 0;
             if let Some(q) = t.queued.take() {
                 t.pattern = q;
             }
@@ -197,6 +228,8 @@ impl Sequencer {
             t.lane_override = None;
             t.silent = false;
             t.transpose_add = 0;
+            t.pos = 0;
+            t.held = 0;
         }
         if self.mode == Mode::Song {
             self.restore_chosen();
@@ -261,6 +294,9 @@ impl Sequencer {
                     out.push(SeqEvent::NoteOff { synth: s });
                 }
             }
+            for m in NOTE_TRACKS {
+                release_all(&mut self.tracks[m], m, out);
+            }
             self.stop();
             self.ended = true;
             return false;
@@ -275,6 +311,7 @@ impl Sequencer {
             let bank_len = banks.bank_len(m);
             let t = &mut self.tracks[m];
             t.step = 0;
+            t.pos = 0;
             match bar.patterns[m] {
                 Some(PatternRef(slot)) if (slot as usize) < bank_len => {
                     t.pattern = slot;
@@ -378,9 +415,9 @@ impl Sequencer {
         if !self.playing {
             return;
         }
-        let half = self.step_len(self.global_step) * 0.5;
-        match self.phase {
-            Phase::StepStart => {
+        let quarter = self.step_len(self.global_step) * 0.25;
+        match self.sub {
+            0 => {
                 if self.mode == Mode::Song {
                     if self.resync_pending {
                         self.apply_resync(song, banks);
@@ -488,9 +525,8 @@ impl Sequencer {
                         }
                     }
                 }
-                self.phase = Phase::Mid;
             }
-            Phase::Mid => {
+            2 => {
                 for s in 0..2 {
                     let t = &mut self.tracks[s];
                     if t.silent {
@@ -509,6 +545,9 @@ impl Sequencer {
                     }
                 }
                 for m in 0..MACHINES {
+                    if NOTE_TRACKS.contains(&m) {
+                        continue;
+                    }
                     let len = banks.length(m, self.tracks[m].pattern).unwrap_or(1);
                     let t = &mut self.tracks[m];
                     t.step += 1;
@@ -519,7 +558,6 @@ impl Sequencer {
                         }
                     }
                 }
-                self.global_step += 1;
                 if self.mode == Mode::Song {
                     self.song_step = self.song_step.saturating_add(1);
                     self.bar_step += 1;
@@ -534,10 +572,63 @@ impl Sequencer {
                         }
                     }
                 }
-                self.phase = Phase::StepStart;
+            }
+            _ => {}
+        }
+        self.note_ticks(banks, out);
+        self.sub = (self.sub + 1) % SUBS;
+        if self.sub == 0 {
+            self.global_step += 1;
+        }
+        self.samples_to_next += quarter;
+    }
+
+    /// One tick of each note track: releases, then starts, then advance.
+    fn note_ticks(&mut self, banks: Banks<'_>, out: &mut Vec<SeqEvent>) {
+        for m in NOTE_TRACKS {
+            let t = &mut self.tracks[m];
+            if t.silent {
+                release_all(t, m, out);
+                continue;
+            }
+            let pat = &banks.notes[m - 4][t.pattern as usize];
+            let ticks = pat.ticks();
+            if t.pos >= ticks {
+                t.pos = 0;
+            }
+            if t.pos == 0 {
+                release_all(t, m, out);
+            } else {
+                for n in &pat.notes {
+                    if n.start.saturating_add(n.len).min(ticks) == t.pos {
+                        let pitch = transposed(n.pitch, t.transpose_add);
+                        if t.held & (1u128 << pitch) != 0 {
+                            t.held &= !(1u128 << pitch);
+                            out.push(SeqEvent::PolyOff { machine: m, pitch });
+                        }
+                    }
+                }
+            }
+            for n in &pat.notes {
+                if n.start == t.pos {
+                    let pitch = transposed(n.pitch, t.transpose_add);
+                    t.held |= 1u128 << pitch;
+                    out.push(SeqEvent::PolyOn {
+                        machine: m,
+                        pitch,
+                        vel: n.vel,
+                    });
+                }
+            }
+            t.step = (t.pos / TICKS_PER_STEP) as usize;
+            t.pos += 1;
+            if t.pos >= ticks {
+                t.pos = 0;
+                if let Some(q) = t.queued.take() {
+                    t.pattern = q;
+                }
             }
         }
-        self.samples_to_next += half;
     }
 }
 
@@ -1218,5 +1309,179 @@ mod tests {
         f.run(&mut s, 4 * 5513);
         assert_eq!(s.current_pattern(4), 3, "switched after the 4-step pattern");
         assert_eq!(s.queued_pattern(4), None);
+    }
+
+    use crate::project::Note;
+
+    fn note(start: u16, len: u16, pitch: u8) -> Note {
+        Note {
+            start,
+            len,
+            pitch,
+            vel: 100,
+        }
+    }
+
+    fn poly(ev: &[(usize, SeqEvent)]) -> Vec<(usize, SeqEvent)> {
+        ev.iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::PolyOn { .. } | SeqEvent::PolyOff { .. }))
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn poly_notes_land_on_their_ticks() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(1, 4, 60));
+        let mut s = new_seq();
+        s.play();
+        let ev = poly(&f.run(&mut s, 8000));
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    1379,
+                    SeqEvent::PolyOn {
+                        machine: 4,
+                        pitch: 60,
+                        vel: 100
+                    }
+                ),
+                (
+                    6891,
+                    SeqEvent::PolyOff {
+                        machine: 4,
+                        pitch: 60
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn chords_start_together_on_the_sampler() {
+        let mut f = Fixture::new();
+        for p in [60, 64, 67] {
+            f.notes[1][0].notes.push(note(0, 2, p));
+        }
+        let mut s = new_seq();
+        s.play();
+        let ons: Vec<_> = poly(&f.run(&mut s, 100))
+            .into_iter()
+            .filter(|(pos, e)| *pos == 0 && matches!(e, SeqEvent::PolyOn { machine: 5, .. }))
+            .collect();
+        assert_eq!(ons.len(), 3);
+    }
+
+    #[test]
+    fn notes_are_cut_at_the_loop_end() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(60, 40, 50));
+        let mut s = new_seq();
+        s.play();
+        let ev = poly(&f.run(&mut s, 88_300));
+        assert_eq!(
+            ev.last(),
+            Some(&(
+                88_200,
+                SeqEvent::PolyOff {
+                    machine: 4,
+                    pitch: 50
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn song_mutes_and_transposes_note_tracks() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 4, 60));
+        f.notes[1][0].notes.push(note(0, 4, 60));
+        let mut bar = song_bar([None; 4]);
+        bar.patterns[4] = Some(PatternRef(0));
+        bar.patterns[5] = Some(PatternRef(0));
+        bar.mutes[5] = true;
+        bar.transpose[2] = 3;
+        f.song.bars = vec![bar];
+        let mut s = new_seq();
+        s.set_mode(Mode::Song);
+        s.play();
+        let ev = poly(&f.run(&mut s, 2000));
+        assert_eq!(
+            ev,
+            vec![(
+                0,
+                SeqEvent::PolyOn {
+                    machine: 4,
+                    pitch: 63,
+                    vel: 100
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_song_ending_releases_held_notes() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 64, 60));
+        let mut bar = song_bar([None; 4]);
+        bar.patterns[4] = Some(PatternRef(0));
+        f.song.bars = vec![bar];
+        let mut s = new_seq();
+        s.set_mode(Mode::Song);
+        s.play();
+        let ev = poly(&f.run(&mut s, 90_000));
+        assert_eq!(
+            ev.last(),
+            Some(&(
+                88_200,
+                SeqEvent::PolyOff {
+                    machine: 4,
+                    pitch: 60
+                }
+            ))
+        );
+        assert!(!s.is_playing());
+    }
+
+    #[test]
+    fn a_queued_switch_releases_the_old_patterns_notes() {
+        let mut f = Fixture::new();
+        f.notes[0][0].length = 1;
+        f.notes[0][0].notes.push(note(0, 4, 60));
+        f.notes[0][1].length = 1;
+        f.notes[0][1].notes.push(note(0, 4, 62));
+        let mut s = new_seq();
+        s.play();
+        s.select(4, 1);
+        let ev = poly(&f.run(&mut s, 5600));
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    0,
+                    SeqEvent::PolyOn {
+                        machine: 4,
+                        pitch: 60,
+                        vel: 100
+                    }
+                ),
+                (
+                    5513,
+                    SeqEvent::PolyOff {
+                        machine: 4,
+                        pitch: 60
+                    }
+                ),
+                (
+                    5513,
+                    SeqEvent::PolyOn {
+                        machine: 4,
+                        pitch: 62,
+                        vel: 100
+                    }
+                ),
+            ]
+        );
     }
 }

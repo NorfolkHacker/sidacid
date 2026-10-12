@@ -6,7 +6,7 @@ use crate::drums::{DrumKit, KitKind};
 use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
 use crate::params::{CHANNELS, PARAM_COUNT, ParamId};
-use crate::project::{DrumPattern, NotePattern, PATTERNS, Project, Song, SynthPattern};
+use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
 use crate::song::{Banks, MAX_BARS};
 use crate::synth::BassSynth;
@@ -14,8 +14,9 @@ use crate::synth::BassSynth;
 /// Upper bound on sequencer ticks fired without time advancing; guards
 /// against a sequencer that never moves forward.
 const MAX_TICKS_PER_POSITION: usize = 64;
-/// Sequencer event buffer size: never grows on the audio thread.
-const EVENT_RESERVE: usize = 64 + 2 * PARAM_COUNT;
+/// Sequencer event buffer size: never grows on the audio thread. Room for
+/// every param, plus per note machine 128 releases and MAX_NOTES starts.
+const EVENT_RESERVE: usize = 64 + 2 * PARAM_COUNT + NOTE_MACHINES * (128 + MAX_NOTES);
 
 pub struct Engine {
     sample_rate: f32,
@@ -389,6 +390,7 @@ impl Engine {
                         SeqEvent::ParamRestore { id } => self.restore_param(id),
                         SeqEvent::Automation { id, value } => self.apply_automation(id, value),
                         SeqEvent::AutomationReset { id } => self.reset_automation(id),
+                        SeqEvent::PolyOn { .. } | SeqEvent::PolyOff { .. } => {}
                     }
                 }
                 if self.seq.take_ended() {
