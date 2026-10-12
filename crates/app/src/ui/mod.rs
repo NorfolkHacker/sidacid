@@ -844,7 +844,10 @@ mod tests {
     }
 
     fn test_wav(seconds: f32) -> Vec<u8> {
-        let rate = 22_050;
+        test_wav_at(22_050, seconds)
+    }
+
+    fn test_wav_at(rate: u32, seconds: f32) -> Vec<u8> {
         let mut cur = std::io::Cursor::new(Vec::new());
         let spec = hound::WavSpec {
             channels: 1,
@@ -908,6 +911,22 @@ mod tests {
         app.load_sample_bytes(2, "Bad", Some("wav"), b"junk");
         assert!(app.view.message.is_some());
         assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn a_sample_rate_the_project_cannot_reopen_is_refused() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let before = app.doc.project.clone();
+        app.load_sample_bytes(0, "Low", Some("wav"), &test_wav_at(6_000, 0.5));
+        let msg = app
+            .view
+            .message
+            .clone()
+            .expect("a message explains the refusal");
+        assert!(msg.contains("sample rate"), "{msg}");
+        assert_eq!(app.doc.project, before);
+        let ron = app.doc.project.to_ron();
+        assert!(Project::from_ron(&ron).is_ok(), "the project still reopens");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use super::MAX_SECONDS;
 use std::fmt;
+use std::ops::RangeInclusive;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -30,11 +31,19 @@ impl Decoded {
     }
 }
 
+/// Sample rates a slot accepts (a project holding any other rate would
+/// not reopen).
+pub const SAMPLE_RATES: RangeInclusive<u32> = 8_000..=192_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodeError {
     Unsupported(String),
     Empty,
     TooLong,
+    /// The file's sample rate is outside `SAMPLE_RATES`.
+    SampleRate(u32),
+    /// The sample rate or channel count changes part-way through.
+    FormatChanges,
 }
 
 impl fmt::Display for DecodeError {
@@ -43,6 +52,13 @@ impl fmt::Display for DecodeError {
             DecodeError::Unsupported(e) => write!(f, "the file could not be read as audio ({e})"),
             DecodeError::Empty => f.write_str("the file has no audio"),
             DecodeError::TooLong => write!(f, "the sample is longer than {MAX_SECONDS:.0} seconds"),
+            DecodeError::SampleRate(rate) => write!(
+                f,
+                "the sample rate must be 8–192 kHz (this file is {rate} Hz)"
+            ),
+            DecodeError::FormatChanges => {
+                f.write_str("the sample rate or channel count changes part-way through")
+            }
         }
     }
 }
@@ -79,6 +95,7 @@ pub fn decode(bytes: &[u8], extension: Option<&str>) -> Result<Decoded, DecodeEr
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(unsupported)?;
     let mut channels = 0usize;
+    let mut locked = None;
     let mut samples: Vec<f32> = Vec::new();
     loop {
         let packet = match format.next_packet() {
@@ -93,6 +110,17 @@ pub fn decode(bytes: &[u8], extension: Option<&str>) -> Result<Decoded, DecodeEr
         match decoder.decode(&packet) {
             Ok(audio) => {
                 let spec = *audio.spec();
+                // The first decoded packet fixes the format for the whole file.
+                match locked {
+                    None => {
+                        if !SAMPLE_RATES.contains(&spec.rate) {
+                            return Err(DecodeError::SampleRate(spec.rate));
+                        }
+                        locked = Some(spec);
+                    }
+                    Some(first) if first != spec => return Err(DecodeError::FormatChanges),
+                    Some(_) => {}
+                }
                 sample_rate = spec.rate;
                 let ch = spec.channels.count();
                 let mut buf = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
@@ -174,5 +202,20 @@ mod tests {
             Err(DecodeError::TooLong)
         );
         assert!(!DecodeError::TooLong.to_string().is_empty());
+    }
+
+    #[test]
+    fn refuses_sample_rates_outside_8_to_192_khz() {
+        assert_eq!(
+            decode(&wav(1, 6_000, 600), Some("wav")),
+            Err(DecodeError::SampleRate(6_000))
+        );
+        assert_eq!(
+            decode(&wav(2, 200_000, 2_000), Some("wav")),
+            Err(DecodeError::SampleRate(200_000))
+        );
+        assert!(DecodeError::SampleRate(6_000).to_string().contains("8"));
+        assert!(decode(&wav(1, 8_000, 800), Some("wav")).is_ok());
+        assert!(decode(&wav(1, 192_000, 800), Some("wav")).is_ok());
     }
 }

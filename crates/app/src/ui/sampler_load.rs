@@ -115,6 +115,12 @@ impl SidAcidApp {
             &decoded.samples,
             meta,
         );
+        // Backstop: never put a slot in the project that would stop it reopening.
+        if !data.is_valid() {
+            self.view.message =
+                Some("Could not load the sample: its format is not supported.".into());
+            return;
+        }
         let values = SlotParam::ALL
             .iter()
             .map(|&p| {
