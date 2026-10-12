@@ -55,7 +55,7 @@ pub struct Status {
     pub playhead: [usize; 4],
     pub patterns: [u8; 4],
     pub queued: [Option<u8>; 4],
-    /// Peaks since the previous status: channels 0..4, then master.
+    /// Peaks since the previous status: channels 0..CHANNELS, then master.
     pub meters: [f32; CHANNELS + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,

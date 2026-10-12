@@ -1,4 +1,4 @@
-//! Four channel strips (distortion -> compressor -> level/pan/mute/solo,
+//! Six channel strips (distortion -> compressor -> level/pan/mute/solo,
 //! post-fader delay and reverb sends), send returns, master compressor,
 //! master level, optional lo-fi, final clip and NaN guard.
 
@@ -116,7 +116,7 @@ impl Mixer {
         self.delay.set_bpm(bpm);
     }
 
-    /// Peak levels since the last call: channels 0..4 post-fader, then
+    /// Peak levels since the last call: channels 0..CHANNELS post-fader, then
     /// the master after the final clip. Resets them.
     pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
         std::mem::take(&mut self.meters)
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn output_is_clipped_and_finite() {
         let mut m = quiet_mixer();
-        for c in 0..4 {
+        for c in 0..CHANNELS as u8 {
             m.set_param(ParamId::Channel(c, ChannelParam::Level), 1.0);
         }
         let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
