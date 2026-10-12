@@ -6,7 +6,7 @@
 
 use crate::machine::{FIRST_NOTE_MACHINE, MACHINES, MachineId, NOTE_MACHINES};
 use crate::params::ParamId;
-use crate::project::{DrumHit, Gate, PatternRef, Song, TICKS_PER_STEP};
+use crate::project::{DrumHit, Gate, PatternRef, Song, TICKS_PER_STEP, steps_of};
 use crate::song::{Banks, DEFAULT_BAR_STEPS, bar_start_step, bar_steps, value_at};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,6 +72,9 @@ struct Track {
     gate_open: bool,
     prev_slide: bool,
     /// Param whose lane value is overriding the knob on the current step.
+    /// Each synth track keeps its own: if both lane the same shared param
+    /// (only possible from a hand-made file), the later track's write wins
+    /// within a step, and its restore can undo the earlier track's value.
     lane_override: Option<ParamId>,
     /// The machine plays nothing this bar.
     silent: bool,
@@ -111,10 +114,6 @@ pub struct Sequencer {
     /// playback (which overrides the tracks' patterns) is left.
     chosen: [u8; MACHINES],
     ended: bool,
-}
-
-fn len_of(length: u8) -> usize {
-    (length as usize).clamp(1, crate::project::STEPS)
 }
 
 /// Track indices of the note machines (FM, Sampler).
@@ -442,7 +441,7 @@ impl Sequencer {
                         continue;
                     }
                     let pat = &banks.synths[s][t.pattern as usize];
-                    if t.step >= len_of(pat.length) {
+                    if t.step >= steps_of(pat.length) {
                         t.step = 0;
                     }
                     let step = pat.steps[t.step];
@@ -506,7 +505,7 @@ impl Sequencer {
                         continue;
                     }
                     let pat = &banks.drums[k][t.pattern as usize];
-                    if t.step >= len_of(pat.length) {
+                    if t.step >= steps_of(pat.length) {
                         t.step = 0;
                     }
                     for (inst, hit) in pat.steps[t.step].iter().enumerate() {
@@ -533,7 +532,7 @@ impl Sequencer {
                         continue;
                     }
                     let pat = &banks.synths[s][t.pattern as usize];
-                    let len = len_of(pat.length);
+                    let len = steps_of(pat.length);
                     if t.gate_open {
                         let step = pat.steps[t.step];
                         let next = pat.steps[(t.step + 1) % len];
@@ -1008,6 +1007,91 @@ mod tests {
                 (0, SeqEvent::Param { id, value: 0.8 }),
                 (5513, SeqEvent::ParamRestore { id })
             ]
+        );
+    }
+
+    #[test]
+    fn lane_param_change_restores_the_old_param() {
+        use crate::params::{ParamId, SynthParam};
+        use crate::project::ParamLane;
+        let mut f = Fixture::new();
+        let cutoff = ParamId::Synth(0, SynthParam::Cutoff);
+        let reso = ParamId::Synth(0, SynthParam::Resonance);
+        f.synths[0][0].param_lane = Some(ParamLane {
+            param: cutoff,
+            values: vec![Some(0.8); 64],
+        });
+        let mut values = vec![None; 64];
+        values[0] = Some(0.3);
+        f.synths[0][1].param_lane = Some(ParamLane {
+            param: reso,
+            values,
+        });
+        let mut s = new_seq();
+        s.play();
+        f.run(&mut s, 10);
+        s.select(0, 1);
+        // Positions restart at this run (10 samples in): step 15 lands at
+        // ~82_680, the switch to B (step 16) at ~88_190.
+        let ev = f.run(&mut s, 16 * 5513);
+        assert!(ev.contains(&(
+            82_678,
+            SeqEvent::Param {
+                id: cutoff,
+                value: 0.8
+            }
+        )));
+        let boundary: Vec<SeqEvent> = ev
+            .iter()
+            .filter(|(pos, _)| *pos > 85_000)
+            .map(|(_, e)| *e)
+            .collect();
+        assert_eq!(
+            boundary,
+            vec![
+                SeqEvent::ParamRestore { id: cutoff },
+                SeqEvent::Param {
+                    id: reso,
+                    value: 0.3
+                },
+            ],
+            "pattern B's lane replaces A's: the old param comes back first"
+        );
+    }
+
+    #[test]
+    fn both_synths_laning_one_param_is_last_writer_wins() {
+        use crate::params::{FxParam, ParamId};
+        use crate::project::ParamLane;
+        let mut f = Fixture::new();
+        let id = ParamId::Fx(FxParam::DelayFeedback);
+        f.synths[0][0].param_lane = Some(ParamLane {
+            param: id,
+            values: vec![Some(0.2); 64],
+        });
+        let mut values = vec![None; 64];
+        values[0] = Some(0.9);
+        f.synths[1][0].param_lane = Some(ParamLane { param: id, values });
+        let mut s = new_seq();
+        s.play();
+        let ev = f.run(&mut s, 6000);
+        let at =
+            |p: usize| -> Vec<SeqEvent> { ev.iter().filter(|e| e.0 == p).map(|e| e.1).collect() };
+        assert_eq!(
+            at(0),
+            vec![
+                SeqEvent::Param { id, value: 0.2 },
+                SeqEvent::Param { id, value: 0.9 },
+            ],
+            "step 0: synth 2's value is written last"
+        );
+        assert_eq!(
+            at(5513),
+            vec![
+                SeqEvent::Param { id, value: 0.2 },
+                SeqEvent::ParamRestore { id },
+            ],
+            "step 1: synth 2's restore comes after synth 1's value and wins"
         );
     }
 

@@ -155,6 +155,26 @@ impl FmSynth {
         }
     }
 
+    /// Releases the pattern's notes; auditioned (live) notes keep sounding.
+    /// Mono mode shares one key stack between both sources: a sounding
+    /// audition note stays and the keys under it are forgotten, otherwise
+    /// everything is released.
+    pub fn pattern_off(&mut self) {
+        if self.patch.mono {
+            let v = &self.voices[0];
+            if v.active && v.held && v.live {
+                self.stack[0] = v.pitch;
+                self.stack_len = 1;
+            } else {
+                self.all_off();
+            }
+            return;
+        }
+        for v in self.voices.iter_mut().filter(|v| !v.live) {
+            v.release();
+        }
+    }
+
     /// Silences everything now.
     pub fn reset(&mut self) {
         self.stack_len = 0;

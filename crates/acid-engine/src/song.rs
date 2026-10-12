@@ -4,8 +4,8 @@
 use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
-    SynthPattern,
+    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, Song, SynthPattern,
+    steps_of,
 };
 use std::collections::BTreeMap;
 
@@ -59,7 +59,7 @@ impl<'a> Banks<'a> {
             MachineKind::Drum(i) => self.drums[i].get(s)?.length,
             MachineKind::Notes(i) => self.notes[i].get(s)?.length,
         };
-        Some((length as usize).clamp(1, STEPS))
+        Some(steps_of(length))
     }
 }
 

@@ -213,6 +213,9 @@ impl SidAcidApp {
                 if status.guard_fired {
                     self.view.fault_until = now + 3.0;
                 }
+                // UI edits are bounded and loaded songs validated, so a
+                // refused song means the UI and engine disagree: a bug.
+                debug_assert!(!status.song_rejected, "the engine refused a song");
                 self.status = status;
                 self.view.auto_retried = false;
             }

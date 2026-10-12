@@ -2,7 +2,7 @@
 //! always gives the same pattern, so tests are deterministic.
 
 use crate::drums::{BD, CH, CP, OH, SD};
-use crate::project::{DrumHit, DrumPattern, Gate, STEPS, SynthPattern};
+use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, steps_of};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 
@@ -54,13 +54,9 @@ fn degree_to_semitone(scale: &[i32], degree: i32) -> i32 {
     scale[degree.rem_euclid(n) as usize] + 12 * degree.div_euclid(n)
 }
 
-fn length_of(len: u8) -> usize {
-    (len as usize).clamp(1, STEPS)
-}
-
 /// Steps where the paired drum pattern has a kick or snare.
 fn groove_hits(groove: &DrumPattern, len: usize) -> Vec<bool> {
-    let glen = length_of(groove.length);
+    let glen = steps_of(groove.length);
     (0..len)
         .map(|i| {
             let step = groove.steps[i % glen];
@@ -77,7 +73,7 @@ pub fn randomise_synth(
 ) -> SynthPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
     let mut out = p.clone();
-    let len = length_of(p.length);
+    let len = steps_of(p.length);
     let hits = groove_hits(groove, len);
     if dice.rest {
         for i in 0..len {
@@ -217,7 +213,7 @@ fn random_hit(rng: &mut Pcg32, p: &DrumPattern, len: usize) -> Option<(usize, us
 
 pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
-    let len = length_of(length);
+    let len = steps_of(length);
     let mut p = DrumPattern {
         length: len as u8,
         ..DrumPattern::default()
@@ -255,7 +251,7 @@ pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
 pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
     let mut out = p.clone();
-    let len = length_of(p.length);
+    let len = steps_of(p.length);
     let step_weights: Vec<f32> = (0..len)
         .map(|i| STEP_WEIGHTS[i % STEP_WEIGHTS.len()])
         .collect();

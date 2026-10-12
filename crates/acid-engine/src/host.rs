@@ -83,6 +83,7 @@ pub struct Status {
     pub patterns: [u8; MACHINES],
     pub queued: [Option<u8>; MACHINES],
     /// Peaks since the previous status: channels 0..CHANNELS, then master.
+    /// Muted (or soloed-out) channels read 0.
     pub meters: [f32; CHANNELS + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
@@ -91,6 +92,9 @@ pub struct Status {
     pub song_bar: u16,
     /// Global song step (song mode).
     pub song_step: u32,
+    /// A `Command::Song` was refused (an invalid song) since the previous
+    /// status; the engine kept its old song.
+    pub song_rejected: bool,
 }
 
 pub enum Event {
@@ -112,11 +116,17 @@ pub struct EngineHost {
     since_status: usize,
     meters: [f32; CHANNELS + 1],
     guard_fired: bool,
+    song_rejected: bool,
     cpu: f32,
 }
 
 /// Wires an engine to a fresh pair of rings. Call on the UI thread; move
 /// the `EngineHost` into the audio callback.
+///
+/// Drain the `Consumer<Event>` regularly (every UI frame): statuses and
+/// disposals share it. While it is stalled, statuses stop once only the
+/// last `DISPOSAL_RESERVE` slots are free, keeping those for disposals;
+/// boxes beyond that are leaked rather than freed on the audio thread.
 pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event>) {
     let (command_tx, command_rx) = RingBuffer::new(COMMAND_CAPACITY);
     let (event_tx, event_rx) = RingBuffer::new(EVENT_CAPACITY);
@@ -129,6 +139,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         since_status: 0,
         meters: [0.0; CHANNELS + 1],
         guard_fired: false,
+        song_rejected: false,
         cpu: 0.0,
     };
     (host, command_tx, event_rx)
@@ -157,7 +168,9 @@ impl EngineHost {
         self.guard_fired |= self.engine.take_guard_fired();
         self.since_status += out_l.len();
         if self.since_status >= self.status_every {
-            self.since_status = 0;
+            // Keep the remainder so the rate averages STATUS_RATE_HZ at any
+            // block size; capped so one huge block cannot burst statuses.
+            self.since_status = (self.since_status - self.status_every).min(self.status_every);
             self.send_status();
         }
     }
@@ -211,10 +224,15 @@ impl EngineHost {
                 Command::ReplaceEngine(mut engine) => {
                     std::mem::swap(&mut self.engine, &mut engine);
                     self.dispose(Event::DisposeEngine(engine));
+                    // Nothing from the old engine carries over to the new one.
+                    self.meters = [0.0; CHANNELS + 1];
+                    self.guard_fired = false;
+                    self.song_rejected = false;
+                    self.since_status = 0;
                 }
                 Command::SetMode(mode) => self.engine.set_mode(mode),
                 Command::Song(mut song) => {
-                    self.engine.swap_song(&mut song);
+                    self.song_rejected |= !self.engine.swap_song(&mut song);
                     self.dispose(Event::DisposeSong(song));
                 }
                 Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
@@ -252,11 +270,13 @@ impl EngineHost {
             mode: self.engine.mode(),
             song_bar: self.engine.song_bar().min(u16::MAX as usize) as u16,
             song_step: self.engine.song_step(),
+            song_rejected: self.song_rejected,
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
             self.meters = [0.0; CHANNELS + 1];
             self.guard_fired = false;
+            self.song_rejected = false;
         }
     }
 }
@@ -364,7 +384,9 @@ mod tests {
                 statuses.push(s);
             }
         }
-        assert!((40..=61).contains(&statuses.len()), "{}", statuses.len());
+        // 512-sample blocks do not divide the 735-sample cadence: the
+        // remainder carries over, so the rate averages 60 Hz.
+        assert!((58..=61).contains(&statuses.len()), "{}", statuses.len());
         let last = statuses.last().unwrap();
         assert!(last.playing);
         assert!(last.meters[CHANNELS] > 0.0);
@@ -440,5 +462,97 @@ mod tests {
         assert_eq!(status.mode, crate::sequencer::Mode::Song);
         assert_eq!(status.song_bar, 2);
         assert_eq!(status.song_step, 32);
+    }
+
+    fn last_status(rx: &mut rtrb::Consumer<Event>) -> Option<Status> {
+        std::iter::from_fn(|| rx.pop().ok())
+            .filter_map(|e| match e {
+                Event::Status(s) => Some(s),
+                _ => None,
+            })
+            .last()
+    }
+
+    #[test]
+    fn replace_engine_clears_host_state() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        host.guard_fired = true;
+        host.meters = [1.0; CHANNELS + 1];
+        host.since_status = host.status_every - 1;
+        tx.push(Command::ReplaceEngine(Box::new(Engine::new(SR))))
+            .unwrap();
+        run(&mut host, 512);
+        assert!(
+            last_status(&mut rx).is_none(),
+            "the status clock restarts with the new engine"
+        );
+        run(&mut host, SR as usize / 30);
+        let first = std::iter::from_fn(|| rx.pop().ok())
+            .find_map(|e| match e {
+                Event::Status(s) => Some(s),
+                _ => None,
+            })
+            .expect("a status");
+        assert!(!first.guard_fired, "no stale fault for the new project");
+        assert!(first.meters.iter().all(|m| *m == 0.0), "{first:?}");
+    }
+
+    #[test]
+    fn set_param_live_reaches_the_engine() {
+        let (mut host, mut tx, _rx) = host_with_demo();
+        let id = ParamId::Master(crate::params::MasterParam::Level);
+        tx.push(Command::SetParamLive(id, 0.3)).unwrap();
+        run(&mut host, 512);
+        assert_eq!(host.engine().live_param(id), 0.3);
+    }
+
+    #[test]
+    fn touch_holds_a_param_against_automation_until_released() {
+        let id = ParamId::Master(crate::params::MasterParam::Level);
+        let mut p = crate::demo::demo_project();
+        let bar = crate::project::Bar {
+            patterns: [Some(crate::project::PatternRef(0)); MACHINES],
+            ..Default::default()
+        };
+        p.song.bars = vec![bar, bar];
+        crate::song::write_automation(&mut p.song, id, 0, 31, 0.8);
+        let (mut host, mut tx, _rx) = channel(Engine::from_project(SR, &p));
+        tx.push(Command::SetMode(Mode::Song)).unwrap();
+        tx.push(Command::Touch(id, true)).unwrap();
+        tx.push(Command::SetParamLive(id, 0.3)).unwrap();
+        tx.push(Command::Play).unwrap();
+        run(&mut host, SR as usize / 4);
+        assert_eq!(
+            host.engine().live_param(id),
+            0.3,
+            "held: automation skipped"
+        );
+        tx.push(Command::Touch(id, false)).unwrap();
+        run(&mut host, SR as usize / 4);
+        assert_eq!(
+            host.engine().live_param(id),
+            0.8,
+            "released: follows automation"
+        );
+    }
+
+    #[test]
+    fn a_rejected_song_is_reported_once() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let song = crate::project::Song {
+            bars: vec![crate::project::Bar::default(); crate::song::MAX_BARS + 1],
+            ..Default::default()
+        };
+        tx.push(Command::Song(Box::new(song))).unwrap();
+        run(&mut host, SR as usize / 10);
+        let rejected: Vec<bool> = std::iter::from_fn(|| rx.pop().ok())
+            .filter_map(|e| match e {
+                Event::Status(s) => Some(s.song_rejected),
+                _ => None,
+            })
+            .collect();
+        assert!(rejected.len() > 1, "{rejected:?}");
+        assert!(rejected[0], "the next status reports the refusal");
+        assert!(!rejected[1..].iter().any(|r| *r), "only once: {rejected:?}");
     }
 }

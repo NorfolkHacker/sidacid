@@ -117,7 +117,8 @@ impl Mixer {
     }
 
     /// Peak levels since the last call: channels 0..CHANNELS post-fader, then
-    /// the master after the final clip. Resets them.
+    /// the master after the final clip. Resets them. Muted (or soloed-out)
+    /// channels read 0.
     pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
         std::mem::take(&mut self.meters)
     }

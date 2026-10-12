@@ -49,6 +49,9 @@ pub struct Engine {
     ids: Vec<ParamId>,
     guard_fired: bool,
     song: crate::project::Song,
+    /// The song ended by itself and no transport command came since: the
+    /// next `stop` counts as the first one (it only releases).
+    ended_by_song: bool,
 }
 
 impl Engine {
@@ -83,6 +86,7 @@ impl Engine {
             ids: ParamId::all(),
             guard_fired: false,
             song: crate::project::Song::default(),
+            ended_by_song: false,
         }
     }
 
@@ -181,11 +185,14 @@ impl Engine {
         self.seq.set_swing(swing);
     }
 
+    /// Starts (or restarts) the transport. Pattern notes still sounding
+    /// are released; auditioned notes keep sounding.
     pub fn play(&mut self) {
+        self.ended_by_song = false;
         self.seq.play();
         // The sequencer drops its held-note masks without emitting releases.
-        self.fm.all_off();
-        self.sampler.all_off();
+        self.fm.pattern_off();
+        self.sampler.pattern_off();
     }
 
     /// Audition: starts a note on note machine `machine` (4 = FM,
@@ -219,25 +226,30 @@ impl Engine {
         }
     }
 
-    /// Stops the transport and releases every note (tails ring out).
-    /// Stopping while already stopped also silences the FM machine at
-    /// once, so drones (a released note held at a non-zero L4) can be cut.
+    /// Stops the transport and releases the pattern's notes (tails ring
+    /// out; auditioned notes keep sounding). Stopping while already stopped
+    /// also silences the FM and Sampler machines at once, auditions
+    /// included, so drones and loops can be cut. The first stop after a
+    /// song ends by itself still only releases: the song end is not a stop.
     pub fn stop(&mut self) {
-        if !self.seq.is_playing() {
+        let cut = !self.seq.is_playing() && !self.ended_by_song;
+        self.ended_by_song = false;
+        if cut {
             self.fm.reset();
             self.sampler.reset();
         }
         self.end_playback();
     }
 
-    /// Stops the transport and releases every note.
+    /// Stops the transport, closes the bass synths' gates and releases the
+    /// note machines' pattern notes (auditions keep sounding).
     fn end_playback(&mut self) {
         self.seq.stop();
         for s in &mut self.synths {
             s.note_off();
         }
-        self.fm.all_off();
-        self.sampler.all_off();
+        self.fm.pattern_off();
+        self.sampler.pattern_off();
         self.base.copy_from_slice(&self.knobs);
         self.touched.fill(false);
         self.restore_all_knobs();
@@ -317,6 +329,12 @@ impl Engine {
 
     pub fn song_step(&self) -> u32 {
         self.seq.song_step()
+    }
+
+    /// The value a param currently plays at (knob, automation or live).
+    #[cfg(test)]
+    pub(crate) fn live_param(&self, id: ParamId) -> f32 {
+        id.index().map_or(0.0, |i| self.base[i])
     }
 
     pub fn is_playing(&self) -> bool {
@@ -487,6 +505,7 @@ impl Engine {
                 }
                 if self.seq.take_ended() {
                     self.end_playback();
+                    self.ended_by_song = true;
                 }
                 continue;
             }
@@ -1271,7 +1290,10 @@ mod tests {
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
-        assert_eq!(peak(&l), 0.0, "OP1 (the only carrier heard) is at level 0");
+        assert!(
+            peak(&l) < 1e-6,
+            "OP1 (the only carrier heard) is at level 0"
+        );
     }
 
     #[test]
@@ -1294,5 +1316,148 @@ mod tests {
         let (la, _) = render(&mut a, 0.3);
         let (lb, _) = render(&mut b, 0.3);
         assert_ne!(la, lb);
+    }
+
+    /// The tail of a render: the last ~45 ms.
+    fn tail(l: &[f32]) -> f32 {
+        peak(&l[l.len() - 2000..])
+    }
+
+    #[test]
+    fn play_and_stop_keep_auditions_sounding() {
+        for machine in [4, 5] {
+            let mut e = Engine::from_project(SR, &tone_slot_project());
+            e.note_on(machine, 60, 100);
+            render(&mut e, 0.05);
+            e.play();
+            let (l, _) = render(&mut e, 0.3);
+            assert!(tail(&l) > 0.01, "machine {machine}: audition survives play");
+            e.stop();
+            let (l, _) = render(&mut e, 0.3);
+            assert!(tail(&l) > 0.01, "machine {machine}: audition survives stop");
+            e.note_off(machine, 60);
+            render(&mut e, 0.5);
+            let (l, _) = render(&mut e, 0.05);
+            assert!(
+                peak(&l) < 1e-4,
+                "machine {machine}: its own release ends it"
+            );
+        }
+    }
+
+    #[test]
+    fn play_and_stop_release_pattern_notes_under_an_audition() {
+        let mut e = Engine::from_project(SR, &tone_slot_project());
+        for machine in [4, 5] {
+            e.note_on(machine, 72, 100);
+            e.poly_on(machine, 60, 100, false);
+        }
+        e.play();
+        assert_eq!(e.fm.sounding(), vec![72], "play released the pattern note");
+        e.poly_on(4, 60, 100, false);
+        e.stop();
+        assert_eq!(e.fm.sounding(), vec![72], "stop released the pattern note");
+        assert_eq!(e.sampler.held_keys(), vec![72]);
+    }
+
+    #[test]
+    fn fm_mono_play_keeps_the_audition_and_forgets_pattern_keys() {
+        let mut p = tone_slot_project();
+        p.params
+            .insert(ParamId::Fm(crate::params::FmParam::Mono), 1.0);
+        let mut e = Engine::from_project(SR, &p);
+        e.poly_on(4, 48, 100, false);
+        e.note_on(4, 72, 100);
+        e.play();
+        assert_eq!(e.fm.sounding(), vec![72], "the audition keeps sounding");
+        e.note_off(4, 72);
+        assert!(
+            e.fm.sounding().is_empty(),
+            "no glide back to a pattern key the sequencer forgot"
+        );
+    }
+
+    /// A one-bar song: an FM drone (OP1 L4 at full, so released notes
+    /// keep sounding) and nothing else.
+    fn fm_drone_song() -> Project {
+        use crate::params::OpParam;
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.params.insert(ParamId::FmOp(0, OpParam::L4), 1.0);
+        p.fm.patterns[0].notes.push(Note {
+            start: 0,
+            len: 8,
+            pitch: 60,
+            vel: 120,
+        });
+        let mut bar = crate::project::Bar::default();
+        bar.patterns[MachineId::Fm.index()] = Some(crate::project::PatternRef(0));
+        p.song.bars = vec![bar];
+        p
+    }
+
+    #[test]
+    fn the_first_stop_after_a_song_ends_only_releases() {
+        let mut e = Engine::from_project(SR, &fm_drone_song());
+        e.set_mode(Mode::Song);
+        e.play();
+        render(&mut e, 3.0);
+        assert!(!e.is_playing(), "precondition: the song ended by itself");
+        e.stop();
+        let (l, _) = render(&mut e, 0.2);
+        assert!(tail(&l) > 0.01, "the first stop lets the tail ring");
+        e.stop();
+        let (l, _) = render(&mut e, 0.05);
+        assert_eq!(peak(&l), 0.0, "a second stop cuts it");
+    }
+
+    #[test]
+    fn a_stop_after_replaying_a_finished_song_is_a_plain_stop() {
+        let mut e = Engine::from_project(SR, &fm_drone_song());
+        e.set_mode(Mode::Song);
+        e.play();
+        render(&mut e, 3.0);
+        e.play();
+        render(&mut e, 0.2);
+        e.stop();
+        e.stop();
+        let (l, _) = render(&mut e, 0.05);
+        assert_eq!(peak(&l), 0.0, "stop-twice still cuts after a replay");
+    }
+
+    #[test]
+    fn audition_release_leaves_the_pattern_note_of_that_pitch() {
+        let mut e = Engine::from_project(SR, &tone_slot_project());
+        for machine in [4, 5] {
+            e.poly_on(machine, 60, 100, false);
+            e.note_on(machine, 60, 100);
+            e.note_off(machine, 60);
+        }
+        assert_eq!(e.fm.sounding(), vec![60], "the pattern voice is held");
+        assert_eq!(e.fm.active_voices(), 2, "the audition voice is releasing");
+        assert_eq!(e.sampler.held_keys(), vec![60]);
+        let (l, _) = render(&mut e, 0.5);
+        assert!(tail(&l) > 0.01, "the pattern notes still sound");
+    }
+
+    #[test]
+    fn double_note_on_of_a_pitch_releases_both_on_one_off() {
+        let mut e = Engine::from_project(SR, &tone_slot_project());
+        for machine in [4, 5] {
+            e.poly_on(machine, 60, 100, false);
+            e.poly_on(machine, 60, 100, false);
+        }
+        assert_eq!(e.fm.sounding(), vec![60, 60]);
+        assert_eq!(e.sampler.held_keys(), vec![60, 60]);
+        for machine in [4, 5] {
+            e.poly_off(machine, 60, false);
+        }
+        assert!(e.fm.sounding().is_empty(), "one PolyOff releases both");
+        assert!(
+            e.sampler.held_keys().is_empty(),
+            "one PolyOff releases both"
+        );
+        render(&mut e, 1.0);
+        assert_eq!(e.fm.active_voices() + e.sampler.active_voices(), 0);
     }
 }

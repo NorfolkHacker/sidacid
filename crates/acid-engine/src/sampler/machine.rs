@@ -169,6 +169,14 @@ impl Sampler {
         }
     }
 
+    /// Releases the pattern's notes; auditioned (live) notes keep sounding.
+    pub fn pattern_off(&mut self) {
+        for v in self.voices.iter_mut().filter(|v| !v.live) {
+            let release = self.settings[v.slot].release_s;
+            v.release(release);
+        }
+    }
+
     pub fn reset(&mut self) {
         for v in &mut self.voices {
             v.kill();
@@ -179,6 +187,16 @@ impl Sampler {
 
     pub fn active_voices(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
+    }
+
+    /// Keys of the voices still held (not released), in voice order.
+    #[cfg(test)]
+    pub(crate) fn held_keys(&self) -> Vec<u8> {
+        self.voices
+            .iter()
+            .filter(|v| v.active && v.held)
+            .map(|v| v.key)
+            .collect()
     }
 
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {

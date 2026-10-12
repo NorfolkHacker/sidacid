@@ -11,6 +11,12 @@ use std::path::Path;
 
 pub const PROJECT_VERSION: u32 = 2;
 pub const STEPS: usize = 64;
+
+/// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
+/// validated on load and swap, but the fields are pub: this stays defensive.
+pub fn steps_of(length: u8) -> usize {
+    (length as usize).clamp(1, STEPS)
+}
 pub const PATTERNS: usize = 128;
 pub const BANK_SIZE: usize = 16;
 /// MIDI note of step note 0 at octave 0 (C2).
@@ -129,9 +135,11 @@ pub struct NotePattern {
 }
 
 impl NotePattern {
-    /// Pattern length in ticks.
+    /// Pattern length in ticks. The clamp is defensive (the fields are
+    /// pub, so a value may skip `is_well_formed`); never a panic here: this
+    /// runs on the audio thread.
     pub fn ticks(&self) -> u16 {
-        (self.length as u16).clamp(1, STEPS as u16) * TICKS_PER_STEP
+        steps_of(self.length) as u16 * TICKS_PER_STEP
     }
 
     pub fn is_well_formed(&self) -> bool {
