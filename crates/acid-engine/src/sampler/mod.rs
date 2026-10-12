@@ -6,7 +6,9 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod sample;
+pub mod settings;
 pub mod slot;
+pub mod voice;
 
 /// Sample slots.
 pub const SLOTS: usize = crate::params::SAMPLER_SLOTS;
