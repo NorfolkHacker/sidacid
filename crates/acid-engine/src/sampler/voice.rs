@@ -11,6 +11,8 @@ use sid_core::Svf;
 const END_FADE_S: f32 = 0.003;
 /// Release used when a newer note in the same slot chokes this one.
 const CHOKE_S: f32 = 0.005;
+/// Slowest playback rate (keeps a voice from stalling).
+const MIN_RATE: f64 = 1e-6;
 /// Loop crossfade length.
 const LOOP_XFADE_S: f64 = 0.010;
 /// Envelope level at which a releasing voice stops.
@@ -76,7 +78,7 @@ pub fn segment(
         end: end as f64,
         reverse: s.reverse,
         looping,
-        rate,
+        rate: rate.max(MIN_RATE),
     })
 }
 
@@ -228,7 +230,13 @@ impl Voice {
                         self.stage = Stage::Decay;
                     }
                 }
-                Stage::Decay => self.env = s.sustain + (self.env - s.sustain) * decay_coef,
+                Stage::Decay => {
+                    self.env = s.sustain + (self.env - s.sustain) * decay_coef;
+                    if s.sustain <= 0.0 && self.env < SILENT {
+                        self.kill();
+                        return;
+                    }
+                }
                 Stage::Release => {
                     self.env *= self.release_coef;
                     if self.env < SILENT {
@@ -257,7 +265,8 @@ impl Voice {
             let edge = if self.looping {
                 1.0
             } else {
-                ((((self.pos - self.end).abs() / self.step.abs()) as f32) / end_fade).min(1.0)
+                ((((self.pos - self.end).abs() / self.step.abs().max(MIN_RATE)) as f32) / end_fade)
+                    .min(1.0)
             };
             if filter_on {
                 l = self.filter[0].process(l);
@@ -268,7 +277,7 @@ impl Voice {
             out_r[i] += r * g * s.pan_r;
             self.pos += self.step;
             if self.looping && self.pos >= self.loop_end {
-                self.pos -= loop_len;
+                self.pos = self.loop_start + (self.pos - self.loop_start).rem_euclid(loop_len);
             }
         }
     }
@@ -468,6 +477,69 @@ mod tests {
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0f32, f32::max);
         assert!(max_step < 0.1, "no jumps at the loop point: {max_step}");
+    }
+
+    #[test]
+    fn a_loop_shorter_than_the_step_keeps_looping() {
+        let sample = sine_sample(8000);
+        let s = SlotSettings::default();
+        for rate in [4.0, 7.3] {
+            let seg = Segment {
+                start: 0.0,
+                end: 8000.0,
+                reverse: false,
+                looping: Some((2000.0, 2002.0)),
+                rate,
+            };
+            let mut v = Voice::new(SR);
+            v.start(&seg, &s, 0, 60, 127, false, 1);
+            let out = run(&mut v, &sample, &s, 2000);
+            assert!(v.active, "rate {rate}");
+            assert!(
+                (2000.0..2002.0).contains(&v.pos),
+                "rate {rate}: pos {} left the loop",
+                v.pos
+            );
+            // at an integer rate the loop revisits a single frame
+            if rate != 4.0 {
+                let tail = &out[1900..];
+                assert!(
+                    tail.iter().any(|x| (x - tail[0]).abs() > 1e-4),
+                    "rate {rate}: output is constant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_sustain_decay_frees_the_voice() {
+        let sample = sine_sample(48_000);
+        let mut s = SlotSettings::default();
+        s.set(SlotParam::Sustain, 0.0);
+        s.set(SlotParam::Decay, 0.0);
+        let seg = Segment {
+            start: 0.0,
+            end: 48_000.0,
+            reverse: false,
+            looping: None,
+            rate: 1.0,
+        };
+        let mut v = Voice::new(SR);
+        v.start(&seg, &s, 0, 36, 127, false, 1);
+        run(&mut v, &sample, &s, 10);
+        assert!(v.active && v.held);
+        run(&mut v, &sample, &s, 40_000);
+        assert!(!v.active, "silent forever, so freed");
+    }
+
+    #[test]
+    fn a_zero_bpm_tempo_lock_cannot_stall_a_voice() {
+        let play = SlotPlay::from_meta(&SlotMeta::sliced(36, vec![0], 100.0, 4000));
+        let s = SlotSettings {
+            tempo_lock: true,
+            ..Default::default()
+        };
+        assert!(segment(&play, 36, &s, 48_000, 4000, SR, 0.0).unwrap().rate > 0.0);
     }
 
     #[test]
