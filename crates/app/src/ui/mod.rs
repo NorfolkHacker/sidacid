@@ -679,6 +679,13 @@ mod tests {
         app.pending.clear();
         app.set_mode(acid_engine::sequencer::Mode::Pattern);
         assert!(!app.status.playing, "switching while playing stops");
+        assert!(matches!(
+            app.pending.as_slice(),
+            [
+                Command::Stop,
+                Command::SetMode(acid_engine::sequencer::Mode::Pattern)
+            ]
+        ));
     }
 
     #[test]

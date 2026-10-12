@@ -167,9 +167,10 @@ impl SidAcidApp {
         recording: bool,
         now: f64,
     ) {
-        // Any other knob edit ends a resting wheel gesture first, so it
-        // never merges into the wheel's undo step.
-        if out.value.is_some()
+        // Any other knob edit, or the wheel moving on to another knob
+        // (even by less than a notch), ends a resting wheel gesture first,
+        // so nothing later merges into the wheel's undo step.
+        if (out.value.is_some() || out.scrolled)
             && !(out.scrolled && self.knob_scroll_open(id))
             && let Some((_, g)) = self.view.knob_scroll.take()
         {
@@ -367,6 +368,39 @@ mod tests {
         assert_eq!(app.doc.project.param(id), 0.2, "the reset is its own step");
         app.doc.undo();
         assert_eq!(app.doc.project.param(id), start);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn a_sub_notch_wheel_on_another_knob_ends_the_first_knobs_scroll_step() {
+        use crate::document::Document;
+        let a = ParamId::Synth(0, SynthParam::Cutoff);
+        let b = ParamId::Synth(0, SynthParam::Resonance);
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let start = app.doc.project.param(a);
+        frame(&mut app, a, scroll(0.2), 0.0);
+        frame(&mut app, a, idle(), 0.05);
+        // Less than a notch over B: no value, but the wheel moved on.
+        let mut nudge = scroll(0.0);
+        nudge.value = None;
+        frame(&mut app, b, nudge, 0.1);
+        frame(&mut app, b, idle(), 0.15);
+        frame(&mut app, b, idle(), 1.0);
+        // Much later, a drag on A.
+        let drag = |v| knob::KnobOutput {
+            value: Some(v),
+            released: false,
+            touched: true,
+            scrolled: false,
+        };
+        frame(&mut app, a, drag(0.6), 2.0);
+        let mut done = drag(0.7);
+        done.released = true;
+        frame(&mut app, a, done, 2.1);
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(a), 0.2, "the drag is its own step");
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(a), start);
         assert!(!app.doc.can_undo());
     }
 
