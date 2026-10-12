@@ -25,7 +25,7 @@ A ReBirth-style acid groovebox built on a C64 SID-style sound engine. It runs as
   - **Slice mode** for breaks: chop into 4/8/16/32 equal slices or by detected transients, drag the slice markers, and use choke and tempo lock.
   - **Chromatic mode** for voices and stabs: root key, start/end, and a crossfaded loop.
   - Per slot: level, pan, tune, filter, ADSR and reverse. Grit adds SP-1200-style 12-bit, 26 kHz crunch.
-  - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file.
+  - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
   - The piano roll labels each sampler row with its slot and slice.
 - Both use a **polyphonic piano roll**: chords, 1/16 to 1/64 snap, a velocity lane, and click-to-audition keys.
 - **Two sequencer views per synth,** swappable at any time over the same pattern:
