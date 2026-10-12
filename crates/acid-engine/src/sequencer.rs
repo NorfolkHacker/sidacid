@@ -932,8 +932,12 @@ mod tests {
     }
 
     fn song_bar(refs: [Option<u8>; 4]) -> crate::project::Bar {
+        let mut patterns = [None; crate::machine::MACHINES];
+        for (m, r) in refs.into_iter().enumerate() {
+            patterns[m] = r.map(crate::project::PatternRef);
+        }
         crate::project::Bar {
-            patterns: refs.map(|r| r.map(crate::project::PatternRef)),
+            patterns,
             ..Default::default()
         }
     }

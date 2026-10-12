@@ -84,7 +84,8 @@ impl Engine {
         self.song = p.song.clone();
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
-        for (m, &slot) in p.selected.iter().enumerate() {
+        // Machines 4 and 5 join the sequencer in the next change.
+        for (m, &slot) in p.selected.iter().enumerate().take(4) {
             self.seq.select(m, slot);
         }
     }
@@ -690,7 +691,7 @@ mod tests {
     fn two_bar_demo() -> Project {
         let mut p = crate::demo::demo_project();
         let bar = crate::project::Bar {
-            patterns: [Some(crate::project::PatternRef(0)); 4],
+            patterns: [Some(crate::project::PatternRef(0)); crate::machine::MACHINES],
             ..Default::default()
         };
         p.song.bars = vec![bar, bar];

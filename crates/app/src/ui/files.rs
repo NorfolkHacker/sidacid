@@ -137,7 +137,7 @@ impl SidAcidApp {
         self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
-        for m in 0..4 {
+        for m in 0..acid_engine::machine::MACHINES {
             self.view.bank[m] = self.doc.project.selected[m] / BANK_SIZE as u8;
         }
         self.pending.clear();

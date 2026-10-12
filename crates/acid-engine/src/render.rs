@@ -165,7 +165,7 @@ mod tests {
         let mut p = crate::demo::demo_project();
         p.bpm = 120.0;
         let bar = crate::project::Bar {
-            patterns: [Some(crate::project::PatternRef(0)); 4],
+            patterns: [Some(crate::project::PatternRef(0)); crate::machine::MACHINES],
             ..Default::default()
         };
         p.song.bars = vec![bar, bar];

@@ -23,7 +23,8 @@ pub fn banks(p: &Project) -> (SynthBanks<'_>, DrumBanks<'_>) {
 /// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
 pub fn bar_steps(bar: &Bar, synths: SynthBanks<'_>, drums: DrumBanks<'_>) -> usize {
     let mut longest = 0;
-    for (m, r) in bar.patterns.iter().enumerate() {
+    // Machines 4 and 5 join bar lengths in the next change.
+    for (m, r) in bar.patterns.iter().enumerate().take(4) {
         let Some(PatternRef(slot)) = r else { continue };
         let length = if m < 2 {
             synths[m].get(*slot as usize).map(|p| p.length)
@@ -262,8 +263,12 @@ mod tests {
     }
 
     fn bar(refs: [Option<u8>; 4]) -> Bar {
+        let mut patterns = [None; crate::machine::MACHINES];
+        for (m, r) in refs.into_iter().enumerate() {
+            patterns[m] = r.map(PatternRef);
+        }
         Bar {
-            patterns: refs.map(|r| r.map(PatternRef)),
+            patterns,
             ..Bar::default()
         }
     }

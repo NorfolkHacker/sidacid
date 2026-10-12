@@ -27,11 +27,11 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct ViewState {
-    /// Machine that keyboard shortcuts act on (0..4).
+    /// Machine that keyboard shortcuts act on (0..MACHINES).
     pub focus: usize,
     pub message: Option<String>,
     /// Bank shown on each machine's pads (0..8).
-    pub bank: [u8; 4],
+    pub bank: [u8; acid_engine::machine::MACHINES],
     /// Active 303 step-writer per synth.
     pub writers: [Option<step_edit::StepWriter>; 2],
     /// Scroll distance accumulated per synth toward the next pitch notch.
@@ -628,11 +628,11 @@ mod tests {
         app.view.scrolling = [true; 2];
         app.view.scroll_accum = [12.0; 2];
         let project = acid_engine::project::Project {
-            selected: [17, 33, 0, 127],
+            selected: [17, 33, 0, 127, 0, 0],
             ..Default::default()
         };
         app.load_document(Document::new(project));
-        assert_eq!(app.view.bank, [1, 2, 0, 7]);
+        assert_eq!(app.view.bank, [1, 2, 0, 7, 0, 0]);
         assert!(app.view.touched_knob.is_none());
         assert_eq!(app.view.scrolling, [false; 2]);
         assert_eq!(app.view.scroll_accum, [0.0; 2]);

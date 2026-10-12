@@ -1,19 +1,24 @@
-//! Project data: patterns for all four machines, knob values, song. Saved
+//! Project data: patterns for all six machines, knob values, song. Saved
 //! as RON (`.sidacid`). Fixed-size arrays are Vecs of exact length, checked
 //! by `validate` on load.
 
+use crate::machine::{MACHINES, MachineKind, TRANSPOSED, kind_of};
 use crate::params::{DRUM_INSTRUMENTS, ParamId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 pub const STEPS: usize = 64;
 pub const PATTERNS: usize = 128;
 pub const BANK_SIZE: usize = 16;
 /// MIDI note of step note 0 at octave 0 (C2).
 pub const BASE_MIDI: i32 = 36;
+/// Note-pattern resolution: ticks per 1/16 step.
+pub const TICKS_PER_STEP: u16 = 4;
+/// Most notes one note pattern may hold.
+pub const MAX_NOTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gate {
@@ -106,6 +111,74 @@ impl Default for DrumPattern {
     }
 }
 
+/// One note of a poly note pattern, in ticks (`TICKS_PER_STEP` per step).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub start: u16,
+    pub len: u16,
+    pub pitch: u8,
+    pub vel: u8,
+}
+
+/// A polyphonic pattern for the FM synth and sampler. Notes are in no
+/// particular order; notes starting past `length` are kept but not played.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NotePattern {
+    pub notes: Vec<Note>,
+    pub length: u8,
+}
+
+impl NotePattern {
+    /// Pattern length in ticks.
+    pub fn ticks(&self) -> u16 {
+        (self.length as u16).clamp(1, STEPS as u16) * TICKS_PER_STEP
+    }
+
+    pub fn is_well_formed(&self) -> bool {
+        let max_start = STEPS as u16 * TICKS_PER_STEP;
+        (1..=STEPS as u8).contains(&self.length)
+            && self.notes.len() <= MAX_NOTES
+            && self.notes.iter().all(|n| {
+                n.len >= 1 && n.start < max_start && n.pitch <= 127 && (1..=127).contains(&n.vel)
+            })
+    }
+}
+
+impl Default for NotePattern {
+    fn default() -> Self {
+        Self {
+            notes: Vec::new(),
+            length: 16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FmMachine {
+    pub patterns: Vec<NotePattern>,
+}
+
+impl Default for FmMachine {
+    fn default() -> Self {
+        Self {
+            patterns: vec![NotePattern::default(); PATTERNS],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SamplerMachine {
+    pub patterns: Vec<NotePattern>,
+}
+
+impl Default for SamplerMachine {
+    fn default() -> Self {
+        Self {
+            patterns: vec![NotePattern::default(); PATTERNS],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeqView {
     #[default]
@@ -154,9 +227,10 @@ impl PatternRef {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bar {
-    pub patterns: [Option<PatternRef>; 4],
-    pub mutes: [bool; 4],
-    pub transpose: [i8; 2],
+    pub patterns: [Option<PatternRef>; MACHINES],
+    pub mutes: [bool; MACHINES],
+    /// Song transpose for Synth 1, Synth 2, FM (`MachineId::transpose_index`).
+    pub transpose: [i8; TRANSPOSED],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -180,9 +254,11 @@ pub struct Project {
     pub swing: f32,
     pub synths: [SynthMachine; 2],
     pub drums: [DrumMachine; 2],
+    pub fm: FmMachine,
+    pub sampler: SamplerMachine,
     pub params: BTreeMap<ParamId, f32>,
-    /// Selected pattern per machine: synth 1, synth 2, 808, 909.
-    pub selected: [u8; 4],
+    /// Selected pattern per machine, by `MachineId::index`.
+    pub selected: [u8; MACHINES],
     pub song: Song,
 }
 
@@ -195,11 +271,13 @@ impl Default for Project {
             swing: 0.0,
             synths: Default::default(),
             drums: Default::default(),
+            fm: FmMachine::default(),
+            sampler: SamplerMachine::default(),
             params: ParamId::all()
                 .into_iter()
                 .map(|id| (id, id.info().default))
                 .collect(),
-            selected: [0; 4],
+            selected: [0; MACHINES],
             song: Song::default(),
         }
     }
@@ -241,6 +319,23 @@ struct VersionOnly {
 }
 
 impl Project {
+    /// Note patterns of the FM synth (machine 4) or sampler (machine 5).
+    pub fn note_patterns(&self, machine: usize) -> Option<&Vec<NotePattern>> {
+        match kind_of(machine)? {
+            MachineKind::Notes(0) => Some(&self.fm.patterns),
+            MachineKind::Notes(_) => Some(&self.sampler.patterns),
+            _ => None,
+        }
+    }
+
+    pub fn note_patterns_mut(&mut self, machine: usize) -> Option<&mut Vec<NotePattern>> {
+        match kind_of(machine)? {
+            MachineKind::Notes(0) => Some(&mut self.fm.patterns),
+            MachineKind::Notes(_) => Some(&mut self.sampler.patterns),
+            _ => None,
+        }
+    }
+
     pub fn param(&self, id: ParamId) -> f32 {
         self.params.get(&id).copied().unwrap_or(id.info().default)
     }
@@ -299,6 +394,17 @@ impl Project {
                 }
             }
         }
+        for (name, pats) in [
+            ("FM", &self.fm.patterns),
+            ("Sampler", &self.sampler.patterns),
+        ] {
+            if pats.len() != PATTERNS {
+                return bad(format!("{name} has {} patterns", pats.len()));
+            }
+            if let Some(j) = pats.iter().position(|p| !p.is_well_formed()) {
+                return bad(format!("{name} pattern {}", PatternRef(j as u8).label()));
+            }
+        }
         if self.selected.iter().any(|&s| s as usize >= PATTERNS) {
             return bad("selected pattern out of range".into());
         }
@@ -342,12 +448,18 @@ impl Project {
     }
 
     pub fn from_ron(text: &str) -> Result<Project, ProjectError> {
-        let head: VersionOnly =
-            ron::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
+        let parse = |e: ron::error::SpannedError| ProjectError::Parse(e.to_string());
+        let head: VersionOnly = ron::from_str(text).map_err(parse)?;
         if head.version > PROJECT_VERSION {
             return Err(ProjectError::TooNew(head.version));
         }
-        let p: Project = ron::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
+        let p = if head.version < PROJECT_VERSION {
+            ron::from_str::<crate::migrate::ProjectV1>(text)
+                .map_err(parse)?
+                .upgrade()
+        } else {
+            ron::from_str::<Project>(text).map_err(parse)?
+        };
         p.validate()?;
         Ok(p)
     }
@@ -437,9 +549,22 @@ mod tests {
         p.params
             .insert(ParamId::Synth(0, SynthParam::Resonance), 0.95);
         p.song.bars.push(Bar {
-            patterns: [Some(PatternRef(5)), None, Some(PatternRef(2)), None],
-            mutes: [false, true, false, false],
-            transpose: [0, 3],
+            patterns: [
+                Some(PatternRef(5)),
+                None,
+                Some(PatternRef(2)),
+                None,
+                Some(PatternRef(9)),
+                None,
+            ],
+            mutes: [false, true, false, false, false, true],
+            transpose: [0, 3, -5],
+        });
+        p.fm.patterns[9].notes.push(Note {
+            start: 3,
+            len: 6,
+            pitch: 64,
+            vel: 90,
         });
         let text = p.to_ron();
         let back = Project::from_ron(&text).unwrap();
@@ -571,5 +696,143 @@ mod tests {
             matches!(p.validate(), Err(ProjectError::Invalid(_))),
             "out-of-range point"
         );
+    }
+
+    #[test]
+    fn note_patterns_validate() {
+        let mut p = NotePattern::default();
+        assert!(p.is_well_formed());
+        assert_eq!(p.ticks(), 16 * TICKS_PER_STEP);
+        p.notes.push(Note {
+            start: 0,
+            len: 4,
+            pitch: 60,
+            vel: 100,
+        });
+        assert!(p.is_well_formed());
+        p.length = 4;
+        p.notes.push(Note {
+            start: 200,
+            len: 1,
+            pitch: 60,
+            vel: 1,
+        });
+        assert!(p.is_well_formed(), "notes past a shortened end are kept");
+        let mut bad = p.clone();
+        bad.notes.push(Note {
+            start: 0,
+            len: 0,
+            pitch: 60,
+            vel: 100,
+        });
+        assert!(!bad.is_well_formed(), "zero length");
+        let mut bad = p.clone();
+        bad.notes.push(Note {
+            start: 0,
+            len: 1,
+            pitch: 60,
+            vel: 0,
+        });
+        assert!(!bad.is_well_formed(), "zero velocity");
+        let mut bad = p.clone();
+        bad.notes.push(Note {
+            start: 0,
+            len: 1,
+            pitch: 128,
+            vel: 1,
+        });
+        assert!(!bad.is_well_formed(), "pitch above 127");
+        let mut bad = p.clone();
+        bad.notes.push(Note {
+            start: 256,
+            len: 1,
+            pitch: 1,
+            vel: 1,
+        });
+        assert!(!bad.is_well_formed(), "start past 64 steps");
+        let mut bad = NotePattern::default();
+        bad.notes = vec![
+            Note {
+                start: 0,
+                len: 1,
+                pitch: 1,
+                vel: 1
+            };
+            MAX_NOTES + 1
+        ];
+        assert!(!bad.is_well_formed(), "over the note cap");
+    }
+
+    #[test]
+    fn note_machines_are_reachable_by_machine_index() {
+        let mut p = Project::default();
+        assert_eq!(p.fm.patterns.len(), PATTERNS);
+        assert_eq!(p.sampler.patterns.len(), PATTERNS);
+        assert!(p.note_patterns(0).is_none());
+        p.note_patterns_mut(5).unwrap()[3].length = 8;
+        assert_eq!(p.sampler.patterns[3].length, 8);
+        assert_eq!(p.note_patterns(4).unwrap().len(), PATTERNS);
+        p.fm.patterns[1].notes.push(Note {
+            start: 0,
+            len: 1,
+            pitch: 60,
+            vel: 0,
+        });
+        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+    }
+
+    #[test]
+    fn v1_files_load_with_empty_new_machines() {
+        use crate::migrate::{BarV1, ProjectV1, SongV1};
+        let base = Project::default();
+        let mut params = BTreeMap::new();
+        params.insert(ParamId::Synth(0, SynthParam::Cutoff), 0.9);
+        let mut synths = base.synths.clone();
+        synths[1].patterns[2].length = 7;
+        let v1 = ProjectV1 {
+            version: 1,
+            name: "Old".into(),
+            bpm: 131.0,
+            swing: 0.2,
+            synths,
+            drums: base.drums.clone(),
+            params,
+            selected: [1, 2, 3, 4],
+            song: SongV1 {
+                bars: vec![BarV1 {
+                    patterns: [Some(PatternRef(1)), None, Some(PatternRef(3)), None],
+                    mutes: [true, false, false, true],
+                    transpose: [2, -3],
+                }],
+                loop_range: Some((0, 0)),
+                automation: Vec::new(),
+            },
+        };
+        let text = ron::ser::to_string_pretty(&v1, ron::ser::PrettyConfig::default()).unwrap();
+        let p = Project::from_ron(&text).unwrap();
+        assert_eq!(p.version, PROJECT_VERSION);
+        assert_eq!((p.name.as_str(), p.bpm, p.swing), ("Old", 131.0, 0.2));
+        assert_eq!(p.synths[1].patterns[2].length, 7);
+        assert_eq!(p.selected, [1, 2, 3, 4, 0, 0]);
+        assert_eq!(p.param(ParamId::Synth(0, SynthParam::Cutoff)), 0.9);
+        let ch5 = ParamId::Channel(5, crate::params::ChannelParam::Level);
+        assert_eq!(p.params.get(&ch5), Some(&ch5.info().default));
+        let bar = p.song.bars[0];
+        assert_eq!(
+            bar.patterns,
+            [
+                Some(PatternRef(1)),
+                None,
+                Some(PatternRef(3)),
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(bar.mutes, [true, false, false, true, false, false]);
+        assert_eq!(bar.transpose, [2, -3, 0]);
+        assert_eq!(p.song.loop_range, Some((0, 0)));
+        assert_eq!(p.fm.patterns.len(), PATTERNS);
+        assert!(p.sampler.patterns.iter().all(|n| n.notes.is_empty()));
     }
 }
