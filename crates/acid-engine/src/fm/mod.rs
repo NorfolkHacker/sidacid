@@ -15,3 +15,7 @@ pub mod sine;
 pub const OPS: usize = crate::params::FM_OPS;
 /// Samples per control block: envelopes, LFO and pitch update once per block.
 pub const BLOCK: usize = 32;
+
+pub mod synth;
+mod voice;
+pub use synth::FmSynth;
