@@ -1,0 +1,15 @@
+Plan 5 (FM synth) — deferred minor findings from task and final reviews. Carry into later plans where relevant.
+
+Task 1: minor (deferred): fm_steps constants not test-tied to info() divisors (31/14 literals)
+Task 2: minor (deferred): algorithm tests don't pin per-alg feedback op (add feedback list test); env tests mostly directional
+Task 2: minor (deferred): THIRD_PARTY_NOTICES msfa entry lacks Google copyright line
+Task 3: minor (deferred): S&H holds 0 for first cycle; default-patch test doesn't assert feedback/volume/glide
+Task 4: minor (deferred): Vintage clamps mix to ±1 (clean doesn't); mono note_off ignores live (accepted deviation)
+Task 4: minor (deferred): released-voice steal test doesn't assert oldest-first among released; misleading comment synth.rs:111
+Task 5: minor (deferred): chorus len 4096 aliases above ~204 kHz (add debug_assert); bypassed filter/phaser keep stale state (click on re-enable); synth.rs:2 long doc line
+Task 6: minor (deferred): no test that audition note_off leaves pattern voices; exact peak==0.0 assertion brittle
+Task 7: minor (deferred): no fixed-byte test pinning packed bit layout/checksum; from_params doesn't clamp name; names test doesn't cover non-ASCII/over-length
+Task 8: minor (deferred): new project tests sit above `use super::*` in mod tests; compat test strips RON lines (use a fixture); starter_bank lacks doc comment
+Task 9: minor (deferred): FmVoice inverse assumes unique ParamIds (to_params is unique); one-voice-bank path untested
+Task 10: minor (deferred): Imported tab shows selected while bank None (grid shows starter); current-voice highlight by name only; headless test doesn't cover Imported+None or the collapsed LFO/FX section
+Final fix wave: re-review clean (7/7). Minor: Stop after a song ends by itself hard-cuts the FM tail (stop-twice semantics).
