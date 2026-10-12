@@ -84,6 +84,9 @@ pub fn markers(meta: &SlotMeta) -> Vec<(Marker, u32)> {
 /// Moves a marker, clamping it so the meta stays well-formed. Returns
 /// whether anything changed. Slice 0 never moves.
 pub fn set_marker(meta: &mut SlotMeta, marker: Marker, frame: u32, frames: u32) -> bool {
+    if !meta.is_well_formed(frames) {
+        return false;
+    }
     let before = meta.clone();
     match marker {
         Marker::Slice(0) => return false,
@@ -102,12 +105,12 @@ pub fn set_marker(meta: &mut SlotMeta, marker: Marker, frame: u32, frames: u32) 
             meta.slices[i] = frame.clamp(lo, hi);
         }
         Marker::Start => {
-            meta.start = frame.min(meta.end.saturating_sub(2));
+            meta.start = frame.min(meta.end - 1);
             meta.loop_start = meta.loop_start.max(meta.start);
             meta.loop_end = meta.loop_end.max(meta.loop_start + 1);
         }
         Marker::End => {
-            meta.end = frame.clamp(meta.start + 2, frames);
+            meta.end = frame.clamp(meta.start + 1, frames);
             meta.loop_end = meta.loop_end.min(meta.end);
             meta.loop_start = meta.loop_start.min(meta.loop_end - 1);
         }
@@ -205,6 +208,43 @@ mod tests {
         assert!(c.is_well_formed(1000));
         assert_eq!(markers(&c).len(), 4);
         assert_eq!(markers(&m).len(), 4);
+    }
+
+    #[test]
+    fn set_marker_never_panics_and_stays_well_formed() {
+        for frames in [1u32, 2, 3, 1000] {
+            let mut metas = vec![SlotMeta::sliced(36, vec![0], 120.0, frames)];
+            if frames > 3 {
+                metas.push(SlotMeta::sliced(36, vec![0, 1, frames / 2], 120.0, frames));
+            }
+            for on in [false, true] {
+                let mut c = SlotMeta::chromatic(48, 71, 60, frames);
+                c.loop_on = on;
+                metas.push(c);
+            }
+            let kinds = [
+                Marker::Slice(0),
+                Marker::Slice(1),
+                Marker::Slice(2),
+                Marker::Slice(9),
+                Marker::Start,
+                Marker::End,
+                Marker::LoopStart,
+                Marker::LoopEnd,
+            ];
+            for meta in &metas {
+                let was_ok = meta.is_well_formed(frames);
+                for kind in kinds {
+                    for f in [0, 1, 2, frames.saturating_sub(1), frames, u32::MAX] {
+                        let mut m = meta.clone();
+                        set_marker(&mut m, kind, f, frames);
+                        if was_ok {
+                            assert!(m.is_well_formed(frames), "{kind:?} {f} frames {frames}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

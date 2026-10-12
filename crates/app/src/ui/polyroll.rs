@@ -124,7 +124,11 @@ impl SidAcidApp {
                                 Align2::LEFT_CENTER,
                                 text,
                                 FontId::monospace(6.5),
-                                Color32::BLACK,
+                                if black {
+                                    Color32::from_gray(230)
+                                } else {
+                                    Color32::BLACK
+                                },
                             );
                         } else if pitch % 12 == 0 {
                             painter.text(
