@@ -102,8 +102,8 @@ impl Sampler {
     }
 
     /// Exchanges a slot's play (zone and markers). Sounding voices keep
-    /// their already-started segment unless the zone layout (mode, key
-    /// range or slices) changes, which stops them; marker edits apply to
+    /// their already-started segment unless the zone layout (mode or key
+    /// range) changes, which stops them; marker and slice edits apply to
     /// the next notes.
     pub fn swap_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
         if slot >= SLOTS {
@@ -477,11 +477,14 @@ mod tests {
         assert_eq!(s.active_voices(), 1, "a tempo edit keeps slices playing");
         sliced.slices = vec![0, 1500, 2000];
         s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
-        assert_eq!(s.active_voices(), 0, "moving a slice stops the slot");
-        s.note_on(37, 100, false);
+        assert_eq!(s.active_voices(), 1, "moving a slice keeps it playing");
         sliced.slices = vec![0, 1500, 2000, 3000];
         s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
         assert_eq!(s.active_voices(), 0, "adding a slice stops the slot");
+        s.note_on(37, 100, false);
+        sliced.base_key = 40;
+        s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
+        assert_eq!(s.active_voices(), 0, "moving the zone stops the slot");
     }
 
     #[test]

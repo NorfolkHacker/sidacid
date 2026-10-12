@@ -240,10 +240,9 @@ impl Voice {
         let decay_coef = (-1.0 / (s.decay_s * sr).max(1.0)).exp();
         let end_fade = (END_FADE_S * sr).max(1.0);
         let loop_len = self.loop_end - self.loop_start;
-        // the pre-loop window [loop_start - xfade, loop_start) stays in the segment
         let xfade = (LOOP_XFADE_S * sample.sample_rate as f64)
             .min(loop_len * 0.5)
-            .min(self.loop_start - self.start_frame);
+            .max(1.0);
         let filter_on = s.cutoff_knob < 0.999 || s.resonance > 0.0;
         if filter_on {
             if !self.filter_was_on {
@@ -297,9 +296,10 @@ impl Voice {
                 return;
             }
             let (mut l, mut r) = sample.read(self.pos);
-            if self.looping && xfade > 0.0 && self.pos > self.loop_end - xfade {
+            if self.looping && self.pos > self.loop_end - xfade {
                 let a = ((self.loop_end - self.pos) / xfade) as f32;
-                let (l2, r2) = sample.read(self.pos - loop_len);
+                // the pre-loop window never reaches before the play start
+                let (l2, r2) = sample.read((self.pos - loop_len).max(self.start_frame));
                 l = l * a + l2 * (1.0 - a);
                 r = r * a + r2 * (1.0 - a);
             }
@@ -535,6 +535,31 @@ mod tests {
             let out = run(&mut v, &sample, &s, 10_000);
             let p = out.iter().fold(0.0f32, |m, x| m.max(x.abs()));
             assert!(p < 0.6, "loop at {loop_start}: read the junk ({p})");
+        }
+    }
+
+    #[test]
+    fn a_loop_from_the_play_start_wraps_without_a_click() {
+        let sample = sine_sample(8000);
+        let s = SlotSettings::default();
+        let seg = Segment {
+            start: 0.0,
+            end: 8000.0,
+            reverse: false,
+            looping: Some((0.0, 3000.0)),
+            rate: 1.0,
+        };
+        let mut v = Voice::new(SR);
+        v.start(&seg, 0, 60, 127, false, 1);
+        let out = run(&mut v, &sample, &s, 10_000);
+        let steady = max_step(&out[100..2000]);
+        // wraps at 3000, 6000 and 9000 output samples
+        for wrap in [3000, 6000, 9000] {
+            let near = max_step(&out[wrap - 600..wrap + 50]);
+            assert!(
+                near < 1.5 * steady,
+                "click at the wrap near {wrap}: {near} vs {steady}"
+            );
         }
     }
 

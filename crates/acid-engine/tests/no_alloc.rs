@@ -163,6 +163,36 @@ fn audition_and_pattern_swaps_do_not_allocate() {
 }
 
 #[test]
+fn sampler_steals_and_marker_edits_do_not_allocate() {
+    use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
+    let mut p = Project::default();
+    let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
+    let mut meta = SlotMeta::chromatic(36, 96, 60, 44_100);
+    meta.loop_on = true;
+    meta.loop_start = 10_000;
+    meta.loop_end = 30_000;
+    p.sampler.slots[0] = Some(SlotData::new("Pad", 44_100, 1, &tone, meta.clone()));
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+    meta.loop_end = 20_000;
+    let mut markers = SlotPlay::from_meta(&meta);
+    meta.base_key = 40;
+    let mut zone = SlotPlay::from_meta(&meta);
+    let n = count_allocs(|| {
+        // 20 held notes on 16 voices: the last four steal
+        for k in 40..60 {
+            e.note_on(5, k, 100);
+            render_seconds(&mut e, &mut l, &mut r, 0.01);
+        }
+        assert!(e.swap_sampler_play(0, &mut markers));
+        render_seconds(&mut e, &mut l, &mut r, 0.2);
+        assert!(e.swap_sampler_play(0, &mut zone));
+        render_seconds(&mut e, &mut l, &mut r, 0.1);
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn toggling_fm_effects_does_not_allocate() {
     use acid_engine::params::FmParam;
     let mut e = Engine::from_project(SR, &busy_project());

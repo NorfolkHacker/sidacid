@@ -315,14 +315,11 @@ impl SlotPlay {
         }
     }
 
-    /// Whether `other` maps keys to the same zones: same mode and key
-    /// range, and (slice mode) the same slices. Markers, root and tempo
-    /// may differ.
+    /// Whether `other` has the same zone layout: mode and key range.
+    /// Markers, slice positions, root and tempo may differ (a change in
+    /// slice count changes the key range).
     pub fn same_zones(&self, other: &SlotPlay) -> bool {
-        self.mode == other.mode
-            && self.key_range() == other.key_range()
-            && (self.mode == SlotMode::Chromatic
-                || self.slices[..self.slice_count] == other.slices[..other.slice_count])
+        self.mode == other.mode && self.key_range() == other.key_range()
     }
 }
 
