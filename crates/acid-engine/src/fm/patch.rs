@@ -4,9 +4,10 @@
 use super::OPS;
 use crate::params::{FmParam, OpParam, ParamId, exp, fm_steps, on, step_index};
 
-/// A 0..1 knob as a DX7 0..99 value.
+/// A 0..1 knob as a whole DX7 0..99 value, so playback matches the
+/// tooltip and the exported voice.
 pub fn d99(v: f32) -> f32 {
-    v.clamp(0.0, 1.0) * 99.0
+    (v.clamp(0.0, 1.0) * 99.0).round()
 }
 
 /// A 0..1 knob as one of `n` positions.
@@ -65,9 +66,9 @@ impl OpPatch {
             O::L2 => self.levels[1] = d99(v),
             O::L3 => self.levels[2] = d99(v),
             O::L4 => self.levels[3] = d99(v),
-            O::BreakPoint => self.break_point = d99(v).round() as i32,
-            O::LeftDepth => self.left_depth = d99(v).round() as i32,
-            O::RightDepth => self.right_depth = d99(v).round() as i32,
+            O::BreakPoint => self.break_point = d99(v) as i32,
+            O::LeftDepth => self.left_depth = d99(v) as i32,
+            O::RightDepth => self.right_depth = d99(v) as i32,
             O::LeftCurve => self.left_curve = pick(v, fm_steps::CURVES) as i32,
             O::RightCurve => self.right_curve = pick(v, fm_steps::CURVES) as i32,
             O::RateScaling => self.rate_scaling = pick(v, fm_steps::RATE_SCALING) as i32,
@@ -274,6 +275,45 @@ mod tests {
         p.set(FmParam::Glide, 1.0);
         assert!((p.glide - 2.0).abs() < 1e-6);
         p.set_op(9, OpParam::Level, 1.0); // out of range: ignored
+    }
+
+    #[test]
+    fn dx7_values_are_whole_numbers() {
+        let mut p = FmPatch::default();
+        let v = 0.123; // 12.177 on the 0..99 scale
+        for o in [
+            OpParam::R1,
+            OpParam::R4,
+            OpParam::L1,
+            OpParam::L4,
+            OpParam::Level,
+            OpParam::Fine,
+        ] {
+            p.set_op(0, o, v);
+        }
+        for f in [
+            FmParam::PitchR1,
+            FmParam::PitchL4,
+            FmParam::LfoSpeed,
+            FmParam::LfoDelay,
+            FmParam::LfoPmd,
+            FmParam::LfoAmd,
+        ] {
+            p.set(f, v);
+        }
+        let o = p.ops[0];
+        assert_eq!(
+            (o.rates[0], o.rates[3], o.levels[0], o.levels[3]),
+            (12.0, 12.0, 12.0, 12.0)
+        );
+        assert_eq!((o.level, o.fine), (12.0, 12.0));
+        assert_eq!((p.pitch_rates[0], p.pitch_levels[3]), (12.0, 12.0));
+        assert_eq!(
+            (p.lfo_speed, p.lfo_delay, p.lfo_pmd, p.lfo_amd),
+            (12.0, 12.0, 12.0, 12.0)
+        );
+        p.set_op(0, OpParam::Level, 0.5);
+        assert_eq!(p.ops[0].level, 50.0, "49.5 rounds to 50");
     }
 
     #[test]
