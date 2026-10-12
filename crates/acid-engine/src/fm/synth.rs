@@ -1,9 +1,10 @@
 //! The FM machine: 12 voices (or one in mono mode), the shared LFO, and
-//! the mix. Notes come from the pattern or from audition (`live`); a
+//! the mix, which runs through the filter, chorus and phaser. Notes come from the pattern or from audition (`live`); a
 //! note-off only releases voices from its own source, and releases every
 //! voice of that pitch.
 
 use super::algorithms::ALGORITHMS;
+use super::fx::FmFx;
 use super::modulation::{Lfo, lfo_hz};
 use super::patch::FmPatch;
 use super::sine::Sine;
@@ -24,6 +25,7 @@ pub struct FmSynth {
     stack: [u8; MONO_STACK],
     stack_len: usize,
     buf: [f32; BLOCK],
+    fx: FmFx,
 }
 
 impl FmSynth {
@@ -39,6 +41,7 @@ impl FmSynth {
             stack: [0; MONO_STACK],
             stack_len: 0,
             buf: [0.0; BLOCK],
+            fx: FmFx::new(sample_rate),
         }
     }
 
@@ -156,6 +159,7 @@ impl FmSynth {
         for v in &mut self.voices {
             v.kill();
         }
+        self.fx.reset();
     }
 
     pub fn active_voices(&self) -> usize {
@@ -186,10 +190,12 @@ impl FmSynth {
                 }
                 *x *= gain;
             }
-            for (i, x) in buf.iter().enumerate() {
-                left[pos + i] += x;
-                right[pos + i] += x;
-            }
+            self.fx.process(
+                &self.patch,
+                buf,
+                &mut left[pos..pos + n],
+                &mut right[pos..pos + n],
+            );
             pos += n;
         }
     }
@@ -441,6 +447,17 @@ mod tests {
         s.set_param(FmParam::Mono, 1.0);
         render(&mut s, 0.2);
         assert_eq!(s.active_voices(), 0);
+    }
+
+    #[test]
+    fn chorus_on_makes_the_output_stereo() {
+        let mut s = FmSynth::new(SR);
+        s.set_param(FmParam::ChorusMix, 1.0);
+        s.note_on(60, 100, false);
+        let n = 9600;
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        s.render(&mut l, &mut r);
+        assert_ne!(l, r);
     }
 
     #[test]

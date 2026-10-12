@@ -7,6 +7,7 @@
 
 pub mod algorithms;
 pub mod env;
+pub mod fx;
 pub mod modulation;
 pub mod patch;
 pub mod sine;
