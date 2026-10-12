@@ -117,10 +117,16 @@ pub mod pcm_codec {
 
     pub fn decode(text: &str) -> Result<Vec<i16>, String> {
         let packed = STANDARD.decode(text).map_err(|e| e.to_string())?;
+        // Longest valid sample (stereo, top rate) in bytes; caps a deflate bomb.
+        const MAX_BYTES: u64 = (crate::sampler::MAX_SECONDS * 192_000.0) as u64 * 2 * 2;
         let mut bytes = Vec::new();
         DeflateDecoder::new(&packed[..])
+            .take(MAX_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err("embedded audio is too large".into());
+        }
         if bytes.len() % 2 != 0 {
             return Err("odd number of PCM bytes".into());
         }
@@ -305,6 +311,54 @@ mod tests {
             Vec::<i16>::new()
         );
         assert!(pcm_codec::decode("not base64 !!").is_err());
+    }
+
+    #[test]
+    fn decode_refuses_a_deflate_bomb() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..(((MAX_SECONDS * 192_000.0) as usize * 4) >> 20) + 2 {
+            enc.write_all(&zeros).unwrap();
+        }
+        let text = STANDARD.encode(enc.finish().unwrap());
+        assert!(pcm_codec::decode(&text).is_err());
+    }
+
+    #[test]
+    fn is_valid_rejects_malformed_slots() {
+        let ok = || {
+            SlotData::new(
+                "t",
+                44_100,
+                1,
+                &tone(100, 1),
+                SlotMeta::chromatic(40, 50, 40, 100),
+            )
+        };
+        assert!(ok().is_valid());
+        let mut d = ok();
+        d.channels = 0;
+        assert!(!d.is_valid());
+        d.channels = 3;
+        assert!(!d.is_valid());
+        let mut d = SlotData::new(
+            "t",
+            44_100,
+            2,
+            &tone(100, 2),
+            SlotMeta::chromatic(40, 50, 40, 100),
+        );
+        d.pcm.pop();
+        assert!(!d.is_valid(), "pcm not divisible by channels");
+        let mut d = ok();
+        d.sample_rate = 4000;
+        assert!(!d.is_valid());
+        let mut d = ok();
+        d.meta.original_bpm = f32::NAN;
+        assert!(!d.is_valid());
     }
 
     #[test]

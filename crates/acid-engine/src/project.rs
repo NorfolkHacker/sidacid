@@ -221,6 +221,11 @@ impl SamplerMachine {
             .any(|(a, b)| lo <= b && a <= hi)
     }
 
+    /// True when the decoded audio fits in `limit` bytes.
+    pub fn memory_ok(&self, limit: usize) -> bool {
+        self.memory_bytes() <= limit
+    }
+
     /// Decoded audio the engine will hold, in bytes.
     pub fn memory_bytes(&self) -> usize {
         self.slots.iter().flatten().map(|d| d.memory_bytes()).sum()
@@ -230,7 +235,7 @@ impl SamplerMachine {
     /// overlapping another slot's zone (`slot`'s own zone is ignored).
     pub fn free_base_key(&self, slot: usize, span: u8) -> Option<u8> {
         let span = span.max(1) as u16;
-        (crate::sampler::FIRST_KEY as u16..=128 - span)
+        (crate::sampler::FIRST_KEY as u16..=128u16.checked_sub(span)?)
             .map(|k| k as u8)
             .find(|&k| {
                 let hi = (k as u16 + span - 1) as u8;
@@ -476,6 +481,9 @@ impl Project {
         if self.sampler.slots.len() != crate::sampler::SLOTS {
             return bad(format!("sampler has {} slots", self.sampler.slots.len()));
         }
+        if !self.sampler.memory_ok(crate::sampler::MEMORY_LIMIT) {
+            return bad("sampler audio exceeds 64 MB".into());
+        }
         for (i, slot) in self.sampler.slots.iter().enumerate() {
             if let Some(d) = slot {
                 if !d.is_valid() {
@@ -606,6 +614,9 @@ mod tests {
                 .zone_clash(0, &SlotMeta::chromatic(26, 30, 26, 2000))
         );
         assert_eq!(p.sampler.memory_bytes(), 2 * 2000 * 4);
+        assert_eq!(p.sampler.free_base_key(0, 200), None);
+        assert!(p.sampler.memory_ok(16_000));
+        assert!(!p.sampler.memory_ok(15_999));
 
         let mut clash = p.clone();
         clash.sampler.slots[5] = Some(SlotData::new(
