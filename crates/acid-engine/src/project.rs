@@ -181,13 +181,64 @@ impl Default for FmMachine {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SamplerMachine {
     pub patterns: Vec<NotePattern>,
+    /// One entry per slot; `None` = empty.
+    #[serde(default = "empty_slots")]
+    pub slots: Vec<Option<crate::sampler::slot::SlotData>>,
+}
+
+fn empty_slots() -> Vec<Option<crate::sampler::slot::SlotData>> {
+    vec![None; crate::sampler::SLOTS]
 }
 
 impl Default for SamplerMachine {
     fn default() -> Self {
         Self {
             patterns: vec![NotePattern::default(); PATTERNS],
+            slots: empty_slots(),
         }
+    }
+}
+
+impl SamplerMachine {
+    fn range(&self, slot: usize) -> Option<(u8, u8)> {
+        self.slots.get(slot)?.as_ref().map(|d| d.meta.key_range())
+    }
+
+    /// The first loaded slot whose zone contains `key`.
+    pub fn slot_for_key(&self, key: u8) -> Option<usize> {
+        (0..self.slots.len()).find(|&i| {
+            self.range(i)
+                .is_some_and(|(lo, hi)| (lo..=hi).contains(&key))
+        })
+    }
+
+    /// True when `meta`'s zone would overlap another loaded slot's zone.
+    pub fn zone_clash(&self, slot: usize, meta: &crate::sampler::slot::SlotMeta) -> bool {
+        let (lo, hi) = meta.key_range();
+        (0..self.slots.len())
+            .filter(|&i| i != slot)
+            .filter_map(|i| self.range(i))
+            .any(|(a, b)| lo <= b && a <= hi)
+    }
+
+    /// Decoded audio the engine will hold, in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        self.slots.iter().flatten().map(|d| d.memory_bytes()).sum()
+    }
+
+    /// Lowest key from C1 up where a `span`-key zone fits without
+    /// overlapping another slot's zone (`slot`'s own zone is ignored).
+    pub fn free_base_key(&self, slot: usize, span: u8) -> Option<u8> {
+        let span = span.max(1) as u16;
+        (crate::sampler::FIRST_KEY as u16..=128 - span)
+            .map(|k| k as u8)
+            .find(|&k| {
+                let hi = (k as u16 + span - 1) as u8;
+                !(0..self.slots.len())
+                    .filter(|&i| i != slot)
+                    .filter_map(|i| self.range(i))
+                    .any(|(a, b)| k <= b && a <= hi)
+            })
     }
 }
 
@@ -422,6 +473,19 @@ impl Project {
         {
             return bad("FM voice bank".into());
         }
+        if self.sampler.slots.len() != crate::sampler::SLOTS {
+            return bad(format!("sampler has {} slots", self.sampler.slots.len()));
+        }
+        for (i, slot) in self.sampler.slots.iter().enumerate() {
+            if let Some(d) = slot {
+                if !d.is_valid() {
+                    return bad(format!("sampler slot {}", i + 1));
+                }
+                if self.sampler.zone_clash(i, &d.meta) {
+                    return bad(format!("sampler slot {} overlaps another zone", i + 1));
+                }
+            }
+        }
         if self.selected.iter().any(|&s| s as usize >= PATTERNS) {
             return bad("selected pattern out of range".into());
         }
@@ -497,6 +561,102 @@ impl Project {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default project
 mod tests {
+    #[test]
+    fn sampler_slots_round_trip_validate_and_place_zones() {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let mut p = Project::default();
+        assert_eq!(p.sampler.slots.len(), crate::sampler::SLOTS);
+        let tone: Vec<f32> = (0..2000).map(|i| (i as f32 * 0.02).sin() * 0.5).collect();
+        p.sampler.slots[0] = Some(SlotData::new(
+            "Amen",
+            22_050,
+            1,
+            &tone,
+            SlotMeta::sliced(24, vec![0, 500, 1000, 1500], 120.0, 2000),
+        ));
+        p.sampler.slots[3] = Some(SlotData::new(
+            "Vox",
+            22_050,
+            1,
+            &tone,
+            SlotMeta::chromatic(40, 63, 40, 2000),
+        ));
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(p.sampler.slot_for_key(25), Some(0));
+        assert_eq!(p.sampler.slot_for_key(50), Some(3));
+        assert_eq!(p.sampler.slot_for_key(30), None);
+        assert_eq!(
+            p.sampler.free_base_key(1, 4),
+            Some(28),
+            "first gap above C1 that fits"
+        );
+        assert_eq!(p.sampler.free_base_key(1, 20), Some(64));
+        assert_eq!(
+            p.sampler.free_base_key(0, 4),
+            Some(24),
+            "a slot ignores its own zone"
+        );
+        assert!(
+            p.sampler
+                .zone_clash(1, &SlotMeta::chromatic(26, 30, 26, 2000))
+        );
+        assert!(
+            !p.sampler
+                .zone_clash(0, &SlotMeta::chromatic(26, 30, 26, 2000))
+        );
+        assert_eq!(p.sampler.memory_bytes(), 2 * 2000 * 4);
+
+        let mut clash = p.clone();
+        clash.sampler.slots[5] = Some(SlotData::new(
+            "X",
+            22_050,
+            1,
+            &tone,
+            SlotMeta::chromatic(26, 30, 26, 2000),
+        ));
+        assert!(
+            matches!(clash.validate(), Err(ProjectError::Invalid(_))),
+            "overlapping zones"
+        );
+        let mut broken = p.clone();
+        broken.sampler.slots.pop();
+        assert!(matches!(broken.validate(), Err(ProjectError::Invalid(_))));
+        let mut bad_meta = p.clone();
+        bad_meta.sampler.slots[0].as_mut().unwrap().meta.slices = vec![0, 5000];
+        assert!(matches!(bad_meta.validate(), Err(ProjectError::Invalid(_))));
+    }
+
+    #[test]
+    fn projects_without_sampler_slots_still_load() {
+        let text = Project::default().to_ron();
+        let start = text.find("slots:").expect("slots field");
+        let open = start + text[start..].find('[').expect("slots list");
+        let mut depth = 0;
+        let mut close = open;
+        for (i, c) in text[open..].char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let old = format!(
+            "{}{}",
+            &text[..start],
+            text[close + 1..].trim_start_matches(',')
+        );
+        let p = Project::from_ron(&old).unwrap();
+        assert_eq!(p.sampler.slots.len(), crate::sampler::SLOTS);
+        assert!(p.sampler.slots.iter().all(Option::is_none));
+    }
+
     #[test]
     fn fm_voice_name_and_bank_round_trip_and_default() {
         let mut p = Project::default();

@@ -18,6 +18,7 @@ pub mod placeholder;
 pub mod project;
 pub mod random;
 pub mod render;
+pub mod sampler;
 pub mod sequencer;
 pub mod song;
 pub mod synth;

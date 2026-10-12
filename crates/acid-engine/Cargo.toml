@@ -12,3 +12,6 @@ hound.workspace = true
 rtrb.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
+symphonia.workspace = true
+flate2.workspace = true
+base64.workspace = true
