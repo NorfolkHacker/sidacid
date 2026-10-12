@@ -974,6 +974,26 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_zone_keeps_its_span_and_refuses_to_pass_the_top_key() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        let range = |app: &SidAcidApp| {
+            let m = &app.doc.project.sampler.slots[0].as_ref().unwrap().meta;
+            (m.base_key, m.high_key)
+        };
+        assert_eq!(range(&app), (24, 47));
+        let before = app.doc.project.clone();
+        assert!(!app.move_zone(0, 110, true));
+        assert!(app.view.message.is_some());
+        assert_eq!(app.doc.project, before);
+        app.view.message = None;
+        assert!(app.move_zone(0, 104, false));
+        assert_eq!(range(&app), (104, 127));
+        assert!(app.move_zone(0, 24, false));
+        assert_eq!(range(&app), (24, 47), "the span survives a trip to the top");
+    }
+
+    #[test]
     fn sampler_panel_draws_empty_and_loaded_slots_in_both_modes() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         run_frames(&mut app, 1);

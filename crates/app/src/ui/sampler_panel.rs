@@ -162,12 +162,7 @@ impl SidAcidApp {
                     .prefix("Zone "),
             );
             if r.changed() {
-                let shift = base as i16 - meta.base_key as i16;
-                self.edit_slot_meta(s, r.dragged(), |m| {
-                    m.base_key = base;
-                    m.high_key = (m.high_key as i16 + shift).clamp(base as i16, 127) as u8;
-                    m.root = (m.root as i16 + shift).clamp(0, 127) as u8;
-                });
+                self.move_zone(s, base, r.dragged());
             }
             if r.drag_stopped() || r.lost_focus() {
                 self.doc.end_gesture();

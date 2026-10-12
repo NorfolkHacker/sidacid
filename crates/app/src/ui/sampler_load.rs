@@ -165,6 +165,34 @@ impl SidAcidApp {
         }
     }
 
+    /// Moves a slot's zone to start at `base`, keeping its span; refuses
+    /// (with a message) a move that would push the top past key 127.
+    pub(crate) fn move_zone(&mut self, slot: usize, base: u8, merge: bool) -> bool {
+        let Some(meta) = self
+            .doc
+            .project
+            .sampler
+            .slots
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|d| &d.meta)
+        else {
+            return false;
+        };
+        let shift = base as i16 - meta.base_key as i16;
+        if meta.key_range().1 as i16 + shift > 127 {
+            self.view.message =
+                Some("The zone can't move that high: its top key would pass G9.".into());
+            return false;
+        }
+        self.edit_slot_meta(slot, merge, |m| {
+            m.base_key = base;
+            // In slice mode high_key is unused; keep it at or above the base.
+            m.high_key = (m.high_key as i16 + shift).clamp(base as i16, 127) as u8;
+            m.root = (m.root as i16 + shift).clamp(0, 127) as u8;
+        })
+    }
+
     /// Applies `change` to a copy of the slot's meta; refuses zone clashes
     /// and malformed metas with a message (a malformed step of a drag,
     /// `merge`, is refused silently so the message doesn't flicker).
