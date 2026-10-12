@@ -182,8 +182,38 @@ impl Default for FmMachine {
 pub struct SamplerMachine {
     pub patterns: Vec<NotePattern>,
     /// One entry per slot; `None` = empty.
-    #[serde(default = "empty_slots")]
+    #[serde(default = "empty_slots", deserialize_with = "at_most_slots")]
     pub slots: Vec<Option<crate::sampler::slot::SlotData>>,
+}
+
+/// Reads the slot list, refusing more than `SLOTS` entries before any
+/// extra entry's audio is decoded.
+fn at_most_slots<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<Option<crate::sampler::slot::SlotData>>, D::Error> {
+    use crate::sampler::SLOTS;
+    use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+    struct Slots;
+    impl<'de> Visitor<'de> for Slots {
+        type Value = Vec<Option<crate::sampler::slot::SlotData>>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "at most {SLOTS} sample slots")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut slots = Vec::with_capacity(SLOTS);
+            while slots.len() < SLOTS {
+                match seq.next_element()? {
+                    Some(slot) => slots.push(slot),
+                    None => return Ok(slots),
+                }
+            }
+            if seq.next_element::<IgnoredAny>()?.is_some() {
+                return Err(A::Error::invalid_length(SLOTS + 1, &self));
+            }
+            Ok(slots)
+        }
+    }
+    d.deserialize_seq(Slots)
 }
 
 fn empty_slots() -> Vec<Option<crate::sampler::slot::SlotData>> {
@@ -545,7 +575,14 @@ impl Project {
             0 | 1 => ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
                 .upgrade(),
-            PROJECT_VERSION => ron::from_str::<Project>(text).map_err(parse)?,
+            PROJECT_VERSION => {
+                // Embedded 16-bit PCM may total half the f32 memory limit.
+                let budget = crate::sampler::MEMORY_LIMIT as u64 / 2;
+                crate::sampler::slot::pcm_codec::with_budget(budget, || {
+                    ron::from_str::<Project>(text)
+                })
+                .map_err(parse)?
+            }
             v => return Err(ProjectError::TooNew(v)),
         };
         p.validate()?;
@@ -636,6 +673,70 @@ mod tests {
         let mut bad_meta = p.clone();
         bad_meta.sampler.slots[0].as_mut().unwrap().meta.slices = vec![0, 5000];
         assert!(matches!(bad_meta.validate(), Err(ProjectError::Invalid(_))));
+    }
+
+    /// A default project's RON with the sampler's slot list replaced.
+    fn ron_with_slot_entries(entries: &[String]) -> String {
+        let text = Project::default().to_ron();
+        let start = text.find("slots:").expect("slots field");
+        let open = start + text[start..].find('[').expect("slots list");
+        let close = open + text[open..].find(']').expect("end of slots list");
+        format!("{}{}{}", &text[..=open], entries.join(", "), &text[close..])
+    }
+
+    fn slot_entry(base_key: u8, frames: u32) -> (String, String) {
+        use crate::sampler::slot::{SlotData, SlotMeta, pcm_codec};
+        let mut d = SlotData::new(
+            "x",
+            44_100,
+            1,
+            &[],
+            SlotMeta::chromatic(base_key, base_key + 7, base_key, frames),
+        );
+        d.pcm = vec![0; frames as usize];
+        (
+            ron::ser::to_string(&Some(d)).unwrap(),
+            pcm_codec::encode(&vec![0; frames as usize]),
+        )
+    }
+
+    #[test]
+    fn more_than_sixteen_slots_are_refused_without_decoding_the_extras() {
+        let nones = vec!["None".to_string(); crate::sampler::SLOTS + 1];
+        assert!(matches!(
+            Project::from_ron(&ron_with_slot_entries(&nones)),
+            Err(ProjectError::Parse(_))
+        ));
+        // The 17th entry's audio is not valid base64: were it decoded, the
+        // error would be about that instead of the slot count.
+        let (entry, pcm) = slot_entry(0, 100);
+        let mut entries = vec!["None".to_string(); crate::sampler::SLOTS];
+        entries.push(entry.replace(&pcm, "!!not base64!!"));
+        match Project::from_ron(&ron_with_slot_entries(&entries)) {
+            Err(ProjectError::Parse(e)) => assert!(e.contains("at most 16"), "{e}"),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        let exact = vec!["None".to_string(); crate::sampler::SLOTS];
+        assert!(Project::from_ron(&ron_with_slot_entries(&exact)).is_ok());
+    }
+
+    #[test]
+    fn embedded_audio_over_the_memory_limit_is_refused_while_parsing() {
+        // 16 slots of 2.2 MB of 16-bit audio: 35 MB, over the 32 MB of PCM
+        // that MEMORY_LIMIT (64 MB of f32) allows.
+        let entries: Vec<String> = (0..crate::sampler::SLOTS as u8)
+            .map(|i| slot_entry(i * 8, 1_100_000).0)
+            .collect();
+        match Project::from_ron(&ron_with_slot_entries(&entries)) {
+            Err(ProjectError::Parse(e)) => assert!(e.contains("memory"), "{e}"),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        // The budget is per parse: a project within it still loads afterwards.
+        let few: Vec<String> = (0..2u8).map(|i| slot_entry(i * 8, 1_100_000).0).collect();
+        let mut few = few;
+        few.resize(crate::sampler::SLOTS, "None".into());
+        assert!(Project::from_ron(&ron_with_slot_entries(&few)).is_ok());
+        assert!(Project::from_ron(&ron_with_slot_entries(&few)).is_ok());
     }
 
     #[test]
