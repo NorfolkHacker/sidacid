@@ -17,6 +17,10 @@ const MIN_RATE: f64 = 1e-6;
 const LOOP_XFADE_S: f64 = 0.010;
 /// Envelope level at which a releasing voice stops.
 const SILENT: f32 = 1e-4;
+/// Level/Pan changes glide: a gain step of 1.0 takes this long.
+const GAIN_RAMP_S: f32 = 0.005;
+/// A stolen voice's old sound fades out over this long.
+const DECLICK_S: f32 = 0.002;
 
 /// What a note plays: a range of source frames, its direction, an
 /// optional loop, and the playback rate in source frames per output sample.
@@ -100,6 +104,8 @@ pub struct Voice {
     pos: f64,
     step: f64,
     end: f64,
+    /// First frame of the segment (the loop crossfade never reads before it).
+    start_frame: f64,
     reverse: bool,
     looping: bool,
     loop_start: f64,
@@ -109,7 +115,18 @@ pub struct Voice {
     release_coef: f32,
     /// Velocity factor; the slot's Level is applied live in `render`.
     velocity: f32,
+    /// Level × pan per side, gliding toward the slot's settings.
+    gain: [f32; 2],
+    /// Set by `start`: the next render jumps `gain` to the settings.
+    gain_fresh: bool,
     filter: [Svf; 2],
+    /// Whether the filter ran in the previous render.
+    filter_was_on: bool,
+    /// This voice's last output sample (left, right).
+    last_out: [f32; 2],
+    /// A stolen voice's old output, fading out under the new note.
+    declick: [f32; 2],
+    declick_left: u32,
     sample_rate: f32,
 }
 
@@ -125,6 +142,7 @@ impl Voice {
             pos: 0.0,
             step: 0.0,
             end: 0.0,
+            start_frame: 0.0,
             reverse: false,
             looping: false,
             loop_start: 0.0,
@@ -133,12 +151,30 @@ impl Voice {
             stage: Stage::Off,
             release_coef: 0.0,
             velocity: 0.0,
+            gain: [0.0; 2],
+            gain_fresh: true,
             filter: [Svf::new(sample_rate), Svf::new(sample_rate)],
+            filter_was_on: false,
+            last_out: [0.0; 2],
+            declick: [0.0; 2],
+            declick_left: 0,
             sample_rate,
         }
     }
 
+    /// Starts a note. Starting over a sounding voice (a steal) fades its
+    /// old sound out over `DECLICK_S` instead of cutting it.
     pub fn start(&mut self, seg: &Segment, slot: usize, key: u8, vel: u8, live: bool, age: u32) {
+        if self.active {
+            self.declick = self.last_out;
+            self.declick_left = (DECLICK_S * self.sample_rate).max(1.0) as u32;
+        } else {
+            self.declick = [0.0; 2];
+            self.declick_left = 0;
+        }
+        self.last_out = [0.0; 2];
+        self.gain_fresh = true;
+        self.start_frame = seg.start;
         self.active = true;
         self.held = true;
         self.live = live;
@@ -167,6 +203,7 @@ impl Voice {
         self.stage = Stage::Attack;
         self.velocity = vel.min(127) as f32 / 127.0;
         self.filter = [Svf::new(self.sample_rate), Svf::new(self.sample_rate)];
+        self.filter_was_on = false;
     }
 
     pub fn release(&mut self, seconds: f32) {
@@ -203,15 +240,28 @@ impl Voice {
         let decay_coef = (-1.0 / (s.decay_s * sr).max(1.0)).exp();
         let end_fade = (END_FADE_S * sr).max(1.0);
         let loop_len = self.loop_end - self.loop_start;
+        // the pre-loop window [loop_start - xfade, loop_start) stays in the segment
         let xfade = (LOOP_XFADE_S * sample.sample_rate as f64)
             .min(loop_len * 0.5)
-            .max(1.0);
+            .min(self.loop_start - self.start_frame);
         let filter_on = s.cutoff_knob < 0.999 || s.resonance > 0.0;
         if filter_on {
+            if !self.filter_was_on {
+                // don't resume from the state it had when it was last on
+                self.filter = [Svf::new(sr), Svf::new(sr)];
+            }
             for f in &mut self.filter {
                 f.set(s.cutoff_hz, s.resonance);
             }
         }
+        self.filter_was_on = filter_on;
+        let target = [s.level_gain * s.pan_l, s.level_gain * s.pan_r];
+        if self.gain_fresh {
+            self.gain = target;
+            self.gain_fresh = false;
+        }
+        let max_gain_step = 1.0 / (GAIN_RAMP_S * sr).max(1.0);
+        let declick_len = (DECLICK_S * sr).max(1.0);
         for i in 0..out_l.len().min(out_r.len()) {
             match self.stage {
                 Stage::Attack => {
@@ -247,7 +297,7 @@ impl Voice {
                 return;
             }
             let (mut l, mut r) = sample.read(self.pos);
-            if self.looping && self.pos > self.loop_end - xfade {
+            if self.looping && xfade > 0.0 && self.pos > self.loop_end - xfade {
                 let a = ((self.loop_end - self.pos) / xfade) as f32;
                 let (l2, r2) = sample.read(self.pos - loop_len);
                 l = l * a + l2 * (1.0 - a);
@@ -263,9 +313,25 @@ impl Voice {
                 l = self.filter[0].process(l);
                 r = self.filter[1].process(r);
             }
-            let g = self.env * edge * self.velocity * s.level_gain;
-            out_l[i] += l * g * s.pan_l;
-            out_r[i] += r * g * s.pan_r;
+            for (g, t) in self.gain.iter_mut().zip(target) {
+                let d = t - *g;
+                *g = if d.abs() <= max_gain_step {
+                    t
+                } else {
+                    *g + max_gain_step.copysign(d)
+                };
+            }
+            let g = self.env * edge * self.velocity;
+            let (mut vl, mut vr) = (l * g * self.gain[0], r * g * self.gain[1]);
+            if self.declick_left > 0 {
+                let fade = self.declick_left as f32 / declick_len;
+                vl += self.declick[0] * fade;
+                vr += self.declick[1] * fade;
+                self.declick_left -= 1;
+            }
+            self.last_out = [vl, vr];
+            out_l[i] += vl;
+            out_r[i] += vr;
             self.pos += self.step;
             if self.looping && self.pos >= self.loop_end {
                 self.pos = self.loop_start + (self.pos - self.loop_start).rem_euclid(loop_len);
@@ -279,6 +345,7 @@ mod tests {
     use super::*;
     use crate::params::SlotParam;
     use crate::sampler::slot::{SlotMeta, SlotPlay};
+    use crate::testutil::all_finite;
 
     const SR: f32 = 48_000.0;
 
@@ -303,6 +370,219 @@ mod tests {
         v.render(sample, s, &mut l, &mut r);
         assert_eq!(l, r, "centred mono");
         l
+    }
+
+    fn run_stereo(
+        v: &mut Voice,
+        sample: &SampleData,
+        s: &SlotSettings,
+        n: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        v.render(sample, s, &mut l, &mut r);
+        (l, r)
+    }
+
+    fn whole(frames: usize) -> Segment {
+        Segment {
+            start: 0.0,
+            end: frames as f64,
+            reverse: false,
+            looping: None,
+            rate: 1.0,
+        }
+    }
+
+    fn constant(frames: usize, x: f32) -> SampleData {
+        SampleData {
+            sample_rate: 48_000,
+            left: vec![x; frames].into(),
+            right: None,
+        }
+    }
+
+    fn max_step(x: &[f32]) -> f32 {
+        x.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn the_filter_darkens_a_bright_sample() {
+        let bright = SampleData {
+            sample_rate: 48_000,
+            left: (0..48_000)
+                .map(|i| if i % 2 == 0 { 0.8 } else { -0.8 })
+                .collect(),
+            right: None,
+        };
+        let open = SlotSettings::default();
+        let mut dark = open;
+        dark.set(SlotParam::Cutoff, 0.1);
+        let (mut a, mut b) = (Voice::new(SR), Voice::new(SR));
+        a.start(&whole(48_000), 0, 36, 127, false, 1);
+        b.start(&whole(48_000), 0, 36, 127, false, 1);
+        let dry = run(&mut a, &bright, &open, 4800);
+        let wet = run(&mut b, &bright, &dark, 4800);
+        assert!(all_finite(&wet));
+        assert!(
+            rms(&wet[480..]) < 0.05 * rms(&dry[480..]),
+            "{} vs {}",
+            rms(&wet[480..]),
+            rms(&dry[480..])
+        );
+        let mut resonant = open;
+        resonant.set(SlotParam::Cutoff, 0.5);
+        resonant.set(SlotParam::Resonance, 1.0);
+        let mut c = Voice::new(SR);
+        c.start(&whole(48_000), 0, 36, 127, false, 1);
+        assert!(all_finite(&run(
+            &mut c,
+            &sine_sample(48_000),
+            &resonant,
+            4800
+        )));
+    }
+
+    #[test]
+    fn a_re_enabled_filter_starts_clean() {
+        let sample = sine_sample(48_000);
+        let open = SlotSettings::default();
+        let mut dark = open;
+        dark.set(SlotParam::Cutoff, 0.1);
+        let mut bright = open;
+        bright.set(SlotParam::Cutoff, 0.9);
+        // `a` runs its filter first; `b` never has until the last block
+        let (mut a, mut b) = (Voice::new(SR), Voice::new(SR));
+        a.start(&whole(48_000), 0, 36, 127, false, 1);
+        b.start(&whole(48_000), 0, 36, 127, false, 1);
+        run(&mut a, &sample, &dark, 1000);
+        run(&mut b, &sample, &open, 1000);
+        run(&mut a, &sample, &open, 500);
+        run(&mut b, &sample, &open, 500);
+        let after = run(&mut a, &sample, &bright, 200);
+        let fresh = run(&mut b, &sample, &bright, 200);
+        for (x, y) in after.iter().zip(&fresh) {
+            assert!((x - y).abs() < 1e-6, "stale filter state: {x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn stereo_samples_and_pan_reach_the_outputs() {
+        let stereo = SampleData {
+            sample_rate: 48_000,
+            left: vec![0.5; 4800].into(),
+            right: Some(vec![-0.5; 4800].into()),
+        };
+        let centre = SlotSettings::default();
+        let mut v = Voice::new(SR);
+        v.start(&whole(4800), 0, 36, 127, false, 1);
+        let (l, r) = run_stereo(&mut v, &stereo, &centre, 2000);
+        assert!(l[1000] > 0.1, "left side: {}", l[1000]);
+        assert!(
+            (l[1000] + r[1000]).abs() < 1e-6,
+            "right is the left negated"
+        );
+        let mono = constant(4800, 0.5);
+        let mut c = Voice::new(SR);
+        c.start(&whole(4800), 0, 36, 127, false, 1);
+        let (cl, _) = run_stereo(&mut c, &mono, &centre, 2000);
+        let mut hard_left = centre;
+        hard_left.set(SlotParam::Pan, 0.0);
+        let mut p = Voice::new(SR);
+        p.start(&whole(4800), 0, 36, 127, false, 1);
+        let (pl, pr) = run_stereo(&mut p, &mono, &hard_left, 2000);
+        assert!(pr[1000..].iter().all(|x| x.abs() < 1e-6), "right is silent");
+        assert!(
+            (pl[1000] / cl[1000] - std::f32::consts::SQRT_2).abs() < 1e-3,
+            "{} vs {}",
+            pl[1000],
+            cl[1000]
+        );
+    }
+
+    #[test]
+    fn the_loop_crossfade_never_reads_before_the_play_start() {
+        // loud junk before the play start, a quiet tone after it
+        let sample = SampleData {
+            sample_rate: 48_000,
+            left: (0..8000)
+                .map(|i| {
+                    if i < 1000 {
+                        5.0
+                    } else {
+                        (i as f32 * 0.05).sin() * 0.5
+                    }
+                })
+                .collect(),
+            right: None,
+        };
+        let s = SlotSettings::default();
+        for loop_start in [1000.0, 1100.0] {
+            let seg = Segment {
+                start: 1000.0,
+                end: 8000.0,
+                reverse: false,
+                looping: Some((loop_start, 3000.0)),
+                rate: 1.0,
+            };
+            let mut v = Voice::new(SR);
+            v.start(&seg, 0, 60, 127, false, 1);
+            let out = run(&mut v, &sample, &s, 10_000);
+            let p = out.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            assert!(p < 0.6, "loop at {loop_start}: read the junk ({p})");
+        }
+    }
+
+    #[test]
+    fn level_jumps_are_smoothed() {
+        let sample = constant(48_000, 0.8);
+        let silent = SlotSettings {
+            level_gain: 0.0,
+            ..Default::default()
+        };
+        let mut full = silent;
+        full.set(SlotParam::Level, 1.0);
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        let before = run(&mut v, &sample, &silent, 1000);
+        assert!(before.iter().all(|x| *x == 0.0));
+        let after = run(&mut v, &sample, &full, 1000);
+        assert!(after[0].abs() < 0.05, "no jump: {}", after[0]);
+        assert!(max_step(&after) < 0.05, "{}", max_step(&after));
+        assert!(
+            (after[999] - 0.8 * 1.25).abs() < 1e-4,
+            "settles: {}",
+            after[999]
+        );
+    }
+
+    #[test]
+    fn a_restarted_voice_fades_out_its_old_sound() {
+        let sample = constant(48_000, 0.8);
+        let s = SlotSettings::default();
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        let before = run(&mut v, &sample, &s, 2000);
+        let level = before[1999];
+        assert!(level > 0.3);
+        v.start(&whole(48_000), 0, 40, 127, false, 2);
+        let after = run(&mut v, &sample, &s, 500);
+        let mut joined = vec![level];
+        joined.extend_from_slice(&after);
+        assert!(
+            max_step(&joined) < 0.1 * level,
+            "steal click: {}",
+            max_step(&joined)
+        );
+        assert!(
+            after[100] > 0.0 && after[499] > 0.9 * level,
+            "the new note plays"
+        );
     }
 
     #[test]
@@ -404,6 +684,9 @@ mod tests {
         assert_eq!(run(&mut a, &sample, &s, 500), run(&mut b, &sample, &s, 500));
         let mut quieter = s;
         quieter.level_gain = s.level_gain * 0.5;
+        // the change glides in over a few ms, then holds
+        run(&mut a, &sample, &s, 500);
+        run(&mut b, &sample, &quieter, 500);
         let full = run(&mut a, &sample, &s, 500);
         let half = run(&mut b, &sample, &quieter, 500);
         assert!(full.iter().any(|x| x.abs() > 0.1), "the voice sounds");

@@ -221,10 +221,13 @@ impl SlotData {
     }
 
     /// Builds the engine's copy. Allocates: call off the audio thread.
+    /// Expects a valid slot (`is_valid`); otherwise only whole frames are
+    /// read, and a slot with more than two channels plays its first one.
     pub fn to_sample(&self) -> SampleData {
         let ch = self.channels.max(1) as usize;
+        let whole = &self.pcm[..self.frames() as usize * ch];
         let side = |c: usize| -> Box<[f32]> {
-            self.pcm
+            whole
                 .iter()
                 .skip(c)
                 .step_by(ch)
@@ -310,6 +313,16 @@ impl SlotPlay {
             }
             SlotMode::Chromatic => (self.base_key, self.high_key),
         }
+    }
+
+    /// Whether `other` maps keys to the same zones: same mode and key
+    /// range, and (slice mode) the same slices. Markers, root and tempo
+    /// may differ.
+    pub fn same_zones(&self, other: &SlotPlay) -> bool {
+        self.mode == other.mode
+            && self.key_range() == other.key_range()
+            && (self.mode == SlotMode::Chromatic
+                || self.slices[..self.slice_count] == other.slices[..other.slice_count])
     }
 }
 
@@ -407,6 +420,21 @@ mod tests {
         assert!(s.right.is_some());
         assert!((s.left[10] - (10.0 * 2.0 * 0.01f32).sin() * 0.7).abs() < 1e-4);
         assert!(d.is_valid());
+    }
+
+    #[test]
+    fn to_sample_drops_a_partial_trailing_frame() {
+        let mut d = SlotData::new(
+            "t",
+            44_100,
+            2,
+            &tone(3, 2),
+            SlotMeta::chromatic(40, 50, 40, 3),
+        );
+        d.pcm.truncate(5);
+        let s = d.to_sample();
+        assert_eq!(s.left.len(), 2);
+        assert_eq!(s.right.as_ref().map(|r| r.len()), Some(2));
     }
 
     #[test]

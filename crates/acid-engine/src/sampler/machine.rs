@@ -58,7 +58,14 @@ impl Sampler {
     pub fn set_param(&mut self, p: SamplerParam, v: f32) {
         match p {
             SamplerParam::Volume => self.volume = v.clamp(0.0, 1.0).powi(2),
-            SamplerParam::Grit => self.grit = on(v),
+            SamplerParam::Grit => {
+                let grit = on(v);
+                if grit && !self.grit {
+                    // capture a fresh value on the next sample
+                    self.grit_phase = 1.0;
+                }
+                self.grit = grit;
+            }
         }
     }
 
@@ -94,11 +101,17 @@ impl Sampler {
         true
     }
 
+    /// Exchanges a slot's play (zone and markers). Sounding voices keep
+    /// their already-started segment unless the zone layout (mode, key
+    /// range or slices) changes, which stops them; marker edits apply to
+    /// the next notes.
     pub fn swap_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
         if slot >= SLOTS {
             return false;
         }
-        self.kill_slot(slot);
+        if !self.plays[slot].same_zones(play) {
+            self.kill_slot(slot);
+        }
         std::mem::swap(&mut self.plays[slot], play);
         true
     }
@@ -238,7 +251,7 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampler::slot::{SlotMeta, SlotPlay};
+    use crate::sampler::slot::{SlotMeta, SlotMode, SlotPlay};
     use crate::testutil::{all_finite, peak};
 
     const SR: f32 = 48_000.0;
@@ -359,6 +372,116 @@ mod tests {
         assert_eq!(s.active_voices(), 16);
         s.note_on(80, 100, false);
         assert_eq!(s.active_voices(), 16);
+    }
+
+    #[test]
+    fn a_released_voice_is_stolen_before_the_oldest_held_one() {
+        let mut s = loaded();
+        for k in 60..76 {
+            s.note_on(k, 100, false);
+        }
+        s.note_off(67, false);
+        assert_eq!(s.active_voices(), 16, "67 is still releasing");
+        s.note_on(80, 100, false);
+        let mut want: Vec<u8> = (60..76).collect();
+        want[7] = 80;
+        assert_eq!(s.held_keys(), want, "80 took the released voice");
+        s.note_on(81, 100, false);
+        want[0] = 81;
+        assert_eq!(s.held_keys(), want, "then the oldest held key (60) goes");
+    }
+
+    #[test]
+    fn a_stolen_voice_fades_out_without_a_click() {
+        let mut s = Sampler::new(SR);
+        let mut dc = Some(Arc::new(SampleData {
+            sample_rate: 48_000,
+            left: vec![0.5; 48_000].into(),
+            right: None,
+        }));
+        s.swap_sample(0, &mut dc);
+        let mut play = SlotPlay::from_meta(&SlotMeta::chromatic(36, 96, 60, 48_000));
+        s.swap_play(0, &mut play);
+        for k in 60..76 {
+            s.note_on(k, 100, false);
+        }
+        let (before, _) = render(&mut s, 2000);
+        let per_voice = before[1999] / 16.0;
+        assert!(per_voice > 0.01);
+        s.note_on(80, 100, false);
+        let (after, _) = render(&mut s, 500);
+        let mut joined = vec![before[1999]];
+        joined.extend_from_slice(&after);
+        let step = joined
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.1 * per_voice, "steal click {step} vs {per_voice}");
+    }
+
+    #[test]
+    fn grit_switched_back_on_does_not_replay_a_stale_value() {
+        let mut s = loaded();
+        s.set_param(SamplerParam::Volume, 1.0);
+        s.set_param(SamplerParam::Grit, 1.0);
+        s.note_on(60, 127, false);
+        for n in [4801, 4802, 4803] {
+            render(&mut s, n);
+        }
+        s.set_param(SamplerParam::Grit, 0.0);
+        s.all_off();
+        render(&mut s, 48_000);
+        assert_eq!(s.active_voices(), 0);
+        s.set_param(SamplerParam::Grit, 1.0);
+        let (l, r) = render(&mut s, 4);
+        assert_eq!((l[0], r[0]), (0.0, 0.0), "the held value is fresh");
+    }
+
+    #[test]
+    fn a_marker_edit_keeps_voices_but_a_zone_change_stops_them() {
+        let mut s = Sampler::new(SR);
+        s.swap_sample(0, &mut Some(sine(48_000)));
+        let mut meta = SlotMeta::chromatic(48, 71, 60, 48_000);
+        meta.loop_on = true;
+        meta.loop_start = 10_000;
+        meta.loop_end = 30_000;
+        s.swap_play(0, &mut SlotPlay::from_meta(&meta));
+        s.note_on(60, 100, false);
+        render(&mut s, 480);
+        let mut markers = meta.clone();
+        markers.loop_end = 20_000;
+        markers.start = 1_000;
+        markers.root = 62;
+        assert!(s.swap_play(0, &mut SlotPlay::from_meta(&markers)));
+        assert_eq!(s.active_voices(), 1, "marker/loop edits keep the note");
+        let (l, _) = render(&mut s, 480);
+        assert!(peak(&l) > 0.01, "and it keeps sounding");
+        for change in [
+            |m: &mut SlotMeta| m.base_key = 50,
+            |m: &mut SlotMeta| m.high_key = 70,
+            |m: &mut SlotMeta| m.mode = SlotMode::Slice,
+        ] {
+            let mut zone = markers.clone();
+            change(&mut zone);
+            s.swap_play(0, &mut SlotPlay::from_meta(&markers));
+            s.note_on(60, 100, false);
+            assert!(s.active_voices() > 0);
+            s.swap_play(0, &mut SlotPlay::from_meta(&zone));
+            assert_eq!(s.active_voices(), 0, "a zone change stops the slot");
+        }
+        let mut sliced = SlotMeta::sliced(36, vec![0, 1000, 2000], 120.0, 48_000);
+        s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
+        s.note_on(37, 100, false);
+        sliced.original_bpm = 100.0;
+        s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
+        assert_eq!(s.active_voices(), 1, "a tempo edit keeps slices playing");
+        sliced.slices = vec![0, 1500, 2000];
+        s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
+        assert_eq!(s.active_voices(), 0, "moving a slice stops the slot");
+        s.note_on(37, 100, false);
+        sliced.slices = vec![0, 1500, 2000, 3000];
+        s.swap_play(0, &mut SlotPlay::from_meta(&sliced));
+        assert_eq!(s.active_voices(), 0, "adding a slice stops the slot");
     }
 
     #[test]

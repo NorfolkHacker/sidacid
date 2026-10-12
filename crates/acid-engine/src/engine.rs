@@ -571,18 +571,22 @@ mod tests {
         e
     }
 
+    /// A one-second mono 44.1 kHz sine slot laid out by `meta`.
+    fn tone_slot(meta: crate::sampler::slot::SlotMeta) -> crate::sampler::slot::SlotData {
+        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        crate::sampler::slot::SlotData::new("Tone", 44_100, 1, &tone, meta)
+    }
+
     fn sampler_project() -> Project {
         use crate::project::Note;
-        use crate::sampler::slot::{SlotData, SlotMeta};
+        use crate::sampler::slot::SlotMeta;
         let mut p = Project::default();
-        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
-        p.sampler.slots[0] = Some(SlotData::new(
-            "Tone",
+        p.sampler.slots[0] = Some(tone_slot(SlotMeta::sliced(
+            36,
+            vec![0, 11_025, 22_050, 33_075],
+            120.0,
             44_100,
-            1,
-            &tone,
-            SlotMeta::sliced(36, vec![0, 11_025, 22_050, 33_075], 120.0, 44_100),
-        ));
+        )));
         p.sampler.patterns[0].notes.push(Note {
             start: 0,
             len: 4,
@@ -620,14 +624,13 @@ mod tests {
 
     #[test]
     fn stopping_twice_silences_sampler_loops() {
-        use crate::sampler::slot::{SlotData, SlotMeta};
+        use crate::sampler::slot::SlotMeta;
         let mut p = Project::default();
-        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
         let mut meta = SlotMeta::chromatic(48, 71, 60, 44_100);
         meta.loop_on = true;
         meta.loop_start = 10_000;
         meta.loop_end = 30_000;
-        p.sampler.slots[0] = Some(SlotData::new("Loop", 44_100, 1, &tone, meta));
+        p.sampler.slots[0] = Some(tone_slot(meta));
         p.params.insert(
             ParamId::SamplerSlot(0, crate::params::SlotParam::Release),
             1.0,
@@ -643,16 +646,10 @@ mod tests {
 
     /// A project whose sampler slot 0 holds a chromatic tone (keys 36..=96).
     fn tone_slot_project() -> Project {
-        use crate::sampler::slot::{SlotData, SlotMeta};
         let mut p = Project::default();
-        let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
-        p.sampler.slots[0] = Some(SlotData::new(
-            "Tone",
-            44_100,
-            1,
-            &tone,
-            SlotMeta::chromatic(36, 96, 60, 44_100),
-        ));
+        p.sampler.slots[0] = Some(tone_slot(crate::sampler::slot::SlotMeta::chromatic(
+            36, 96, 60, 44_100,
+        )));
         p
     }
 
@@ -1355,6 +1352,7 @@ mod tests {
         e.play();
         assert_eq!(e.fm.sounding(), vec![72], "play released the pattern note");
         e.poly_on(4, 60, 100, false);
+        e.poly_on(5, 60, 100, false);
         e.stop();
         assert_eq!(e.fm.sounding(), vec![72], "stop released the pattern note");
         assert_eq!(e.sampler.held_keys(), vec![72]);

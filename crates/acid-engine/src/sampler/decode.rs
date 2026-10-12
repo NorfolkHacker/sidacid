@@ -19,6 +19,9 @@ pub struct Decoded {
     pub channels: u8,
     /// Interleaved, -1..1.
     pub samples: Vec<f32>,
+    /// The file ended before all the audio its header promised; `samples`
+    /// holds what decoded.
+    pub truncated: bool,
 }
 
 impl Decoded {
@@ -90,6 +93,7 @@ pub fn decode(bytes: &[u8], extension: Option<&str>) -> Result<Decoded, DecodeEr
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| DecodeError::Unsupported("no audio track".into()))?;
     let track_id = track.id;
+    let promised_frames = track.codec_params.n_frames;
     let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
@@ -143,10 +147,12 @@ pub fn decode(bytes: &[u8], extension: Option<&str>) -> Result<Decoded, DecodeEr
     if channels == 0 || samples.is_empty() || sample_rate == 0 {
         return Err(DecodeError::Empty);
     }
+    let frames = (samples.len() / channels) as u64;
     Ok(Decoded {
         sample_rate,
         channels: channels as u8,
         samples,
+        truncated: promised_frames.is_some_and(|n| frames < n),
     })
 }
 
@@ -185,6 +191,50 @@ mod tests {
             (s.samples[41] + s.samples[40]).abs() < 1e-4,
             "right is the negated left"
         );
+    }
+
+    #[test]
+    fn a_truncated_file_loads_what_decoded_and_says_so() {
+        let full = wav(1, 8_000, 4_000);
+        let d = decode(&full, Some("wav")).unwrap();
+        assert!(!d.truncated);
+        let cut = &full[..full.len() - 1000];
+        let d = decode(cut, Some("wav")).unwrap();
+        assert!(d.truncated, "the file ends early");
+        assert!(d.frames() > 3_000 && d.frames() < 4_000, "{}", d.frames());
+    }
+
+    #[test]
+    fn more_than_two_channels_keep_the_first_two() {
+        let d = decode(&wav(4, 8_000, 500), Some("wav")).unwrap();
+        assert_eq!((d.channels, d.frames()), (2, 500));
+        assert!(d.samples[40].abs() > 1e-3);
+        assert!(
+            (d.samples[40] + d.samples[41]).abs() < 1e-4,
+            "left then the (negated) second channel"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_header_is_refused_without_a_panic() {
+        let mut bad = wav(1, 8_000, 500);
+        let fmt = bad.windows(4).position(|w| w == b"fmt ").unwrap();
+        // the format tag: an unknown codec
+        bad[fmt + 8..fmt + 10].copy_from_slice(&0x7777u16.to_le_bytes());
+        assert!(matches!(
+            decode(&bad, Some("wav")),
+            Err(DecodeError::Unsupported(_))
+        ));
+        let mut bad = wav(1, 8_000, 500);
+        // a fmt chunk that claims to be far longer than the file
+        bad[fmt + 4..fmt + 8].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
+        assert!(decode(&bad, Some("wav")).is_err());
+        for n in [0, 4, 12, 30, 44] {
+            assert!(
+                decode(&wav(1, 8_000, 500)[..n], Some("wav")).is_err(),
+                "{n} bytes"
+            );
+        }
     }
 
     #[test]

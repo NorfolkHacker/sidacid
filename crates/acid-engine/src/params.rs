@@ -457,6 +457,17 @@ mod tests {
         assert!((sampler_map::attack_seconds(0.0) - 0.001).abs() < 1e-6);
         assert!((sampler_map::release_seconds(1.0) - 4.0).abs() < 1e-3);
         assert!((sampler_map::cutoff_hz(1.0) - 18_000.0).abs() < 1.0);
+        assert_eq!(sampler_map::level_gain(1.0), 1.25);
+        assert!((sampler_map::decay_seconds(0.0) - 0.005).abs() < 1e-6);
+        assert!((sampler_map::decay_seconds(1.0) - 4.0).abs() < 1e-3);
+        // out-of-range knob values clamp to the ends
+        assert_eq!(sampler_map::level_gain(2.0), 1.25);
+        assert_eq!(sampler_map::level_gain(-1.0), 0.0);
+        assert_eq!(sampler_map::tune_semitones(5.0), 24);
+        assert_eq!(sampler_map::tune_semitones(-5.0), -24);
+        assert_eq!(sampler_map::fine_cents(-1.0), -50.0);
+        assert!((sampler_map::cutoff_hz(-1.0) - 40.0).abs() < 1e-3);
+        assert!((sampler_map::cutoff_hz(2.0) - 18_000.0).abs() < 1.0);
     }
 
     #[test]
