@@ -95,6 +95,10 @@ pub struct Status {
     /// A `Command::Song` was refused (an invalid song) since the previous
     /// status; the engine kept its old song.
     pub song_rejected: bool,
+    /// `Command::Stop`s taken since this engine was loaded (wrapping). The
+    /// UI counts the Stops it sends the same way: a status that has not
+    /// caught up predates its latest Stop.
+    pub stops: u32,
 }
 
 pub enum Event {
@@ -118,6 +122,7 @@ pub struct EngineHost {
     guard_fired: bool,
     song_rejected: bool,
     cpu: f32,
+    stops: u32,
 }
 
 /// Wires an engine to a fresh pair of rings. Call on the UI thread; move
@@ -141,6 +146,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         guard_fired: false,
         song_rejected: false,
         cpu: 0.0,
+        stops: 0,
     };
     (host, command_tx, event_rx)
 }
@@ -184,7 +190,10 @@ impl EngineHost {
                 Command::SetBpm(bpm) => self.engine.set_bpm(bpm),
                 Command::SetSwing(swing) => self.engine.set_swing(swing),
                 Command::Play => self.engine.play(),
-                Command::Stop => self.engine.stop(),
+                Command::Stop => {
+                    self.engine.stop();
+                    self.stops = self.stops.wrapping_add(1);
+                }
                 Command::SelectPattern { machine, slot } => {
                     self.engine.select_pattern(machine as usize, slot)
                 }
@@ -231,6 +240,7 @@ impl EngineHost {
                     self.guard_fired = false;
                     self.song_rejected = false;
                     self.since_status = 0;
+                    self.stops = 0;
                 }
                 Command::SetMode(mode) => self.engine.set_mode(mode),
                 Command::Song(mut song) => {
@@ -273,6 +283,7 @@ impl EngineHost {
             song_bar: self.engine.song_bar().min(u16::MAX as usize) as u16,
             song_step: self.engine.song_step(),
             song_rejected: self.song_rejected,
+            stops: self.stops,
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
@@ -406,6 +417,29 @@ mod tests {
         let disposed =
             std::iter::from_fn(|| rx.pop().ok()).any(|e| matches!(e, Event::DisposeEngine(_)));
         assert!(disposed);
+    }
+
+    #[test]
+    fn statuses_count_the_stops_taken_and_a_new_engine_starts_at_zero() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let last_status = |rx: &mut rtrb::Consumer<Event>| {
+            std::iter::from_fn(|| rx.pop().ok())
+                .filter_map(|e| match e {
+                    Event::Status(s) => Some(s),
+                    _ => None,
+                })
+                .last()
+                .unwrap()
+        };
+        tx.push(Command::Play).unwrap();
+        tx.push(Command::Stop).unwrap();
+        tx.push(Command::Stop).unwrap();
+        run(&mut host, SR as usize / 10);
+        assert_eq!(last_status(&mut rx).stops, 2);
+        tx.push(Command::ReplaceEngine(Box::new(Engine::new(SR))))
+            .unwrap();
+        run(&mut host, SR as usize / 10);
+        assert_eq!(last_status(&mut rx).stops, 0);
     }
 
     #[test]

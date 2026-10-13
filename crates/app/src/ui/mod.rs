@@ -104,6 +104,9 @@ pub struct ViewState {
     /// Last step recorded for the held knob.
     pub rec_last: Option<(acid_engine::params::ParamId, u32)>,
     pub was_playing: bool,
+    /// `Command::Stop`s sent to the current engine (wrapping), matched
+    /// against `Status::stops` to spot a status from before the last Stop.
+    pub stops_sent: u32,
     /// Poly-roll drag per note machine (index 0 = FM, 1 = Sampler).
     pub poly_drag: [Option<poly_edit::PolyDrag>; 2],
     pub poly_snap: [poly_edit::Snap; 2],
@@ -216,6 +219,9 @@ impl SidAcidApp {
             if let &Command::SamplerSample { slot, .. } = &cmd {
                 self.view.wave_cache.remove(&(slot as usize));
             }
+            if matches!(cmd, Command::Stop) {
+                self.view.stops_sent = self.view.stops_sent.wrapping_add(1);
+            }
             if let &Command::SetParam(id, v) = &cmd {
                 let run = self
                     .pending
@@ -268,7 +274,12 @@ impl SidAcidApp {
     }
 
     /// A status from the audio thread: audio is running fine.
-    fn on_status(&mut self, status: Status, now: f64) {
+    fn on_status(&mut self, mut status: Status, now: f64) {
+        // Sent before the engine took our latest Stop: it is stopped by
+        // now, so the optimistic stop stands (no flicker back to playing).
+        if status.stops != self.view.stops_sent {
+            status.playing = false;
+        }
         if status.guard_fired {
             self.view.fault_until = now + 3.0;
         }
@@ -725,6 +736,44 @@ mod tests {
             app.view.song_cursor, 1,
             "the second stop returns to the start"
         );
+    }
+
+    #[test]
+    fn a_status_from_before_a_stop_does_not_flip_the_transport_back() {
+        let mut app = recording_app();
+        app.stop();
+        // Already in the ring before the engine took the Stop.
+        app.on_status(
+            Status {
+                playing: true,
+                ..Status::default()
+            },
+            0.0,
+        );
+        assert!(!app.status.playing, "a stale status");
+        let caught_up = |playing| Status {
+            playing,
+            stops: 1,
+            ..Status::default()
+        };
+        app.on_status(caught_up(false), 0.0);
+        app.play();
+        app.on_status(caught_up(true), 0.0);
+        assert!(app.status.playing, "Play after the Stop is heard");
+        app.set_mode(acid_engine::sequencer::Mode::Pattern);
+        app.on_status(caught_up(true), 0.0);
+        assert!(!app.status.playing, "a mode switch's Stop counts too");
+        app.load_document(Document::new(Project::default()));
+        app.on_status(caught_up(true), 0.0);
+        assert!(!app.status.playing, "from the old engine");
+        app.on_status(
+            Status {
+                playing: true,
+                ..Status::default()
+            },
+            0.0,
+        );
+        assert!(app.status.playing, "a fresh engine has taken no Stop");
     }
 
     #[test]

@@ -26,6 +26,7 @@ impl SidAcidApp {
         self.view.live.clear();
         self.view.rec_last = None;
         self.view.was_playing = false;
+        self.view.stops_sent = 0;
     }
 
     pub(crate) fn set_mode(&mut self, mode: Mode) {
@@ -39,7 +40,8 @@ impl SidAcidApp {
         // the engine's "first stop after a song end only releases".
         if self.status.playing {
             self.send(vec![Command::Stop]);
-            // Until a status says otherwise (a fast second Stop must see it).
+            // Until a status that has taken the Stop says otherwise (a fast
+            // second Stop must see it; see `on_status`).
             self.status.playing = false;
         }
         self.send(vec![Command::SetMode(mode)]);
@@ -87,8 +89,9 @@ impl SidAcidApp {
             self.stop_recording();
         }
         self.send(vec![Command::Stop]);
-        // Until a status says otherwise: a second Stop before the next
-        // status returns to the start, and nothing more is recorded.
+        // Until a status that has taken this Stop says otherwise (see
+        // `on_status`): a second Stop before then returns to the start,
+        // and nothing more is recorded.
         self.status.playing = false;
     }
 
