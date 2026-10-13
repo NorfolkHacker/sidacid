@@ -102,7 +102,7 @@ pub fn knob(
     let angle = ANGLE_MIN + (ANGLE_MAX - ANGLE_MIN) * shown;
     painter.add(egui::Shape::line(
         arc(ANGLE_MIN, angle),
-        Stroke::new(2.5_f32, theme::ACID),
+        Stroke::new(2.5_f32, theme::VIOLET),
     ));
     painter.circle_filled(center, radius, theme::KNOB_BODY);
     if automated {
