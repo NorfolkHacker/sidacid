@@ -224,6 +224,26 @@ impl Voice {
         self.stage = Stage::Off;
     }
 
+    /// The voice's own sound has ended. A steal's declick still fading
+    /// is played out first (over this block and, if needed, the next ones,
+    /// which come back here), so a very short new note can't cut it off;
+    /// then the voice stops.
+    fn end_sound(&mut self, out_l: &mut [f32], out_r: &mut [f32], declick_len: f32) {
+        for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+            if self.declick_left == 0 {
+                break;
+            }
+            let fade = self.declick_left as f32 / declick_len;
+            self.last_out = [self.declick[0] * fade, self.declick[1] * fade];
+            *l += self.last_out[0];
+            *r += self.last_out[1];
+            self.declick_left -= 1;
+        }
+        if self.declick_left == 0 {
+            self.kill();
+        }
+    }
+
     /// Adds this voice into `out_l`/`out_r`.
     pub fn render(
         &mut self,
@@ -273,14 +293,14 @@ impl Voice {
                 Stage::Decay => {
                     self.env = s.sustain + (self.env - s.sustain) * decay_coef;
                     if s.sustain <= 0.0 && self.env < SILENT {
-                        self.kill();
+                        self.end_sound(&mut out_l[i..], &mut out_r[i..], declick_len);
                         return;
                     }
                 }
                 Stage::Release => {
                     self.env *= self.release_coef;
                     if self.env < SILENT {
-                        self.kill();
+                        self.end_sound(&mut out_l[i..], &mut out_r[i..], declick_len);
                         return;
                     }
                 }
@@ -292,7 +312,7 @@ impl Voice {
                 self.pos >= self.end
             };
             if past_end && !self.looping {
-                self.kill();
+                self.end_sound(&mut out_l[i..], &mut out_r[i..], declick_len);
                 return;
             }
             let (mut l, mut r) = sample.read(self.pos);
@@ -608,6 +628,27 @@ mod tests {
             after[100] > 0.0 && after[499] > 0.9 * level,
             "the new note plays"
         );
+    }
+
+    #[test]
+    fn a_steal_by_a_very_short_note_still_fades_the_old_sound() {
+        let sample = constant(48_000, 0.8);
+        let s = SlotSettings::default();
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        let level = run(&mut v, &sample, &s, 2000)[1999];
+        // The new note ends after 20 frames, well inside the 2 ms fade.
+        v.start(&whole(20), 0, 40, 127, false, 2);
+        let mut joined = vec![level];
+        joined.extend(run(&mut v, &sample, &s, 50));
+        joined.extend(run(&mut v, &sample, &s, 450));
+        assert!(
+            max_step(&joined) < 0.1 * level,
+            "cut mid-fade: {}",
+            max_step(&joined)
+        );
+        assert!(!v.active, "the voice stops once the fade is done");
+        assert_eq!(*joined.last().unwrap(), 0.0);
     }
 
     #[test]

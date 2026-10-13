@@ -1041,19 +1041,30 @@ mod tests {
         s.play();
         f.run(&mut s, 10);
         s.select(0, 1);
-        // Positions restart at this run (10 samples in): step 15 lands at
-        // ~82_680, the switch to B (step 16) at ~88_190.
         let ev = f.run(&mut s, 16 * 5513);
-        assert!(ev.contains(&(
-            82_678,
-            SeqEvent::Param {
-                id: cutoff,
-                value: 0.8
-            }
-        )));
+        let restore = ev
+            .iter()
+            .position(|(_, e)| *e == SeqEvent::ParamRestore { id: cutoff })
+            .expect("A's lane param is restored");
+        let a_lane = SeqEvent::Param {
+            id: cutoff,
+            value: 0.8,
+        };
+        assert!(
+            ev[..restore].iter().any(|(_, e)| *e == a_lane),
+            "A's lane played before the switch"
+        );
+        // The restore comes at the switch to B: the start of the next bar
+        // (positions restart at this run, 10 samples into the bar).
+        let at = ev[restore].0 as f32;
+        let step = SR * 60.0 / 120.0 / 4.0;
+        assert!((at - (16.0 * step - 10.0)).abs() < step / 2.0, "at {at}");
         let boundary: Vec<SeqEvent> = ev
             .iter()
-            .filter(|(pos, _)| *pos > 85_000)
+            .filter(|(pos, e)| {
+                *pos == ev[restore].0
+                    && matches!(e, SeqEvent::Param { .. } | SeqEvent::ParamRestore { .. })
+            })
             .map(|(_, e)| *e)
             .collect();
         assert_eq!(

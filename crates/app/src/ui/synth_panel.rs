@@ -52,7 +52,7 @@ impl SidAcidApp {
                                     .prefix("Len "),
                             );
                             if r.changed() {
-                                self.set_synth_length(synth, slot, length);
+                                self.set_synth_length(synth, slot, length, r.dragged());
                             }
                             if r.drag_stopped() || r.lost_focus() {
                                 self.doc.end_gesture();
@@ -63,7 +63,7 @@ impl SidAcidApp {
                                     .prefix("Trans "),
                             );
                             if r2.changed() {
-                                self.set_synth_transpose(synth, slot, transpose);
+                                self.set_synth_transpose(synth, slot, transpose, r2.dragged());
                             }
                             if r2.drag_stopped() || r2.lost_focus() {
                                 self.doc.end_gesture();
@@ -149,29 +149,37 @@ impl SidAcidApp {
 }
 
 impl SidAcidApp {
-    /// The Len field: one undo step per drag.
-    pub(crate) fn set_synth_length(&mut self, synth: usize, slot: u8, length: u8) {
+    /// The Len field. `merge` is true only while dragging, so a drag is one
+    /// undo step and each arrow key or typed value is its own.
+    pub(crate) fn set_synth_length(&mut self, synth: usize, slot: u8, length: u8, merge: bool) {
         let cmds = self.doc.apply(
             Edit::SynthLength {
                 synth,
                 slot,
                 length,
             },
-            true,
+            merge,
         );
         self.send(cmds);
         self.view.focus = synth;
     }
 
-    /// The Trans field: one undo step per drag.
-    pub(crate) fn set_synth_transpose(&mut self, synth: usize, slot: u8, transpose: i8) {
+    /// The Trans field. `merge` is true only while dragging, so a drag is one
+    /// undo step and each arrow key or typed value is its own.
+    pub(crate) fn set_synth_transpose(
+        &mut self,
+        synth: usize,
+        slot: u8,
+        transpose: i8,
+        merge: bool,
+    ) {
         let cmds = self.doc.apply(
             Edit::SynthTranspose {
                 synth,
                 slot,
                 transpose,
             },
-            true,
+            merge,
         );
         self.send(cmds);
         self.view.focus = synth;
@@ -272,12 +280,42 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.view.focus = 4;
         let slot = app.doc.project.selected[1];
-        app.set_synth_length(1, slot, 7);
+        app.set_synth_length(1, slot, 7, false);
         assert_eq!(app.view.focus, 1);
         app.view.focus = 4;
-        app.set_synth_transpose(1, slot, -3);
+        app.set_synth_transpose(1, slot, -3, false);
         assert_eq!(app.view.focus, 1);
         let p = &app.doc.project.synths[1].patterns[slot as usize];
         assert_eq!((p.length, p.transpose), (7, -3));
+    }
+
+    #[test]
+    fn keyboard_length_and_transpose_edits_are_separate_undo_steps() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let slot = app.doc.project.selected[0];
+        let before = app.doc.project.synths[0].patterns[slot as usize].clone();
+        // Two arrow-key presses (not a drag): two undo steps.
+        app.set_synth_length(0, slot, 7, false);
+        app.set_synth_length(0, slot, 8, false);
+        app.set_synth_transpose(0, slot, 2, false);
+        app.set_synth_transpose(0, slot, 3, false);
+        app.doc.undo();
+        let p = &app.doc.project.synths[0].patterns[slot as usize];
+        assert_eq!(
+            (p.length, p.transpose),
+            (8, 2),
+            "one undo reverts one key press"
+        );
+        app.doc.undo();
+        app.doc.undo();
+        let p = &app.doc.project.synths[0].patterns[slot as usize];
+        assert_eq!((p.length, p.transpose), (7, before.transpose));
+        // A drag (merge) is one step.
+        app.doc.undo();
+        app.set_synth_length(0, slot, 9, true);
+        app.set_synth_length(0, slot, 10, true);
+        app.doc.end_gesture();
+        app.doc.undo();
+        assert_eq!(app.doc.project.synths[0].patterns[slot as usize], before);
     }
 }

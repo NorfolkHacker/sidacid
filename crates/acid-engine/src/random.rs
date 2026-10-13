@@ -172,9 +172,9 @@ const HATS: [(&[usize], &[usize]); 4] = [
 ];
 /// How likely each instrument is to gain a hit when evolving.
 const INST_WEIGHTS: [f32; 8] = [1.0, 0.8, 0.4, 0.4, 0.5, 0.4, 2.0, 1.0];
-/// Downbeats over offbeats over the rest.
 /// Upper bound on tries when looking for effective edits.
 const MAX_EVOLVE_ATTEMPTS: u32 = 16;
+/// Downbeats over offbeats over the rest.
 const STEP_WEIGHTS: [f32; 4] = [3.0, 1.0, 2.0, 1.0];
 
 fn open_mutes_closed(p: &mut DrumPattern, len: usize) {
@@ -452,11 +452,10 @@ mod tests {
             assert_eq!(t.length, 3);
             assert!(t.steps[3..].iter().flatten().all(|h| *h == DrumHit::Off));
             for len in [1u8, 3] {
-                let base = DrumPattern {
+                let mut base = DrumPattern {
                     length: len,
                     ..DrumPattern::default()
                 };
-                let mut base = base;
                 base.steps[0][BD] = DrumHit::On;
                 let e = evolve_drums(&base, seed);
                 assert!(
@@ -619,7 +618,7 @@ mod tests {
     #[test]
     fn notes_stay_in_range_and_leaps_are_folded() {
         let g = groove_four_on_floor();
-        for seed in 0..200 {
+        for seed in 0..500 {
             let r = randomise_synth(&SynthPattern::default(), Dice::ALL, &g, seed);
             for s in r.steps.iter().take(16) {
                 assert!(

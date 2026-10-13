@@ -310,6 +310,10 @@ mod tests {
         ((c[0] - b[b.len() - 1]).abs(), normal)
     }
 
+    /// A clean restart's first step is no bigger than an ordinary one (it
+    /// measures about 0.99× here); stale state jumps about 10–17×.
+    const REENABLE_MAX: f32 = 1.1;
+
     #[test]
     fn re_enabling_the_filter_starts_from_a_clean_state() {
         let mut on = FmPatch::default();
@@ -317,7 +321,7 @@ mod tests {
         on.cutoff = 1.0;
         let off = FmPatch::default();
         let (step, normal) = reenable_step(&on, &off);
-        assert!(step < normal * 1.5, "step {step}, normal {normal}");
+        assert!(step < normal * REENABLE_MAX, "step {step}, normal {normal}");
     }
 
     #[test]
@@ -327,6 +331,6 @@ mod tests {
         on.phaser_feedback = 1.0;
         let off = FmPatch::default();
         let (step, normal) = reenable_step(&on, &off);
-        assert!(step < normal * 1.5, "step {step}, normal {normal}");
+        assert!(step < normal * REENABLE_MAX, "step {step}, normal {normal}");
     }
 }

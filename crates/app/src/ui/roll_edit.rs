@@ -24,6 +24,17 @@ pub enum RollDrag {
     Resize { start: usize },
 }
 
+/// What a piano-roll drag remembers between frames: the pattern at drag
+/// start (every frame is recomputed from it), the slot it belongs to, and
+/// the pattern the drag last wrote. If the slot's pattern no longer equals
+/// `last` (an undo or a slot change mid-drag), the drag is stale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RollSnapshot {
+    pub slot: u8,
+    pub origin: SynthPattern,
+    pub last: SynthPattern,
+}
+
 pub fn row_of(step: &SynthStep) -> usize {
     (step.octave.clamp(-1, 1) + 1) as usize * 12 + (step.note % 12) as usize
 }

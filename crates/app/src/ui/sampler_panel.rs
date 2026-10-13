@@ -241,7 +241,10 @@ impl SidAcidApp {
     fn sampler_waveform(&mut self, ui: &mut egui::Ui) {
         let s = self.view.sampler_slot.min(SLOTS - 1);
         let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
-            self.view.wave_drag = None;
+            // A drag whose slot emptied under it still closes its undo step.
+            if self.view.wave_drag.take().is_some() {
+                self.doc.end_gesture();
+            }
             return;
         };
         let width = ui.available_width().clamp(200.0, 900.0);

@@ -51,12 +51,31 @@ impl SidAcidApp {
         }
     }
 
+    /// Undo, keeping the browser highlight honest: undoing a voice load
+    /// restores a voice that did not come from the stored row (and a name
+    /// guard can't tell same-named rows apart), and undoing a bank import
+    /// puts other voices under the stored index.
+    pub(crate) fn undo(&mut self) {
+        self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, self.doc.next_undo());
+        let cmds = self.doc.undo();
+        self.send(cmds);
+    }
+
+    /// Redo; see `undo`.
+    pub(crate) fn redo(&mut self) {
+        self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, self.doc.next_redo());
+        let cmds = self.doc.redo();
+        self.send(cmds);
+    }
+
     /// A single voice loads straight into the FM; a bank goes to the browser.
     pub(crate) fn import_syx_bytes(&mut self, bytes: &[u8]) {
         match sysex::parse(bytes) {
             Ok(voices) if voices.len() == 1 => self.load_fm_voice(&voices[0]),
             Ok(voices) => {
-                let cmds = self.doc.apply(Edit::FmBank { bank: Some(voices) }, false);
+                let edit = Edit::FmBank { bank: Some(voices) };
+                self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, Some(&edit));
+                let cmds = self.doc.apply(edit, false);
                 self.send(cmds);
                 self.view.fm_browser = FmBrowser::Imported;
             }
@@ -66,5 +85,19 @@ impl SidAcidApp {
                 ))
             }
         }
+    }
+}
+
+/// The browser row still to highlight once `edit` is applied. A voice load
+/// brings in a voice that came from no row; a bank change puts other voices
+/// under an imported row's index.
+fn voice_source_after(
+    src: Option<(FmBrowser, usize)>,
+    edit: Option<&Edit>,
+) -> Option<(FmBrowser, usize)> {
+    match (edit, src) {
+        (Some(Edit::FmVoice { .. }), _) => None,
+        (Some(Edit::FmBank { .. }), Some((FmBrowser::Imported, _))) => None,
+        _ => src,
     }
 }

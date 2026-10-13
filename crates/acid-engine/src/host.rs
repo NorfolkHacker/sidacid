@@ -168,8 +168,10 @@ impl EngineHost {
         self.guard_fired |= self.engine.take_guard_fired();
         self.since_status += out_l.len();
         if self.since_status >= self.status_every {
-            // Keep the remainder so the rate averages STATUS_RATE_HZ at any
-            // block size; capped so one huge block cannot burst statuses.
+            // Keep the remainder so the rate averages STATUS_RATE_HZ for
+            // blocks up to `status_every` samples. A larger block still sends
+            // one status (the cap stops a burst), so the rate drops to one
+            // per block.
             self.since_status = (self.since_status - self.status_every).min(self.status_every);
             self.send_status();
         }

@@ -98,13 +98,13 @@ pub enum Edit {
         data: Option<Box<SlotData>>,
         values: Vec<(ParamId, f32)>,
     },
-    /// Several edits as one undo step (a record pass), applied in order.
-    Group(Vec<Edit>),
     /// Changing a loaded slot's zone, slices, mode or markers.
     SlotMeta {
         slot: usize,
         meta: Box<SlotMeta>,
     },
+    /// Several edits as one undo step (a record pass), applied in order.
+    Group(Vec<Edit>),
 }
 
 /// Which edits may fold into one undo step during a gesture.
@@ -424,6 +424,16 @@ impl Document {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// The edit the next `undo` applies (the inverse of the last change).
+    pub fn next_undo(&self) -> Option<&Edit> {
+        self.undo.last().map(|step| &step.edit)
+    }
+
+    /// The edit the next `redo` applies.
+    pub fn next_redo(&self) -> Option<&Edit> {
+        self.redo.last().map(|step| &step.edit)
     }
 
     pub fn undo(&mut self) -> Vec<Command> {

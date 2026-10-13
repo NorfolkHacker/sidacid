@@ -1392,6 +1392,7 @@ mod tests {
         }
         e.play();
         assert_eq!(e.fm.sounding(), vec![72], "play released the pattern note");
+        assert_eq!(e.sampler.held_keys(), vec![72], "on the sampler too");
         e.poly_on(4, 60, 100, false);
         e.poly_on(5, 60, 100, false);
         e.stop();

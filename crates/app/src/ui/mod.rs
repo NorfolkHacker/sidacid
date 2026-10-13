@@ -58,7 +58,7 @@ pub struct ViewState {
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
     /// The synth pattern as it was when that drag began; every frame of
     /// the drag is recomputed from it (see `roll_edit::drag_from_origin`).
-    pub roll_origin: [Option<Box<acid_engine::project::SynthPattern>>; 2],
+    pub roll_origin: [Option<Box<roll_edit::RollSnapshot>>; 2],
     /// Egui time until which the "audio fault recovered" label shows.
     pub fault_until: f64,
     /// Action waiting on the unsaved-changes question.
@@ -82,6 +82,9 @@ pub struct ViewState {
     pub status_line: Option<String>,
     /// Save waiting for its "Saving…" status to show.
     pub saving: Option<files::PendingSave>,
+    /// Save waiting on "replace the existing file?" (the name had the
+    /// extension appended after the OS dialog, so it never asked).
+    pub overwrite: Option<files::OverwriteAsk>,
     /// The audio stream reported a failure that has not been handled yet.
     pub audio_lost: bool,
     /// One automatic restart was tried since audio last ran fine.
@@ -112,12 +115,14 @@ pub struct ViewState {
     pub audition: Option<(usize, u8)>,
     pub fm_browser: fm_voices::FmBrowser,
     /// Where the loaded FM voice came from: (browser, index in that list).
-    /// Set when a voice is loaded from the browser, cleared by a single-voice
-    /// import and on document load. It is kept across knob edits (decision
+    /// Set when a voice is loaded from the browser; cleared by a single-voice
+    /// import, an undo/redo of a voice load, a bank change (for an imported
+    /// row) and on document load. It is kept across knob edits (decision
     /// #11, see `fm_panel::fm_voice_browser`).
     pub fm_voice_src: Option<(fm_voices::FmBrowser, usize)>,
-    /// The FM "LFO · Pitch EG · Effects" section starts open (tests only).
-    pub fm_more_open: bool,
+    /// Tests only: collapsing headers forced open or shut, by id salt.
+    #[cfg(test)]
+    pub force_open: Vec<(&'static str, bool)>,
     /// Operator shown in the FM operator editor (0..6).
     pub fm_op: usize,
     /// Cached waveform peaks per slot: (pcm pointer, pcm length, columns, peaks).
@@ -137,6 +142,30 @@ pub struct SidAcidApp {
     pub(crate) status: Status,
     pub(crate) pending: Vec<Command>,
     pub(crate) view: ViewState,
+    /// Tests only: the commands a frame flushed with no audio device (a
+    /// real app drops them), so a test can see what would reach the engine.
+    #[cfg(test)]
+    pub(crate) flushed: Vec<Command>,
+}
+
+impl ViewState {
+    /// A collapsing header's forced state: tests can force one open or
+    /// shut by its id salt; the app never does (`None` lets the user's
+    /// clicks rule).
+    pub(crate) fn forced_open(&self, salt: &str) -> Option<bool> {
+        #[cfg(test)]
+        {
+            self.force_open
+                .iter()
+                .find(|(s, _)| *s == salt)
+                .map(|&(_, open)| open)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = salt;
+            None
+        }
+    }
 }
 
 impl SidAcidApp {
@@ -156,6 +185,8 @@ impl SidAcidApp {
             status: Status::default(),
             pending: Vec::new(),
             view: ViewState::default(),
+            #[cfg(test)]
+            flushed: Vec::new(),
         }
     }
 
@@ -209,6 +240,8 @@ impl SidAcidApp {
     /// are dropped: the engine is rebuilt from the project when audio starts.
     fn flush_pending(&mut self) {
         let Some(audio) = self.audio.as_mut() else {
+            #[cfg(test)]
+            self.flushed.append(&mut self.pending);
             self.pending.clear();
             return;
         };
@@ -1290,7 +1323,7 @@ mod tests {
     fn the_fm_lfo_and_effects_section_draws_when_open() {
         let mut closed = SidAcidApp::headless(Document::new(Project::default()));
         let mut open = SidAcidApp::headless(Document::new(Project::default()));
-        open.view.fm_more_open = true;
+        open.view.force_open.push(("fm_more", true));
         let closed_shapes = run_frames_in(&egui::Context::default(), &mut closed, 2);
         let open_shapes = run_frames_in(&egui::Context::default(), &mut open, 2);
         assert!(
@@ -1307,11 +1340,65 @@ mod tests {
         doc.project.fm.bank = Some(bank.clone());
         let mut app = SidAcidApp::headless(doc);
         app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        // A grid click left a source behind; a direct load must clear it.
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
         app.load_fm_voice(&bank[1]);
         assert_eq!(app.view.fm_voice_src, None, "a direct load has no source");
         app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 1));
         app.load_document(Document::new(Project::default()));
         assert_eq!(app.view.fm_voice_src, None, "a document load clears it");
+    }
+
+    #[test]
+    fn undoing_a_voice_load_or_a_bank_import_drops_the_voice_source() {
+        // Two rows with the same name: the name guard alone can't tell them apart.
+        let mut bank = fm_voices::starter().to_vec();
+        bank[2].name = bank[0].name.clone();
+        let mut doc = Document::new(Project::default());
+        doc.project.fm.bank = Some(bank.clone());
+        let mut app = SidAcidApp::headless(doc);
+        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.load_fm_voice(&bank[0]);
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
+        app.load_fm_voice(&bank[2]);
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        app.undo();
+        assert_eq!(
+            app.view.fm_voice_src, None,
+            "row 0's voice is back, not row 2's"
+        );
+        app.redo();
+        assert_eq!(
+            app.view.fm_voice_src, None,
+            "a redo has no grid source either"
+        );
+
+        // A knob edit after a grid load keeps the source through its undo.
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        let cmds = app.doc.apply(
+            Edit::Param {
+                id: acid_engine::params::ParamId::Fm(acid_engine::params::FmParam::Volume),
+                value: 0.3,
+            },
+            false,
+        );
+        app.send(cmds);
+        app.undo();
+        assert_eq!(
+            app.view.fm_voice_src,
+            Some((fm_voices::FmBrowser::Imported, 2))
+        );
+
+        // Importing another bank: the stored index now points into new voices.
+        let syx = acid_engine::fm::sysex::bank_sysex(&bank);
+        app.import_syx_bytes(&syx);
+        assert_eq!(app.view.fm_voice_src, None, "a bank import drops it");
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        app.undo();
+        assert_eq!(
+            app.view.fm_voice_src, None,
+            "undoing a bank import drops it"
+        );
     }
 
     #[test]
@@ -1552,6 +1639,8 @@ mod tests {
         let frames = 5_700_000usize;
         let leave = 1_000;
         let mut left = MEMORY_LIMIT / 4 - leave;
+        // Filler slots for the memory count only: their 1-frame metas don't
+        // match the PCM length, so they are not valid slots (`is_valid`).
         for slot in 0..3 {
             let n = left.min(frames);
             left -= n;
@@ -1645,14 +1734,34 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_drag_whose_slot_empties_ends_its_gesture() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        // A drag's merged step is open; then the shown slot has no sample.
+        let cmds = app.doc.apply(Edit::Bpm(100.0), true);
+        app.send(cmds);
+        app.view.wave_drag = Some((0, sampler_ui::Marker::Start));
+        assert!(app.doc.project.sampler.slots[0].is_none());
+        run_frames(&mut app, 1);
+        assert_eq!(app.view.wave_drag, None);
+        let cmds = app.doc.apply(Edit::Bpm(110.0), true);
+        app.send(cmds);
+        app.doc.undo();
+        assert_eq!(
+            app.doc.project.bpm, 100.0,
+            "the next edit is a step of its own"
+        );
+    }
+
+    #[test]
     fn loading_a_document_releases_the_held_notes() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         app.view.pad_note = Some(36);
         app.view.audition = Some((4, 60));
-        app.release_held_notes();
+        app.load_document(Document::new(Project::default()));
         assert_eq!((app.view.pad_note, app.view.audition), (None, None));
+        // They reach the old engine: flushed before the load drops `pending`.
         let offs: Vec<_> = app
-            .pending
+            .flushed
             .iter()
             .filter_map(|c| match c {
                 Command::NoteOff { machine, pitch } => Some((*machine, *pitch)),

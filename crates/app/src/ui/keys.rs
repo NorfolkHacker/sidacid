@@ -85,12 +85,10 @@ impl SidAcidApp {
                 Shortcut::Open => self.request(Pending::Open),
                 Shortcut::New => self.request(Pending::New),
                 Shortcut::Undo => {
-                    let cmds = self.doc.undo();
-                    self.send(cmds);
+                    self.undo();
                 }
                 Shortcut::Redo => {
-                    let cmds = self.doc.redo();
-                    self.send(cmds);
+                    self.redo();
                 }
                 Shortcut::Copy => self.copy_pattern(),
                 Shortcut::Paste => self.paste_pattern(),

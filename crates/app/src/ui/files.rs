@@ -34,7 +34,9 @@ fn project_dialog() -> rfd::FileDialog {
 }
 
 /// `path` ending in `.sidacid`: appended unless the name already ends with
-/// it (any case), so "beat.v2" saves as "beat.v2.sidacid".
+/// it (any case), so "beat.v2" saves as "beat.v2.sidacid". The OS dialog's
+/// overwrite prompt never saw the appended name, so saving asks itself
+/// before replacing such a file (`OverwriteAsk`).
 pub fn with_project_extension(path: PathBuf) -> PathBuf {
     let has_it = path
         .extension()
@@ -57,6 +59,14 @@ pub struct PendingSave {
     frames: u8,
     /// Status line to restore afterwards.
     prev_status: Option<String>,
+}
+
+/// A save that would replace an existing file the OS dialog never asked
+/// about: the name picked had no `.sidacid`, so the save appends it.
+pub struct OverwriteAsk {
+    path: PathBuf,
+    /// Action to run once the save succeeds.
+    then: Option<Pending>,
 }
 
 pub fn export_status(song: bool, bars: u32, progress: Option<f32>) -> String {
@@ -112,16 +122,14 @@ impl SidAcidApp {
                 .clicked()
             {
                 ui.close_menu();
-                let cmds = self.doc.undo();
-                self.send(cmds);
+                self.undo();
             }
             if ui
                 .add_enabled(self.doc.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
                 .clicked()
             {
                 ui.close_menu();
-                let cmds = self.doc.redo();
-                self.send(cmds);
+                self.redo();
             }
             ui.separator();
             if ui.button("Copy pattern  (Ctrl+C)").clicked() {
@@ -189,15 +197,19 @@ impl SidAcidApp {
         // Ahead of the clear below: these go to the old engine first.
         self.release_held_notes();
         self.flush_pending();
+        // A save queued for the old document runs now: it was asked for
+        // (Ctrl+S, then New and "Don't save" within its two frames). Any
+        // action it was to run next is overtaken by this load.
+        if let Some(save) = self.view.saving.take() {
+            self.view.status_line = save.prev_status;
+            self.write_project(save.path);
+        }
         self.doc = doc;
         // An empty imported bank is no bank (the Imported tab stays off).
         if self.doc.project.fm.bank.as_ref().is_some_and(Vec::is_empty) {
             self.doc.project.fm.bank = None;
         }
-        // A queued save belonged to the old document.
-        if let Some(save) = self.view.saving.take() {
-            self.view.status_line = save.prev_status;
-        }
+        self.view.overwrite = None;
         self.view.writers = [None; 2];
         self.view.roll_drag = [None; 2];
         self.view.roll_origin = [None, None];
@@ -250,8 +262,10 @@ impl SidAcidApp {
         queued
     }
 
+    /// Returns true when the save was queued, or is waiting on the
+    /// overwrite question (which then owns `then`).
     fn queue_save(&mut self, save_as: bool, then: Option<Pending>) -> bool {
-        if self.view.saving.is_some() {
+        if self.view.saving.is_some() || self.view.overwrite.is_some() {
             return false;
         }
         let path = if save_as || self.doc.path.is_none() {
@@ -261,15 +275,38 @@ impl SidAcidApp {
         } else {
             self.doc.path.clone()
         };
-        let Some(path) = path else { return false };
+        let Some(chosen) = path else { return false };
+        let path = with_project_extension(chosen.clone());
+        if path != chosen && path.exists() {
+            // Any OS overwrite prompt was about `chosen`, not this file.
+            self.view.overwrite = Some(OverwriteAsk { path, then });
+        } else {
+            self.queue_save_to(path, then);
+        }
+        true
+    }
+
+    fn queue_save_to(&mut self, path: PathBuf, then: Option<Pending>) {
         let prev_status = self.view.status_line.replace("Saving…".into());
         self.view.saving = Some(PendingSave {
-            path: with_project_extension(path),
+            path,
             then,
             frames: 0,
             prev_status,
         });
-        true
+    }
+
+    /// The overwrite question's answer: save over the file, or give up (an
+    /// unsaved-changes question that led here is asked again).
+    pub(crate) fn answer_overwrite(&mut self, replace: bool) {
+        let Some(ask) = self.view.overwrite.take() else {
+            return;
+        };
+        if replace {
+            self.queue_save_to(ask.path, ask.then);
+        } else {
+            self.view.confirm = ask.then;
+        }
     }
 
     /// Start of a frame: runs a queued save once a finished frame has
@@ -420,7 +457,7 @@ impl SidAcidApp {
                 let _ = tx.send(result);
             });
             self.view.export_progress = Some(progress);
-            self.view.status_line = Some(export_status(true, 0, Some(0.0)));
+            *self.status_line_mut() = Some(export_status(true, 0, Some(0.0)));
         } else {
             std::thread::spawn(move || {
                 let result = acid_engine::render::render_patterns_wav(&project, bars, &path)
@@ -428,23 +465,27 @@ impl SidAcidApp {
                     .map_err(|e| e.to_string());
                 let _ = tx.send(result);
             });
-            self.view.status_line = Some(export_status(false, bars, None));
+            *self.status_line_mut() = Some(export_status(false, bars, None));
         }
         self.view.export_rx = Some(rx);
+    }
+
+    /// The status line to write: while a save is queued its "Saving…"
+    /// stays up, and the text goes to the line it restores afterwards.
+    pub(crate) fn status_line_mut(&mut self) -> &mut Option<String> {
+        match self.view.saving.as_mut() {
+            Some(save) => &mut save.prev_status,
+            None => &mut self.view.status_line,
+        }
     }
 
     pub(crate) fn poll_export(&mut self) {
         if self.view.export_rx.is_none() {
             return;
         }
-        // While a save is queued its "Saving…" status stays up.
-        let status = match self.view.saving.as_mut() {
-            Some(save) => &mut save.prev_status,
-            None => &mut self.view.status_line,
-        };
         if let Some(p) = &self.view.export_progress {
             let f = f32::from_bits(p.load(std::sync::atomic::Ordering::Relaxed));
-            *status = Some(export_status(true, 0, Some(f)));
+            *self.status_line_mut() = Some(export_status(true, 0, Some(f)));
         }
         let Some(rx) = &self.view.export_rx else {
             return;
@@ -452,10 +493,7 @@ impl SidAcidApp {
         if let Ok(result) = rx.try_recv() {
             self.view.export_rx = None;
             self.view.export_progress = None;
-            match self.view.saving.as_mut() {
-                Some(save) => save.prev_status = None,
-                None => self.view.status_line = None,
-            }
+            *self.status_line_mut() = None;
             self.view.message = Some(match result {
                 Ok(path) => format!("Exported {}", path.display()),
                 Err(e) => format!("Export failed: {e}"),
@@ -480,6 +518,27 @@ impl SidAcidApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.view.confirm = None;
+                        }
+                    });
+                });
+        }
+        if let Some(ask) = &self.view.overwrite {
+            let name = ask
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            egui::Window::new("Replace file?")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("\"{name}\" already exists. Replace it?"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Replace").clicked() {
+                            self.answer_overwrite(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.answer_overwrite(false);
                         }
                     });
                 });
@@ -674,6 +733,91 @@ mod tests {
         assert!(app.view.message.is_some());
         assert_eq!(app.view.confirm, Some(Pending::Quit));
         assert!(!app.view.quit);
+    }
+
+    /// A document path without the extension, as if picked in the OS save
+    /// dialog as "<name>", and the existing "<name>.sidacid" next to it.
+    fn app_saving_over_an_existing_file(name: &str) -> (SidAcidApp, TempFile) {
+        let existing = TempFile::new(name);
+        std::fs::write(&existing.0, b"keep me").unwrap();
+        let mut app = app();
+        app.doc.path = Some(existing.0.with_extension(""));
+        app.doc.mark_dirty();
+        (app, existing)
+    }
+
+    #[test]
+    fn saving_over_an_existing_file_by_appending_the_extension_asks_first() {
+        let (mut app, existing) = app_saving_over_an_existing_file("overwrite-ask");
+        assert!(app.save(false));
+        run_frames(&mut app, 3);
+        assert!(std::fs::read(&existing.0).unwrap() == b"keep me", "not yet");
+        assert!(app.view.overwrite.is_some(), "the question is up");
+        assert!(!app.save(false), "one question at a time");
+        app.answer_overwrite(true);
+        assert!(app.view.overwrite.is_none());
+        run_frames(&mut app, 3);
+        assert!(Project::load(&existing.0).is_ok(), "replaced");
+        assert_eq!(app.doc.path.as_ref(), Some(&existing.0));
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn cancelling_the_overwrite_question_keeps_the_file() {
+        let (mut app, existing) = app_saving_over_an_existing_file("overwrite-cancel");
+        app.view.confirm = Some(Pending::New);
+        assert!(app.save_then(Pending::New));
+        assert!(
+            app.view.confirm.is_none(),
+            "the overwrite question replaces it"
+        );
+        app.answer_overwrite(false);
+        run_frames(&mut app, 3);
+        assert!(std::fs::read(&existing.0).unwrap() == b"keep me", "kept");
+        assert!(app.doc.is_dirty());
+        assert_eq!(app.view.confirm, Some(Pending::New), "asked again");
+        assert_eq!(app.doc.project.name, "Demo", "New did not run");
+    }
+
+    #[test]
+    fn saving_to_a_path_that_already_has_the_extension_does_not_ask() {
+        let file = TempFile::new("no-ask");
+        std::fs::write(&file.0, b"old").unwrap();
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        assert!(app.save(false));
+        assert!(app.view.overwrite.is_none());
+        run_frames(&mut app, 3);
+        assert!(Project::load(&file.0).is_ok());
+    }
+
+    #[test]
+    fn a_save_queued_before_a_document_load_still_runs() {
+        let file = TempFile::new("queued-then-load");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        // Within the save's two frames: New, "Don't save".
+        app.load_document(Document::new(Project::default()));
+        assert!(file.0.exists(), "the asked-for save is not dropped");
+        assert_eq!(Project::load(&file.0).unwrap().name, "Demo");
+        assert_eq!(app.view.status_line, None);
+        run_frames(&mut app, 3);
+        assert_eq!(app.doc.project.name, "Untitled");
+    }
+
+    #[test]
+    fn an_export_started_while_a_save_is_queued_keeps_its_status() {
+        let file = TempFile::new("save-then-export");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        assert!(app.save(false));
+        *app.status_line_mut() = Some(export_status(false, 8, None));
+        assert_eq!(app.view.status_line.as_deref(), Some("Saving…"));
+        run_frames(&mut app, 3);
+        assert!(file.0.exists());
+        assert_eq!(app.view.status_line.as_deref(), Some("Exporting 8 bars…"));
     }
 
     #[test]

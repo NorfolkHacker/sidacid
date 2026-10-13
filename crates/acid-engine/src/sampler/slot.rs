@@ -249,7 +249,7 @@ impl SlotData {
         } else if !self.pcm.len().is_multiple_of(self.channels as usize) {
             Some("the audio is not a whole number of frames")
         } else if !(8_000..=192_000).contains(&self.sample_rate) {
-            Some("sample rate must be 8-192 kHz")
+            Some("sample rate must be 8–192 kHz")
         } else if frames == 0 {
             Some("the sample is empty")
         } else if frames as f32 > MAX_SECONDS * self.sample_rate as f32 {
@@ -372,7 +372,7 @@ mod tests {
         );
         assert_eq!(
             good(6_000, 1, 1000).problem(),
-            Some("sample rate must be 8-192 kHz")
+            Some("sample rate must be 8–192 kHz")
         );
         assert_eq!(good(22_050, 1, 0).problem(), Some("the sample is empty"));
         assert_eq!(

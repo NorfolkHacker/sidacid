@@ -3,8 +3,8 @@
 //! right-click to delete. Accent/slide lanes sit underneath.
 
 use super::roll_edit::{
-    ROLL_ROWS, RollDrag, RollGeom, drag_from_origin, note_at, notes, place, toggle_accent,
-    toggle_slide,
+    ROLL_ROWS, RollDrag, RollGeom, RollSnapshot, drag_from_origin, note_at, notes, place,
+    toggle_accent, toggle_slide,
 };
 use super::step_edit::NOTE_NAMES;
 use super::{SidAcidApp, theme};
@@ -179,16 +179,19 @@ impl SidAcidApp {
                     };
                     self.view.roll_drag[synth] = Some(drag);
                     // Every frame of the drag is recomputed from here.
-                    self.view.roll_origin[synth] = Some(Box::new(pattern.clone()));
+                    self.view.roll_origin[synth] = Some(Box::new(RollSnapshot {
+                        slot,
+                        origin: pattern.clone(),
+                        last: pattern.clone(),
+                    }));
                 }
                 if resp.dragged()
                     && let Some(p) = pointer
-                    && let Some(drag) = self.view.roll_drag[synth]
-                    && let Some(origin) = &self.view.roll_origin[synth]
                 {
                     let (step, row) = geom.cell_at_clamped(p.x, p.y);
-                    let next = drag_from_origin(origin, drag, step, row);
-                    if next != pattern {
+                    if let Some(next) = self.roll_drag_to(synth, slot, &pattern, step, row)
+                        && next != pattern
+                    {
                         pattern = next;
                         changed = true;
                     }
@@ -201,6 +204,32 @@ impl SidAcidApp {
             });
         let dragging = self.view.roll_drag[synth].is_some();
         self.commit_roll(synth, slot, changed.then_some(pattern), dragging, finished);
+    }
+
+    /// One frame of a live roll drag: the pattern for the pointer at
+    /// (`step`, `row`), recomputed from the drag's origin. A drag whose
+    /// pattern changed under it (an undo, or another slot selected
+    /// mid-drag) is dropped instead, so it can't write the old origin back
+    /// over the change.
+    pub(crate) fn roll_drag_to(
+        &mut self,
+        synth: usize,
+        slot: u8,
+        current: &SynthPattern,
+        step: usize,
+        row: usize,
+    ) -> Option<SynthPattern> {
+        let drag = self.view.roll_drag[synth]?;
+        let snap = self.view.roll_origin[synth].as_mut()?;
+        if snap.slot != slot || snap.last != *current {
+            self.view.roll_drag[synth] = None;
+            self.view.roll_origin[synth] = None;
+            self.doc.end_gesture();
+            return None;
+        }
+        let next = drag_from_origin(&snap.origin, drag, step, row);
+        snap.last = next.clone();
+        Some(next)
     }
 
     /// Applies a frame's roll edit (merging into the open gesture while a
@@ -255,5 +284,54 @@ mod tests {
         assert_ne!(app.doc.project.synths[0].patterns[0], before);
         app.doc.undo();
         assert_eq!(app.doc.project.synths[0].patterns[0], before, "one undo");
+    }
+
+    /// Starts a Move drag of a two-step note at step 0, as a drag-start
+    /// frame does, and runs one drag frame to step 2.
+    fn app_dragging_a_note() -> SidAcidApp {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let mut pattern = app.doc.project.synths[0].patterns[0].clone();
+        place(&mut pattern, 0, 2, 12);
+        app.commit_roll(0, 0, Some(pattern.clone()), false, true);
+        app.view.roll_drag[0] = Some(RollDrag::Move { start: 0, grab: 0 });
+        app.view.roll_origin[0] = Some(Box::new(RollSnapshot {
+            slot: 0,
+            origin: pattern.clone(),
+            last: pattern.clone(),
+        }));
+        let next = app
+            .roll_drag_to(0, 0, &pattern, 2, 12)
+            .expect("a live drag");
+        app.commit_roll(0, 0, Some(next), true, false);
+        app
+    }
+
+    #[test]
+    fn a_drag_continues_while_its_pattern_is_unchanged() {
+        let mut app = app_dragging_a_note();
+        let current = app.doc.project.synths[0].patterns[0].clone();
+        assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_some());
+    }
+
+    #[test]
+    fn an_undo_mid_drag_drops_the_drag() {
+        let mut app = app_dragging_a_note();
+        app.doc.undo();
+        let current = app.doc.project.synths[0].patterns[0].clone();
+        assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_none());
+        assert_eq!(app.view.roll_drag[0], None);
+        assert!(app.view.roll_origin[0].is_none());
+        assert_eq!(
+            app.doc.project.synths[0].patterns[0], current,
+            "the undo stands"
+        );
+    }
+
+    #[test]
+    fn selecting_another_slot_mid_drag_drops_the_drag() {
+        let mut app = app_dragging_a_note();
+        let other = app.doc.project.synths[0].patterns[1].clone();
+        assert!(app.roll_drag_to(0, 1, &other, 3, 12).is_none());
+        assert_eq!(app.view.roll_drag[0], None);
     }
 }

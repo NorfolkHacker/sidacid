@@ -176,6 +176,7 @@ impl SidAcidApp {
         {
             self.close_scroll_step(g);
         }
+        let serial_before = self.doc.edit_serial();
         if let Some(v) = out.value {
             if recording {
                 self.view.live.insert(id, v);
@@ -186,8 +187,9 @@ impl SidAcidApp {
             }
         }
         if out.scrolled && !recording {
-            // Its undo step stays open until the wheel rests.
-            let serial = if out.value.is_some() {
+            // Its undo step stays open until the wheel rests. A notch the
+            // knob's limit turned into a no-op made no step of its own.
+            let serial = if self.doc.edit_serial() != serial_before {
                 Some(self.doc.edit_serial())
             } else {
                 self.view
@@ -298,6 +300,21 @@ mod tests {
     fn frame(app: &mut SidAcidApp, id: ParamId, out: knob::KnobOutput, now: f64) {
         app.knob_gesture(id, out, false, now);
         app.tick_scroll_gestures(now);
+    }
+
+    #[test]
+    fn a_notch_at_the_knob_limit_takes_no_other_edits_serial() {
+        use crate::document::Document;
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let cmds = app.doc.apply(Edit::Param { id, value: 1.0 }, false);
+        app.send(cmds);
+        // Another edit, then a notch that the limit turns into a no-op.
+        let cmds = app.doc.apply(Edit::Bpm(100.0), true);
+        app.send(cmds);
+        app.knob_gesture(id, scroll(1.0), false, 0.0);
+        let (_, g) = app.view.knob_scroll.expect("the wheel gesture is open");
+        assert_eq!(g.serial, None, "the BPM edit is not this wheel's step");
     }
 
     #[test]

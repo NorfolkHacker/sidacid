@@ -507,8 +507,25 @@ mod tests {
     fn a_collapsed_panel_frame_releases_a_held_key() {
         let mut app = fm_app();
         app.audition(4, Some(60));
+        app.view.poly_drag[0] = Some(PolyDrag::Resize { index: 0 });
+        app.doc.apply(Edit::Bpm(100.0), true);
+        // The FM panel collapses: its roll isn't drawn, so only the
+        // frame-level check can see that the pointer is up.
+        app.view.force_open.push(("fm", false));
         crate::ui::run_frames(&mut app, 1);
         assert_eq!(app.view.audition, None);
+        assert_eq!(app.view.poly_drag, [None; 2]);
+        let offs: Vec<_> = app
+            .flushed
+            .iter()
+            .filter(|c| matches!(c, Command::NoteOff { .. }))
+            .map(cmd)
+            .collect();
+        assert_eq!(offs, [(false, 4, 60)], "the held key's NoteOff is sent");
+        // The drag's gesture is closed: the next merge is a new undo step.
+        app.doc.apply(Edit::Bpm(110.0), true);
+        app.doc.undo();
+        assert_eq!(app.doc.project.bpm, 100.0);
     }
 
     #[test]

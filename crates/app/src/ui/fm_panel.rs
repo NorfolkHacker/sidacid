@@ -94,6 +94,7 @@ impl SidAcidApp {
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt("fm")
             .default_open(true)
+            .open(self.view.forced_open("fm"))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     self.alg_diagram(ui);
@@ -106,7 +107,8 @@ impl SidAcidApp {
                 self.fm_operator_editor(ui);
                 egui::CollapsingHeader::new("LFO · Pitch EG · Effects")
                     .id_salt("fm_more")
-                    .default_open(self.view.fm_more_open)
+                    .default_open(false)
+                    .open(self.view.forced_open("fm_more"))
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
@@ -313,9 +315,10 @@ impl SidAcidApp {
         // from, `(browser, index)` in `view.fm_voice_src`, not by name (duplicate
         // names in a bank all lit up). The source is KEPT across knob edits until
         // the next load (a tweaked voice is still "that voice, edited") and is
-        // cleared on a document load or a single-voice import. It is trusted only
-        // while the project's voice name still equals the source entry's name, so
-        // undoing the load (which restores the old name) drops the highlight.
+        // cleared on a document load, a single-voice import, an undo or redo of
+        // a voice load, and (for an imported row) a bank import or its undo. As
+        // a backstop it is trusted only while the project's voice name still
+        // equals the source entry's name.
         let highlighted_at = highlighted_voice(
             self.view.fm_voice_src,
             self.view.fm_browser,

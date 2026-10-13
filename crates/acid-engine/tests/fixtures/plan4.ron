@@ -1,8 +1,10 @@
 // A SidAcid project as saved by Plan 4 (commit 548c7a0): before the FM
-// voice name and bank and the sampler slots existed. Long runs of equal
-// list items are folded to keep the file small: a run is written as the
+// voice name and bank and the sampler slots existed. Plan 4 saved
+// pretty-printed RON; this copy is compacted (one top-level field per line,
+// no whitespace inside), which RON reads the same. Long runs of equal list
+// items are also folded to keep the file small: a run is written as the
 // count and the item between double angle brackets, separated by a bar;
-// the tests unfold it before loading.
+// the tests unfold it before loading (see `plan4_project_text`).
 (
     version:2,
     name:"Plan 4",

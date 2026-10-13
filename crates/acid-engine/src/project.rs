@@ -751,7 +751,10 @@ mod tests {
     }
 
     /// A project saved by Plan 4, before the FM voice name and bank and
-    /// the sampler slots existed, with its folded runs unfolded.
+    /// the sampler slots existed, with its folded runs unfolded. A run is
+    /// `<<N|item>>`, N copies of `item` joined by commas. Runs may nest
+    /// (unfolded innermost first, from the last `<<`), and an item must not
+    /// itself contain `|` or `>>` outside a nested run.
     fn plan4_project_text() -> String {
         let mut s = include_str!("../tests/fixtures/plan4.ron").to_string();
         while let Some(open) = s.rfind("<<") {

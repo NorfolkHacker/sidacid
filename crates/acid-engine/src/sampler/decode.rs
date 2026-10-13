@@ -20,7 +20,10 @@ pub struct Decoded {
     /// Interleaved, -1..1.
     pub samples: Vec<f32>,
     /// The file ended before all the audio its header promised; `samples`
-    /// holds what decoded.
+    /// holds what decoded. It compares the decoded frames with the
+    /// header's frame count, which is exact for WAV (the tested case). A
+    /// compressed file whose count includes encoder delay or padding, or
+    /// one with a corrupt packet skipped, may also be flagged.
     pub truncated: bool,
 }
 

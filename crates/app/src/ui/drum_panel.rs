@@ -71,7 +71,7 @@ impl SidAcidApp {
                                     .prefix("Len "),
                             );
                             if r.changed() {
-                                self.set_drum_length(kit, slot, length);
+                                self.set_drum_length(kit, slot, length, r.dragged());
                             }
                             if r.drag_stopped() || r.lost_focus() {
                                 self.doc.end_gesture();
@@ -175,9 +175,12 @@ impl SidAcidApp {
         self.view.focus = 2 + kit;
     }
 
-    /// The Len field: one undo step per drag.
-    pub(crate) fn set_drum_length(&mut self, kit: usize, slot: u8, length: u8) {
-        let cmds = self.doc.apply(Edit::DrumLength { kit, slot, length }, true);
+    /// The Len field. `merge` is true only while dragging, so a drag is one
+    /// undo step and each arrow key or typed value is its own.
+    pub(crate) fn set_drum_length(&mut self, kit: usize, slot: u8, length: u8, merge: bool) {
+        let cmds = self
+            .doc
+            .apply(Edit::DrumLength { kit, slot, length }, merge);
         self.send(cmds);
         self.view.focus = 2 + kit;
     }
@@ -218,9 +221,19 @@ mod tests {
     fn drum_length_edits_focus_the_kit() {
         let mut app = app();
         let slot = app.doc.project.selected[3];
-        app.set_drum_length(1, slot, 12);
+        app.set_drum_length(1, slot, 12, false);
         assert_eq!(app.doc.project.drums[1].patterns[slot as usize].length, 12);
         assert_eq!(app.view.focus, 3, "copy/paste now acts on the 909");
+    }
+
+    #[test]
+    fn keyboard_drum_length_edits_are_separate_undo_steps() {
+        let mut app = app();
+        let slot = app.doc.project.selected[3];
+        app.set_drum_length(1, slot, 12, false);
+        app.set_drum_length(1, slot, 13, false);
+        app.doc.undo();
+        assert_eq!(app.doc.project.drums[1].patterns[slot as usize].length, 12);
     }
 
     #[test]
