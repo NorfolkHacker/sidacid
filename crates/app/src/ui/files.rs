@@ -262,7 +262,9 @@ impl SidAcidApp {
     }
 
     /// Saves to the current path (or asks for one). Returns true when a
-    /// save was queued: it runs a frame later, once "Saving…" shows.
+    /// save was queued: it runs a frame later, once "Saving…" shows. A
+    /// plain save while one is queued is that save; a Save As retargets it
+    /// (see `save_to`).
     pub(crate) fn save(&mut self, save_as: bool) -> bool {
         self.queue_save(save_as, None)
     }
@@ -291,8 +293,15 @@ impl SidAcidApp {
     /// Returns true when the save was queued, or is waiting on the
     /// overwrite question (which then owns `then`).
     fn queue_save(&mut self, save_as: bool, then: Option<Pending>) -> bool {
-        if self.view.saving.is_some() || self.view.overwrite.is_some() {
+        if self.view.overwrite.is_some() {
             return false;
+        }
+        if self.view.saving.is_some() && !save_as {
+            // The queued save writes this same document where a plain save
+            // would (a queued Save As's file becomes the document's path):
+            // it is this save. An action to run after joins it only through
+            // `save_then`, which comes here when it already has one.
+            return then.is_none();
         }
         let path = if save_as || self.doc.path.is_none() {
             project_dialog()
@@ -302,6 +311,19 @@ impl SidAcidApp {
             self.doc.path.clone()
         };
         let Some(chosen) = path else { return false };
+        self.save_to(chosen, then)
+    }
+
+    /// Saves to `chosen`: the file picked, or the document's path. A Save
+    /// As while a save is still queued (within its two frames) retargets
+    /// that save instead of being dropped: both write this same document,
+    /// so the file picked last gets it and the earlier file is left as it
+    /// was. The queued save's action to run after carries over.
+    fn save_to(&mut self, chosen: PathBuf, mut then: Option<Pending>) -> bool {
+        if let Some(save) = self.view.saving.take() {
+            self.view.status_line = save.prev_status;
+            then = then.or(save.then);
+        }
         let path = with_project_extension(chosen.clone());
         if path != chosen && path.exists() {
             // Any OS overwrite prompt was about `chosen`, not this file.
@@ -832,6 +854,56 @@ mod tests {
         run_frames(&mut app, 3);
         assert!(Project::load(&file.0).is_ok(), "saved");
         assert!(app.view.quit, "then quit");
+    }
+
+    #[test]
+    fn a_plain_save_while_one_is_queued_is_that_save() {
+        let file = TempFile::new("save-twice");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        assert!(app.save(false), "the queued save covers it");
+        run_frames(&mut app, 3);
+        assert!(Project::load(&file.0).is_ok());
+        assert!(!app.doc.is_dirty());
+        assert!(app.view.saving.is_none(), "saved once, nothing left queued");
+    }
+
+    #[test]
+    fn save_as_while_a_save_is_queued_retargets_it() {
+        let first = TempFile::new("retarget-first");
+        let second = TempFile::new("retarget-second");
+        let mut app = app();
+        app.doc.path = Some(first.0.clone());
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        // Save As within the queued save's two frames, picking `second`.
+        assert!(app.save_to(second.0.clone(), None), "not dropped");
+        assert_eq!(app.view.status_line.as_deref(), Some("Saving…"));
+        run_frames(&mut app, 3);
+        assert!(Project::load(&second.0).is_ok(), "saved where picked last");
+        assert!(!first.0.exists(), "retargeted, not saved twice");
+        assert_eq!(app.doc.path.as_ref(), Some(&second.0));
+        assert!(!app.doc.is_dirty());
+        assert_eq!(app.view.status_line, None);
+    }
+
+    #[test]
+    fn save_as_retargeting_a_queued_save_onto_an_existing_file_asks_and_keeps_its_action() {
+        let file = TempFile::new("retarget-then-quit");
+        let (mut app, existing) = app_saving_over_an_existing_file("retarget-over");
+        app.doc.path = Some(file.0.clone());
+        app.view.confirm = Some(Pending::Quit);
+        assert!(app.save_then(Pending::Quit));
+        assert!(app.save_to(existing.0.with_extension(""), None));
+        assert!(app.view.saving.is_none() && app.view.overwrite.is_some());
+        assert_eq!(app.view.status_line, None, "no save is queued now");
+        app.answer_overwrite(true);
+        run_frames(&mut app, 3);
+        assert!(Project::load(&existing.0).is_ok(), "replaced");
+        assert!(!file.0.exists());
+        assert!(app.view.quit, "the queued save's action still runs");
     }
 
     #[test]
