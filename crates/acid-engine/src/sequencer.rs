@@ -1061,10 +1061,7 @@ mod tests {
         assert!((at - (16.0 * step - 10.0)).abs() < step / 2.0, "at {at}");
         let boundary: Vec<SeqEvent> = ev
             .iter()
-            .filter(|(pos, e)| {
-                *pos == ev[restore].0
-                    && matches!(e, SeqEvent::Param { .. } | SeqEvent::ParamRestore { .. })
-            })
+            .filter(|(pos, _)| *pos == ev[restore].0)
             .map(|(_, e)| *e)
             .collect();
         assert_eq!(
@@ -1077,6 +1074,17 @@ mod tests {
                 },
             ],
             "pattern B's lane replaces A's: the old param comes back first"
+        );
+        let restores = ev
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::ParamRestore { .. }))
+            .count();
+        assert_eq!(restores, 1, "only A's param is restored, and only once");
+        assert!(
+            ev[restore..]
+                .iter()
+                .all(|(_, e)| !matches!(e, SeqEvent::Param { id, .. } if *id == cutoff)),
+            "A's lane writes nothing after the switch"
         );
     }
 

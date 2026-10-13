@@ -1731,18 +1731,19 @@ mod tests {
         let frames = 5_700_000usize;
         let leave = 1_000;
         let mut left = MEMORY_LIMIT / 4 - leave;
-        // Filler slots for the memory count only: their 1-frame metas don't
-        // match the PCM length, so they are not valid slots (`is_valid`).
+        // Filler slots that fill the memory: valid slots, their metas span the PCM.
         for slot in 0..3 {
             let n = left.min(frames);
             left -= n;
-            app.doc.project.sampler.slots[slot] = Some(SlotData {
+            let big = SlotData {
                 name: "big".into(),
-                meta: SlotMeta::chromatic(24 + 2 * slot as u8, 25 + 2 * slot as u8, 24, 1),
+                meta: SlotMeta::chromatic(24 + 2 * slot as u8, 25 + 2 * slot as u8, 24, n as u32),
                 sample_rate: 192_000,
                 channels: 1,
                 pcm: vec![0; n],
-            });
+            };
+            assert!(big.is_valid(), "{:?}", big.problem());
+            app.doc.project.sampler.slots[slot] = Some(big);
         }
         assert_eq!(
             app.doc.project.sampler.memory_bytes(),
