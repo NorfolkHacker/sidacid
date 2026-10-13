@@ -124,6 +124,7 @@ impl SidAcidApp {
         egui::ScrollArea::horizontal()
             .id_salt(("s303", synth))
             .show(ui, |ui| {
+                theme::note_grid_visuals(ui.visuals_mut());
                 egui::Grid::new(("grid303", synth))
                     .spacing([2.0, 2.0])
                     .show(ui, |ui| {
