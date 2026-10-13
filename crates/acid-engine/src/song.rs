@@ -189,11 +189,13 @@ pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
     song.bars.splice(at..at, bars.iter().copied());
     if let Some((a, b)) = song.loop_range {
         let n = bars.len() as u16;
+        // a stray range past the bars can't overflow or leave the bar cap
+        let shift = |i: u16| i.saturating_add(n).min((MAX_BARS - 1) as u16);
         let (a_at, b_at) = (a as usize, b as usize);
         song.loop_range = Some(if at <= a_at {
-            (a + n, b + n)
+            (shift(a), shift(b))
         } else if at <= b_at + 1 {
-            (a, b + n)
+            (a, shift(b))
         } else {
             (a, b)
         });
@@ -568,5 +570,25 @@ mod tests {
         let b = Banks::of(&snapshot);
         insert_bars(&mut p.song, 0, &[Bar::default(); 5], b);
         assert_eq!(p.song.bars.len(), MAX_BARS);
+    }
+
+    #[test]
+    fn insert_before_an_extreme_loop_range_saturates() {
+        let (p, _) = sixteen_step_song(3);
+        let b = Banks::of(&p);
+        let insert = |range: (u16, u16), at: usize| {
+            let mut song = p.song.clone();
+            song.loop_range = Some(range);
+            insert_bars(&mut song, at, &[Bar::default(); 2], b);
+            song.loop_range
+        };
+        let top = (MAX_BARS - 1) as u16;
+        assert_eq!(insert((u16::MAX - 1, u16::MAX), 0), Some((top, top)));
+        assert_eq!(insert((0, u16::MAX), 1), Some((0, top)), "extends");
+        assert_eq!(
+            insert((1, 2), 0),
+            Some((3, 4)),
+            "a normal loop still shifts"
+        );
     }
 }
