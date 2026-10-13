@@ -13,3 +13,4 @@ Task 8: minor (deferred): new project tests sit above `use super::*` in mod test
 Task 9: minor (deferred): FmVoice inverse assumes unique ParamIds (to_params is unique); one-voice-bank path untested
 Task 10: minor (deferred): Imported tab shows selected while bank None (grid shows starter); current-voice highlight by name only; headless test doesn't cover Imported+None or the collapsed LFO/FX section
 Final fix wave: re-review clean (7/7). Minor: Stop after a song ends by itself hard-cuts the FM tail (stop-twice semantics).
+Resolved in Plan 7 (backlog cleanup), see docs/superpowers/plans/2026-10-12-sidacid-plan7-backlog.md

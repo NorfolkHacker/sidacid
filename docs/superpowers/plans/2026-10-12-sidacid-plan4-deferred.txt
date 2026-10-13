@@ -17,3 +17,4 @@ Task 10: minor (deferred): no test of FM transpose editing in bar editor
 Final: parked — SineVoices note_off also cuts a held audition of same pitch — Ruling: placeholder only; Plans 5–6 real engines must keep audition voices separate — if wrong: audition cut short while pattern plays same pitch.
 Final: parked — poly_edit::add overlap retain can delete a same-pitch note hidden past a shortened end — Ruling: undo restores it; rare — if wrong: a hidden note vanishes until undo.
 Final fix wave: re-review clean (5/5 addressed). Note for Plans 5–6: real voices must keep release-all-voices-of-pitch on note_off (overlapping same-pitch double PolyOn).
+Resolved in Plan 7 (backlog cleanup), see docs/superpowers/plans/2026-10-12-sidacid-plan7-backlog.md
