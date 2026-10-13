@@ -206,8 +206,10 @@ impl Voice {
         self.env = 0.0;
         self.stage = Stage::Attack;
         self.velocity = vel.min(127) as f32 / 127.0;
+        // A note starts from silence: a filter on from its start runs cold
+        // (not primed), while one switched on later is primed.
         self.filter = [Svf::new(self.sample_rate), Svf::new(self.sample_rate)];
-        self.filter_was_on = false;
+        self.filter_was_on = true;
     }
 
     pub fn release(&mut self, seconds: f32) {
@@ -277,8 +279,8 @@ impl Voice {
             .min(loop_len * 0.5)
             .max(1.0);
         let filter_on = s.cutoff_knob < 0.999 || s.resonance > 0.0;
-        // Switched on: start from this render's first input, not from the
-        // state it had when it was last on, nor from silence.
+        // Switched on mid-note: start from this render's first input, not
+        // from the state it had when it was last on, nor from silence.
         let mut prime = filter_on && !self.filter_was_on;
         if filter_on {
             if prime {
@@ -389,7 +391,7 @@ mod tests {
     use super::*;
     use crate::params::SlotParam;
     use crate::sampler::slot::{SlotMeta, SlotPlay};
-    use crate::testutil::all_finite;
+    use crate::testutil::{all_finite, peak};
 
     const SR: f32 = 48_000.0;
 
@@ -532,6 +534,27 @@ mod tests {
                 assert!((x - y).abs() < tolerance, "sample {i}: {x} vs dry {y}");
             }
         }
+    }
+
+    #[test]
+    fn a_dark_note_starting_at_a_peak_opens_without_a_thump() {
+        // a cosine: the note's first sample is the waveform's peak
+        let sample = SampleData {
+            sample_rate: 48_000,
+            left: (0..48_000).map(|i| (i as f32 * 0.05).cos() * 0.8).collect(),
+            right: None,
+        };
+        let mut dark = SlotSettings::default();
+        dark.set(SlotParam::Cutoff, 0.0);
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        let out = run(&mut v, &sample, &dark, 28_800);
+        let onset = peak(&out[..600]);
+        let steady = peak(&out[24_000..]);
+        assert!(
+            onset < 3.0 * steady,
+            "onset {onset} vs steady {steady}: primed at note start"
+        );
     }
 
     #[test]
@@ -724,6 +747,8 @@ mod tests {
                 if let Some((a, b)) = seg.looping {
                     assert!(inside(a) && inside(b) && a < b, "key {key}: {seg:?}");
                 }
+                // The bounds above are the guard: rendering stays finite even
+                // without them, since `SampleData::read` clamps.
                 for reverse in [false, true] {
                     let mut v = Voice::new(SR);
                     v.start(&Segment { reverse, ..seg }, 0, key, 127, false, 1);
@@ -749,8 +774,9 @@ mod tests {
         );
         assert!(v.tail_only());
         v.release(1.0);
+        assert!(v.tail_only() && !v.held, "a release leaves the fade alone");
         joined.extend(run(&mut v, &sample, &s, 450));
-        assert!(max_step(&joined) < 0.1 * level, "a release can't revive it");
+        assert!(max_step(&joined) < 0.1 * level, "no click");
         assert!(!v.active && !v.tail_only());
     }
 
