@@ -1,9 +1,10 @@
 //! The classic 303 step editor: one column per step; rows for note,
 //! octave down/up, accent, slide and gate.
 
+use super::scroll::ScrollGesture;
 use super::step_edit::{
-    ScrollGesture, StepWriter, WriteAction, gate_label, key_to_write, nudge_note, scroll_notches,
-    step_label, toggle_row,
+    StepWriter, WriteAction, gate_label, key_to_write, nudge_note, scroll_notches, step_label,
+    toggle_row,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -71,43 +72,6 @@ impl SidAcidApp {
     fn note_scroll_without_edit(&mut self, synth: usize, now: f64) {
         let serial = self.view.scroll_at[synth].and_then(|g| g.serial);
         self.view.scroll_at[synth] = Some(ScrollGesture { last: now, serial });
-    }
-
-    /// Ends wheel gestures (303 pitch, knobs) once the wheel has rested.
-    /// A gesture's undo step is closed only if no other edit came after
-    /// it, so another open gesture is never cut short. Returns the time
-    /// until the next gesture ends, if one is still open.
-    pub(crate) fn tick_scroll_gestures(&mut self, now: f64) -> Option<f64> {
-        let mut next: Option<f64> = None;
-        let mut wait = |left: f64| next = Some(next.map_or(left, |n: f64| n.min(left)));
-        for synth in 0..2 {
-            let Some(g) = self.view.scroll_at[synth] else {
-                continue;
-            };
-            if let Some(left) = g.remaining(now) {
-                wait(left);
-            } else {
-                self.view.scroll_at[synth] = None;
-                self.view.scroll_accum[synth] = 0.0;
-                self.close_scroll_step(g);
-            }
-        }
-        if let Some((_, g)) = self.view.knob_scroll {
-            if let Some(left) = g.remaining(now) {
-                wait(left);
-            } else {
-                self.view.knob_scroll = None;
-                self.close_scroll_step(g);
-            }
-        }
-        next
-    }
-
-    /// Ends a wheel gesture's undo step, unless a later edit took over.
-    pub(crate) fn close_scroll_step(&mut self, g: ScrollGesture) {
-        if g.serial == Some(self.doc.edit_serial()) {
-            self.doc.end_gesture();
-        }
     }
 
     pub(crate) fn step303(&mut self, ui: &mut egui::Ui, synth: usize) {
@@ -335,37 +299,5 @@ mod tests {
             nudge_note(toggle_row(5, before), 1),
             "and so does the pitch"
         );
-    }
-
-    #[test]
-    fn pitch_scrolls_close_together_are_one_undo_step() {
-        let mut app = app();
-        let slot = app.doc.project.selected[0];
-        let start = app.doc.project.synths[0].patterns[slot as usize].steps[0];
-        let frame = |app: &mut SidAcidApp, op: Option<StepOp>, now: f64| {
-            if let Some(op) = op {
-                app.apply_step_ops(0, slot, vec![(0, op)], now);
-            }
-            app.tick_scroll_gestures(now);
-        };
-        for t in [0.0, 0.1, 0.2] {
-            frame(&mut app, Some(StepOp::Nudge(1)), t);
-            frame(&mut app, None, t + 0.05);
-        }
-        frame(&mut app, None, 0.4);
-        assert!(app.view.scroll_at[0].is_some(), "still open");
-        frame(&mut app, None, 0.6);
-        assert!(app.view.scroll_at[0].is_none());
-        frame(&mut app, Some(StepOp::Nudge(1)), 1.6);
-        frame(&mut app, None, 2.0);
-        app.doc.undo();
-        let mid = app.doc.project.synths[0].patterns[slot as usize].steps[0];
-        assert_eq!(mid, nudge_note(start, 3), "three notches, one step");
-        app.doc.undo();
-        assert_eq!(
-            app.doc.project.synths[0].patterns[slot as usize].steps[0],
-            start
-        );
-        assert!(!app.doc.can_undo());
     }
 }

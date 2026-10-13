@@ -21,6 +21,7 @@ mod roll_edit;
 mod sampler_load;
 mod sampler_panel;
 mod sampler_ui;
+mod scroll;
 mod song_panel;
 mod step303;
 mod step_edit;
@@ -51,9 +52,9 @@ pub struct ViewState {
     /// Scroll distance accumulated per synth toward the next pitch notch.
     pub scroll_accum: [f32; 2],
     /// Open pitch-scroll gesture per synth's 303 editor.
-    pub scroll_at: [Option<step_edit::ScrollGesture>; 2],
+    pub scroll_at: [Option<scroll::ScrollGesture>; 2],
     /// Open wheel gesture on a knob (its undo step closes after a rest).
-    pub knob_scroll: Option<(acid_engine::params::ParamId, step_edit::ScrollGesture)>,
+    pub knob_scroll: Option<(acid_engine::params::ParamId, scroll::ScrollGesture)>,
     /// Mouse drag in progress in each synth's piano roll.
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
     /// The synth pattern as it was when that drag began; every frame of
@@ -240,6 +241,25 @@ impl SidAcidApp {
             }
             self.pending.push(cmd);
         }
+    }
+
+    /// Undo, keeping the browser highlight honest: undoing a voice load
+    /// restores a voice that did not come from the stored row (and a name
+    /// guard can't tell same-named rows apart), and undoing a bank import
+    /// puts other voices under the stored index.
+    pub(crate) fn undo(&mut self) {
+        self.view.fm_voice_src =
+            fm_voices::voice_source_after(self.view.fm_voice_src, self.doc.next_undo());
+        let cmds = self.doc.undo();
+        self.send(cmds);
+    }
+
+    /// Redo; see `undo`.
+    pub(crate) fn redo(&mut self) {
+        self.view.fm_voice_src =
+            fm_voices::voice_source_after(self.view.fm_voice_src, self.doc.next_redo());
+        let cmds = self.doc.redo();
+        self.send(cmds);
     }
 
     /// Sends queued commands to the audio thread. Without audio, commands
@@ -1177,7 +1197,7 @@ mod tests {
         app.view.touched_knob = Some(acid_engine::params::ParamId::Master(
             acid_engine::params::MasterParam::Level,
         ));
-        let open = step_edit::ScrollGesture {
+        let open = scroll::ScrollGesture {
             last: 0.0,
             serial: Some(0),
         };

@@ -12,4 +12,4 @@ Task 9: minor (deferred): thin tests (only cycle_hit); Len edit doesn't set focu
 Task 10: minor (deferred): fault label lacks repaint-after for expiry; meter_fraction(NaN) passes NaN; fault_until untested
 Task 11: minor (deferred): save only adds .sidacid when no extension; no guard against concurrent exports; load_document doesn't reset focus/bank/scroll; dialog name parsed from title string; no tests for save/load/dialog paths
 Resolved in Plan 7 (backlog cleanup), see docs/superpowers/plans/2026-10-12-sidacid-plan7-backlog.md
-Plan 7: left on purpose — tick_scroll_gestures/close_scroll_step (P2-T7d debounce) live in step303.rs although they also end knob gestures — placement only: step_edit.rs is pure logic with no app impl, and mod.rs is already the largest file.
+Plan 7: left on purpose — tick_scroll_gestures/close_scroll_step (P2-T7d debounce) live in step303.rs although they also end knob gestures — placement only: step_edit.rs is pure logic with no app impl, and mod.rs is already the largest file. — fixed in Plan 8 (leftovers).

@@ -61,26 +61,6 @@ pub fn scroll_notches(accum: &mut f32, delta: f32) -> i32 {
     n
 }
 
-/// Seconds without wheel input that end a scroll gesture's undo step.
-pub const SCROLL_IDLE: f64 = 0.3;
-
-/// An open mouse-wheel gesture: when the wheel last moved, and the
-/// document's edit serial after the gesture's last edit (None: no edit yet).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ScrollGesture {
-    pub last: f64,
-    pub serial: Option<u64>,
-}
-
-impl ScrollGesture {
-    /// Seconds until the gesture ends at `now`; None once the wheel has
-    /// rested for `SCROLL_IDLE`.
-    pub fn remaining(&self, now: f64) -> Option<f64> {
-        let left = self.last + SCROLL_IDLE - now;
-        (left > 0.0).then_some(left)
-    }
-}
-
 /// Click behaviour of the 303 rows: 1 Down, 2 Up, 3 Accent, 4 Slide, 5 Gate.
 pub fn toggle_row(row: usize, step: SynthStep) -> SynthStep {
     match row {
@@ -274,24 +254,6 @@ pub fn key_to_write(key: Key) -> Option<WriteKey> {
 mod tests {
     use super::*;
     use acid_engine::project::SynthPattern;
-
-    #[test]
-    fn a_scroll_gesture_ends_after_the_wheel_rests() {
-        let g = ScrollGesture {
-            last: 10.0,
-            serial: Some(3),
-        };
-        assert!(
-            g.remaining(10.0)
-                .is_some_and(|r| (r - SCROLL_IDLE).abs() < 1e-9)
-        );
-        assert!(
-            g.remaining(10.1).is_some(),
-            "100 ms between notches: still open"
-        );
-        assert!(g.remaining(10.0 + SCROLL_IDLE).is_none());
-        assert!(g.remaining(11.0).is_none());
-    }
 
     fn on(note: u8, octave: i8) -> SynthStep {
         SynthStep {

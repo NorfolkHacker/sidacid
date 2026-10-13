@@ -1,6 +1,6 @@
 //! Binding knobs and switches to project parameters.
 
-use super::step_edit::ScrollGesture;
+use super::scroll::ScrollGesture;
 use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::fm::patch;

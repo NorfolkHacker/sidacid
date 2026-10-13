@@ -51,23 +51,6 @@ impl SidAcidApp {
         }
     }
 
-    /// Undo, keeping the browser highlight honest: undoing a voice load
-    /// restores a voice that did not come from the stored row (and a name
-    /// guard can't tell same-named rows apart), and undoing a bank import
-    /// puts other voices under the stored index.
-    pub(crate) fn undo(&mut self) {
-        self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, self.doc.next_undo());
-        let cmds = self.doc.undo();
-        self.send(cmds);
-    }
-
-    /// Redo; see `undo`.
-    pub(crate) fn redo(&mut self) {
-        self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, self.doc.next_redo());
-        let cmds = self.doc.redo();
-        self.send(cmds);
-    }
-
     /// A single voice loads straight into the FM; a bank goes to the browser.
     pub(crate) fn import_syx_bytes(&mut self, bytes: &[u8]) {
         match sysex::parse(bytes) {
@@ -91,7 +74,7 @@ impl SidAcidApp {
 /// The browser row still to highlight once `edit` is applied. A voice load
 /// brings in a voice that came from no row; a bank change puts other voices
 /// under an imported row's index.
-fn voice_source_after(
+pub(crate) fn voice_source_after(
     src: Option<(FmBrowser, usize)>,
     edit: Option<&Edit>,
 ) -> Option<(FmBrowser, usize)> {
