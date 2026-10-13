@@ -33,7 +33,7 @@ pub fn peaks(pcm: &[i16], channels: usize, columns: usize) -> Vec<(f32, f32)> {
 }
 
 pub fn frame_to_x(frame: u32, frames: u32, left: f32, width: f32) -> f32 {
-    left + frame as f32 / frames.max(1) as f32 * width
+    left + frame as f32 / frames.max(1) as f32 * width.max(1.0)
 }
 
 pub fn x_to_frame(x: f32, frames: u32, left: f32, width: f32) -> u32 {
@@ -178,6 +178,11 @@ mod tests {
         assert_eq!(x_to_frame(110.0, 1000, 10.0, 200.0), 500);
         assert_eq!(x_to_frame(-50.0, 1000, 10.0, 200.0), 0);
         assert_eq!(x_to_frame(9999.0, 1000, 10.0, 200.0), 1000);
+        // A sub-pixel or empty waveform guards both directions the same way.
+        let x = frame_to_x(500, 1000, 10.0, 0.5);
+        assert_eq!(x_to_frame(x, 1000, 10.0, 0.5), 500);
+        assert_eq!(frame_to_x(0, 0, 10.0, 200.0), 10.0);
+        assert_eq!(x_to_frame(110.0, 0, 10.0, 200.0), 0);
         assert_eq!(nearest_marker(&[10.0, 50.0, 52.0], 51.5, 4.0), Some(2));
         assert_eq!(nearest_marker(&[10.0], 30.0, 4.0), None);
     }

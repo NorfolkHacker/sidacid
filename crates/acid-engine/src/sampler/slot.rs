@@ -241,14 +241,28 @@ impl SlotData {
         }
     }
 
-    pub fn is_valid(&self) -> bool {
+    /// Why this slot could not be saved and reopened, if it could not.
+    pub fn problem(&self) -> Option<&'static str> {
         let frames = self.frames();
-        (1..=2).contains(&self.channels)
-            && self.pcm.len().is_multiple_of(self.channels as usize)
-            && (8_000..=192_000).contains(&self.sample_rate)
-            && frames > 0
-            && frames as f32 <= MAX_SECONDS * self.sample_rate as f32
-            && self.meta.is_well_formed(frames)
+        if !(1..=2).contains(&self.channels) {
+            Some("unsupported channel count")
+        } else if !self.pcm.len().is_multiple_of(self.channels as usize) {
+            Some("the audio is not a whole number of frames")
+        } else if !(8_000..=192_000).contains(&self.sample_rate) {
+            Some("sample rate must be 8-192 kHz")
+        } else if frames == 0 {
+            Some("the sample is empty")
+        } else if frames as f32 > MAX_SECONDS * self.sample_rate as f32 {
+            Some("longer than 30 s")
+        } else if !self.meta.is_well_formed(frames) {
+            Some("slice/zone layout doesn't fit")
+        } else {
+            None
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.problem().is_none()
     }
 }
 
@@ -337,6 +351,44 @@ mod tests {
         (0..frames * channels)
             .map(|i| ((i as f32) * 0.01).sin() * 0.7)
             .collect()
+    }
+
+    #[test]
+    fn problem_names_why_a_slot_is_invalid() {
+        let good = |rate: u32, ch: u8, frames: usize| {
+            SlotData::new(
+                "t",
+                rate,
+                ch,
+                &tone(frames, ch as usize),
+                SlotMeta::chromatic(24, 48, 24, frames as u32),
+            )
+        };
+        assert_eq!(good(22_050, 1, 1000).problem(), None);
+        assert!(good(22_050, 1, 1000).is_valid());
+        assert_eq!(
+            good(22_050, 3, 1000).problem(),
+            Some("unsupported channel count")
+        );
+        assert_eq!(
+            good(6_000, 1, 1000).problem(),
+            Some("sample rate must be 8-192 kHz")
+        );
+        assert_eq!(good(22_050, 1, 0).problem(), Some("the sample is empty"));
+        assert_eq!(
+            good(8_000, 1, 8_000 * 31).problem(),
+            Some("longer than 30 s")
+        );
+        let mut bad_meta = good(22_050, 1, 1000);
+        bad_meta.meta.end = 5000;
+        assert_eq!(bad_meta.problem(), Some("slice/zone layout doesn't fit"));
+        let mut odd = good(22_050, 2, 1000);
+        odd.pcm.pop();
+        assert_eq!(
+            odd.problem(),
+            Some("the audio is not a whole number of frames")
+        );
+        assert!(!odd.is_valid());
     }
 
     #[test]

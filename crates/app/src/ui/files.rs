@@ -3,6 +3,7 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
+use acid_engine::host::Command;
 use acid_engine::machine::{MachineKind, kind_of};
 use acid_engine::project::{
     BANK_SIZE, DrumPattern, NotePattern, PatternRef, Project, SynthPattern,
@@ -165,7 +166,29 @@ impl SidAcidApp {
         }
     }
 
+    /// Releases the held pad and roll-audition notes, so a note that is
+    /// still sounding on an engine that outlives the load stops.
+    pub(crate) fn release_held_notes(&mut self) {
+        let mut cmds = Vec::new();
+        if let Some(pitch) = self.view.pad_note.take() {
+            cmds.push(Command::NoteOff {
+                machine: acid_engine::machine::MachineId::Sampler.index() as u8,
+                pitch,
+            });
+        }
+        if let Some((machine, pitch)) = self.view.audition.take() {
+            cmds.push(Command::NoteOff {
+                machine: machine as u8,
+                pitch,
+            });
+        }
+        self.send(cmds);
+    }
+
     pub(crate) fn load_document(&mut self, doc: Document) {
+        // Ahead of the clear below: these go to the old engine first.
+        self.release_held_notes();
+        self.flush_pending();
         self.doc = doc;
         // An empty imported bank is no bank (the Imported tab stays off).
         if self.doc.project.fm.bank.as_ref().is_some_and(Vec::is_empty) {

@@ -180,6 +180,11 @@ impl SidAcidApp {
     /// run of `SetParam`s so ordering against other commands is kept.
     pub(crate) fn send(&mut self, cmds: Vec<Command>) {
         for cmd in cmds {
+            // Every load, clear, undo and redo of a slot's audio comes through
+            // here: its cached waveform peaks are stale.
+            if let &Command::SamplerSample { slot, .. } = &cmd {
+                self.view.wave_cache.remove(&(slot as usize));
+            }
             if let &Command::SetParam(id, v) = &cmd {
                 let run = self
                     .pending
@@ -1521,5 +1526,139 @@ mod tests {
                 .enumerate()
                 .all(|(i, s)| i == 3 || s.is_none())
         );
+    }
+
+    #[test]
+    fn a_truncated_file_loads_with_a_warning() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let full = test_wav(0.5);
+        app.load_sample_bytes(0, "Whole", Some("wav"), &full);
+        assert!(app.view.message.is_none(), "a whole file loads silently");
+        let cut = &full[..full.len() - 1000];
+        app.load_sample_bytes(1, "Cut", Some("wav"), cut);
+        assert!(
+            app.doc.project.sampler.slots[1].is_some(),
+            "partial audio is kept"
+        );
+        let msg = app.view.message.clone().expect("the user is told");
+        assert!(msg.contains("ends early") && msg.contains("Cut"), "{msg}");
+    }
+
+    #[test]
+    fn a_load_past_the_memory_limit_is_refused() {
+        use acid_engine::sampler::MEMORY_LIMIT;
+        use acid_engine::sampler::slot::{SlotData, SlotMeta};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let frames = 5_700_000usize;
+        let leave = 1_000;
+        let mut left = MEMORY_LIMIT / 4 - leave;
+        for slot in 0..3 {
+            let n = left.min(frames);
+            left -= n;
+            app.doc.project.sampler.slots[slot] = Some(SlotData {
+                name: "big".into(),
+                meta: SlotMeta::chromatic(24 + 2 * slot as u8, 25 + 2 * slot as u8, 24, 1),
+                sample_rate: 192_000,
+                channels: 1,
+                pcm: vec![0; n],
+            });
+        }
+        assert_eq!(
+            app.doc.project.sampler.memory_bytes(),
+            MEMORY_LIMIT - leave * 4
+        );
+        let before = app.doc.project.clone();
+        app.load_sample_bytes(3, "Over", Some("wav"), &test_wav(0.5));
+        let msg = app.view.message.clone().expect("a message explains it");
+        assert!(msg.contains("Not enough sample memory"), "{msg}");
+        assert_eq!(app.doc.project, before);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn clearing_a_slot_and_loading_one_both_undo_and_redo() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        let loaded = app.doc.project.clone();
+        app.clear_slot(0);
+        assert!(app.doc.project.sampler.slots[0].is_none());
+        let cmds = app.doc.undo();
+        app.send(cmds);
+        assert_eq!(app.doc.project, loaded, "undo of a clear restores the slot");
+        let cmds = app.doc.undo();
+        app.send(cmds);
+        assert!(
+            app.doc.project.sampler.slots[0].is_none(),
+            "undo of the load"
+        );
+        let cmds = app.doc.redo();
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Command::SamplerSample {
+                slot: 0,
+                sample: Some(_)
+            }
+        )));
+        app.send(cmds);
+        assert_eq!(
+            app.doc.project, loaded,
+            "redo of a load restores slot and params"
+        );
+    }
+
+    #[test]
+    fn a_waveform_drag_is_one_undo_step_and_re_sends_the_slot_every_move() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        let before = app.doc.project.clone();
+        app.pending.clear();
+        for end in [10_000, 9_000, 8_000, 7_000] {
+            assert!(app.edit_slot_meta(0, true, |m| m.loop_end = end));
+        }
+        app.doc.end_gesture();
+        let plays = app
+            .pending
+            .iter()
+            .filter(|c| matches!(c, Command::SamplerPlay { slot: 0, .. }))
+            .count();
+        assert_eq!(plays, 4, "each move reaches the engine");
+        let cmds = app.doc.undo();
+        app.send(cmds);
+        assert_eq!(app.doc.project, before, "one undo undoes the whole drag");
+    }
+
+    #[test]
+    fn slot_audio_commands_drop_the_cached_waveform() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
+        run_frames(&mut app, 2);
+        assert!(app.view.wave_cache.contains_key(&0));
+        app.load_sample_bytes(0, "B", Some("wav"), &test_wav(0.5));
+        assert!(!app.view.wave_cache.contains_key(&0), "reload");
+        run_frames(&mut app, 2);
+        app.clear_slot(0);
+        assert!(!app.view.wave_cache.contains_key(&0), "clear");
+        let cmds = app.doc.undo();
+        run_frames(&mut app, 1);
+        app.send(cmds);
+        assert!(!app.view.wave_cache.contains_key(&0), "undo");
+    }
+
+    #[test]
+    fn loading_a_document_releases_the_held_notes() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.pad_note = Some(36);
+        app.view.audition = Some((4, 60));
+        app.release_held_notes();
+        assert_eq!((app.view.pad_note, app.view.audition), (None, None));
+        let offs: Vec<_> = app
+            .pending
+            .iter()
+            .filter_map(|c| match c {
+                Command::NoteOff { machine, pitch } => Some((*machine, *pitch)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offs, vec![(5, 36), (4, 60)]);
     }
 }

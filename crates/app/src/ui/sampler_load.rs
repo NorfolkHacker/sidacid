@@ -116,9 +116,8 @@ impl SidAcidApp {
             meta,
         );
         // Backstop: never put a slot in the project that would stop it reopening.
-        if !data.is_valid() {
-            self.view.message =
-                Some("Could not load the sample: its format is not supported.".into());
+        if let Some(problem) = data.problem() {
+            self.view.message = Some(format!("Could not load the sample: {problem}."));
             return;
         }
         let values = SlotParam::ALL
@@ -142,6 +141,11 @@ impl SidAcidApp {
         );
         self.send(cmds);
         self.view.sampler_slot = slot;
+        if decoded.truncated {
+            self.view.message = Some(format!(
+                "Loaded \"{short}\", but the file ends early: only the audio that could be read was kept."
+            ));
+        }
     }
 
     pub(crate) fn clear_slot(&mut self, slot: usize) {

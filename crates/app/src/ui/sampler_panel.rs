@@ -306,8 +306,7 @@ impl SidAcidApp {
                 set_marker(m, marker, frame, frames);
             });
         }
-        if resp.drag_stopped() {
-            self.view.wave_drag = None;
+        if resp.drag_stopped() && self.view.wave_drag.take().is_some() {
             self.doc.end_gesture();
         }
     }
