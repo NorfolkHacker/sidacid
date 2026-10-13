@@ -318,7 +318,10 @@ impl SidAcidApp {
     /// As while a save is still queued (within its two frames) retargets
     /// that save instead of being dropped: both write this same document,
     /// so the file picked last gets it and the earlier file is left as it
-    /// was. The queued save's action to run after carries over.
+    /// was. The queued save's action to run after carries over. If the
+    /// new file needs the Replace-file question and the answer is No,
+    /// nothing is saved (not even the earlier file): the document stays
+    /// dirty.
     fn save_to(&mut self, chosen: PathBuf, mut then: Option<Pending>) -> bool {
         if let Some(save) = self.view.saving.take() {
             self.view.status_line = save.prev_status;
@@ -946,6 +949,20 @@ mod tests {
         let msg = app.view.message.as_deref().unwrap_or_default();
         assert!(msg.starts_with("Could not save"), "{msg}");
         assert!(msg.contains("The audio engine is busy"), "{msg}");
+    }
+
+    #[test]
+    fn loading_a_document_while_playing_shows_the_transport_stopped() {
+        let mut app = app();
+        app.status.playing = true;
+        // Headless, like a load the busy engine refused: no status comes.
+        app.load_document(Document::new(Project::default()));
+        app.engine_busy_at_load();
+        run_frames(&mut app, 1);
+        assert!(!app.status.playing, "the fresh engine starts stopped");
+        app.view.song_cursor = 3;
+        app.stop();
+        assert_eq!(app.view.song_cursor, 0, "Stop takes the stopped branch");
     }
 
     #[test]

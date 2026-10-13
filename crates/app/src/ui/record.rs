@@ -27,6 +27,8 @@ impl SidAcidApp {
         self.view.rec_last = None;
         self.view.was_playing = false;
         self.view.stops_sent = 0;
+        // Until its first status (none comes if audio is dropped).
+        self.status.playing = false;
     }
 
     pub(crate) fn set_mode(&mut self, mode: Mode) {
