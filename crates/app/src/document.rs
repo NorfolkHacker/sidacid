@@ -225,7 +225,7 @@ impl Document {
     /// Applies `edit` and returns the engine commands to send. With
     /// `merge`, consecutive edits to the same target form one undo step
     /// until `end_gesture`. An edit that changes nothing adds no step and
-    /// leaves the dirty state alone.
+    /// leaves the dirty state and any open gesture alone.
     ///
     /// Indices must be in range: `synth`/`kit` < 2, `slot` < `PATTERNS`
     /// (sampler `slot` < `SLOTS`), `step` < `STEPS`, `inst` <
@@ -236,10 +236,8 @@ impl Document {
         let continuing = merge && self.gesture == Some(key) && !self.undo.is_empty();
         let inverse = self.apply_raw(edit);
         let cmds = self.commands_for(&inverse);
+        // A stray no-op in the middle of a drag must not split its step.
         if self.is_no_op(&inverse) {
-            if !continuing {
-                self.gesture = None;
-            }
             return cmds;
         }
         self.last_generation += 1;
@@ -1363,6 +1361,32 @@ mod tests {
         d.undo();
         assert_eq!(d.project.param(CUTOFF), start);
         assert_eq!(d.project.bpm, 150.0, "the bpm step is separate");
+    }
+
+    #[test]
+    fn a_no_op_edit_leaves_an_open_gesture_open() {
+        let mut d = doc();
+        let start = d.project.param(CUTOFF);
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.3,
+            },
+            true,
+        );
+        // e.g. a redraw's rounding that sets the tempo it already has
+        d.apply(Edit::Bpm(d.project.bpm), false);
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.6,
+            },
+            true,
+        );
+        d.end_gesture();
+        d.undo();
+        assert_eq!(d.project.param(CUTOFF), start, "one step for the drag");
+        assert!(!d.can_undo());
     }
 
     #[test]
