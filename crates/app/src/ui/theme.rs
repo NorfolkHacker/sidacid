@@ -21,10 +21,15 @@ pub const GRID_LINE: Color32 = Color32::from_rgb(0x30, 0x33, 0x38);
 
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
-    visuals.selection.bg_fill = VIOLET.gamma_multiply(0.45);
-    visuals.selection.stroke.color = VIOLET_LIGHT;
+    control_visuals(&mut visuals);
     visuals.hyperlink_color = VIOLET;
     ctx.set_visuals(visuals);
+}
+
+/// Selected controls light violet.
+pub fn control_visuals(visuals: &mut egui::Visuals) {
+    visuals.selection.bg_fill = VIOLET.gamma_multiply(0.45);
+    visuals.selection.stroke.color = VIOLET_LIGHT;
 }
 
 /// Step and drum grids light their cells green: those cells are the
@@ -53,5 +58,14 @@ mod tests {
         note_grid_visuals(&mut v);
         assert_eq!(v.selection.bg_fill, ACID.gamma_multiply(0.45));
         assert_eq!(v.selection.stroke.color, ACID_LIGHT);
+    }
+
+    #[test]
+    fn control_visuals_undo_a_note_grid() {
+        let mut v = egui::Visuals::dark();
+        note_grid_visuals(&mut v);
+        control_visuals(&mut v);
+        assert_eq!(v.selection.bg_fill, VIOLET.gamma_multiply(0.45));
+        assert_eq!(v.selection.stroke.color, VIOLET_LIGHT);
     }
 }

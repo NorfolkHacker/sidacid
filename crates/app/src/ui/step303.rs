@@ -124,7 +124,6 @@ impl SidAcidApp {
         egui::ScrollArea::horizontal()
             .id_salt(("s303", synth))
             .show(ui, |ui| {
-                theme::note_grid_visuals(ui.visuals_mut());
                 egui::Grid::new(("grid303", synth))
                     .spacing([2.0, 2.0])
                     .show(ui, |ui| {
@@ -155,6 +154,12 @@ impl SidAcidApp {
                                     rich = rich.color(theme::ACCENT);
                                 } else if row == 4 && s.slide {
                                     rich = rich.color(theme::SLIDE);
+                                }
+                                // Notes light green; the rows that shape them light violet.
+                                if row == 0 {
+                                    theme::note_grid_visuals(ui.visuals_mut());
+                                } else {
+                                    theme::control_visuals(ui.visuals_mut());
                                 }
                                 let r = ui.add_sized(CELL, egui::Button::new(rich).selected(on));
                                 if row == 0 {
