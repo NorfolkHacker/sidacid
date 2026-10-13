@@ -74,7 +74,12 @@ pub fn add(p: &mut NotePattern, start: u16, len: u16, pitch: u8, vel: u8) -> Opt
     }
     let len = len.max(1);
     let stop = start.saturating_add(len);
-    let overlaps = |n: &Note| n.pitch == pitch && n.start < stop && start < end(n);
+    // Only visible notes are replaced: one hidden past a shortened pattern
+    // end survives (lengthening the pattern brings it back; the engine
+    // tolerates same-pitch overlaps).
+    let visible = p.ticks();
+    let overlaps =
+        |n: &Note| n.pitch == pitch && n.start < visible && n.start < stop && start < end(n);
     let replaced = p.notes.iter().filter(|n| overlaps(n)).count();
     if p.notes.len() - replaced >= MAX_NOTES {
         return None;
@@ -111,6 +116,41 @@ pub fn move_to(p: &mut NotePattern, index: usize, start: u16, pitch: u8) -> bool
     n.start = start;
     n.pitch = pitch;
     true
+}
+
+/// Run when a move or resize drag is dropped: absorbs every other visible
+/// same-pitch note the dragged note overlaps into it (the union span; the
+/// dragged note keeps its velocity). Returns the dragged note's new index.
+/// Not run mid-drag, so an index stays valid for the whole drag.
+pub fn resolve_overlaps(p: &mut NotePattern, index: usize) -> usize {
+    let Some(&dragged) = p.notes.get(index) else {
+        return index;
+    };
+    let visible = p.ticks();
+    let hit = |n: &Note| {
+        n.pitch == dragged.pitch
+            && n.start < visible
+            && n.start < end(&dragged)
+            && dragged.start < end(n)
+    };
+    let (mut lo, mut hi) = (dragged.start, end(&dragged));
+    let mut kept = Vec::with_capacity(p.notes.len());
+    let mut at = 0;
+    for (k, n) in p.notes.iter().enumerate() {
+        if k == index {
+            at = kept.len();
+            kept.push(*n);
+        } else if hit(n) {
+            lo = lo.min(n.start);
+            hi = hi.max(end(n));
+        } else {
+            kept.push(*n);
+        }
+    }
+    kept[at].start = lo;
+    kept[at].len = hi - lo;
+    p.notes = kept;
+    at
 }
 
 pub fn resize(p: &mut NotePattern, index: usize, len: u16) -> bool {
@@ -179,7 +219,7 @@ impl PolyGeom {
     /// (x0, y0, x1, y1); notes running past the pattern end are drawn to it.
     pub fn note_rect(&self, n: &Note) -> (f32, f32, f32, f32) {
         let x0 = self.left + n.start as f32 * self.tick_w;
-        let stop = end(n).min(self.ticks.max(n.start + 1));
+        let stop = end(n).min(self.ticks.max(n.start.saturating_add(1)));
         let x1 = self.left + stop as f32 * self.tick_w;
         let y0 = self.row_top(n.pitch);
         (x0, y0, x1, y0 + self.row_h)
@@ -231,6 +271,62 @@ mod tests {
             "touching, not overlapping"
         );
         assert_eq!(p.notes.len(), 4);
+    }
+
+    #[test]
+    fn add_keeps_a_same_pitch_note_hidden_past_the_pattern_end() {
+        let mut p = pat();
+        add(&mut p, 20, 4, 60, 100).unwrap();
+        p.length = 1; // 4 ticks: the note at tick 20 is hidden, not gone
+        assert!(add(&mut p, 0, 40, 60, 100).is_some());
+        assert_eq!(p.notes.len(), 2, "the hidden note survives");
+        assert!(p.notes.iter().any(|n| n.start == 20));
+    }
+
+    #[test]
+    fn note_rect_of_a_note_at_the_tick_limit_does_not_overflow() {
+        let g = PolyGeom {
+            left: 0.0,
+            top: 0.0,
+            tick_w: 1.0,
+            row_h: 1.0,
+            ticks: 64,
+        };
+        let n = Note {
+            start: u16::MAX,
+            len: 5,
+            pitch: 60,
+            vel: 1,
+        };
+        let _ = g.note_rect(&n);
+    }
+
+    #[test]
+    fn resolving_overlaps_merges_same_pitch_notes_into_the_dragged_one() {
+        let mut p = pat();
+        add(&mut p, 0, 4, 60, 100);
+        let i = add(&mut p, 8, 4, 60, 50).unwrap();
+        add(&mut p, 2, 4, 62, 100);
+        assert!(move_to(&mut p, i, 2, 60), "moved onto the first note");
+        assert_eq!(p.notes.len(), 3, "move alone leaves the overlap");
+        let at = resolve_overlaps(&mut p, i);
+        assert_eq!(p.notes.len(), 2, "the other 60 was absorbed");
+        let merged = p.notes[at];
+        assert_eq!((merged.start, merged.len, merged.pitch), (0, 6, 60));
+        assert_eq!(merged.vel, 50, "the dragged note keeps its velocity");
+        assert!(p.notes.iter().any(|n| n.pitch == 62), "other pitches stay");
+    }
+
+    #[test]
+    fn resolving_overlaps_ignores_touching_hidden_and_other_pitches() {
+        let mut p = pat();
+        add(&mut p, 0, 4, 60, 100);
+        let i = add(&mut p, 4, 4, 60, 100).unwrap();
+        add(&mut p, 20, 4, 60, 100);
+        p.length = 1;
+        let before = p.clone();
+        resolve_overlaps(&mut p, i);
+        assert_eq!(p, before);
     }
 
     #[test]

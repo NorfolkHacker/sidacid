@@ -159,6 +159,24 @@ pub fn toggle_slide(p: &mut SynthPattern, step: usize) {
     }
 }
 
+/// The pattern a drag produces, recomputed from the pattern as it was when
+/// the drag began (`origin`) so notes the pointer passed over reappear and
+/// only the current position overwrites anything. `drag` names the note by
+/// its start in `origin`; `step`/`row` are the pointer's cell.
+pub fn drag_from_origin(
+    origin: &SynthPattern,
+    drag: RollDrag,
+    step: usize,
+    row: usize,
+) -> SynthPattern {
+    let mut p = origin.clone();
+    match drag {
+        RollDrag::Resize { start } => resize(&mut p, start, step.saturating_sub(start) + 1),
+        RollDrag::Move { start, grab } => move_note(&mut p, start, step.saturating_sub(grab), row),
+    }
+    p
+}
+
 /// Grid placement in screen pixels. Row `ROLL_ROWS - 1` is at the top.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RollGeom {
@@ -177,6 +195,14 @@ impl RollGeom {
             return None;
         }
         Some((col as usize, ROLL_ROWS - 1 - r as usize))
+    }
+
+    /// The step column under `x` for the accent/slide lanes. None over the
+    /// key strip (left of the grid) or past the last step: unlike
+    /// `cell_at_clamped` it never clamps a stray click onto step 0.
+    pub fn lane_step(&self, x: f32) -> Option<usize> {
+        let col = ((x - self.left) / self.cell_w).floor();
+        (col >= 0.0 && (col as usize) < self.steps).then_some(col as usize)
     }
 
     pub fn cell_at_clamped(&self, x: f32, y: f32) -> (usize, usize) {
@@ -211,6 +237,48 @@ mod tests {
             length: len,
             ..SynthPattern::default()
         }
+    }
+
+    #[test]
+    fn lane_step_ignores_the_key_strip_and_the_far_edge() {
+        let g = RollGeom {
+            left: 30.0,
+            top: 0.0,
+            cell_w: 22.0,
+            cell_h: 9.0,
+            steps: 16,
+        };
+        assert_eq!(g.lane_step(10.0), None, "key strip");
+        assert_eq!(g.lane_step(29.9), None);
+        assert_eq!(g.lane_step(30.0), Some(0));
+        assert_eq!(g.lane_step(30.0 + 22.0 * 16.0 - 0.1), Some(15));
+        assert_eq!(g.lane_step(30.0 + 22.0 * 16.0), None);
+    }
+
+    #[test]
+    fn dragging_over_a_note_and_back_leaves_it_intact() {
+        let mut origin = pattern(16);
+        place(&mut origin, 0, 2, 12);
+        place(&mut origin, 5, 2, 20);
+        let drag = RollDrag::Move { start: 0, grab: 0 };
+        let over = drag_from_origin(&origin, drag, 5, 12);
+        assert_eq!(notes(&over).len(), 1, "the drop spot overwrites the 20");
+        let back = drag_from_origin(&origin, drag, 0, 12);
+        assert_eq!(back, origin, "moving back restores the passed-over note");
+        let past = drag_from_origin(&origin, drag, 9, 12);
+        assert_eq!(notes(&past).len(), 2, "only overlapped positions erase");
+        assert_eq!(note_at(&past, 5).map(|n| n.row), Some(20));
+    }
+
+    #[test]
+    fn resizing_across_a_note_and_back_leaves_it_intact() {
+        let mut origin = pattern(16);
+        place(&mut origin, 0, 1, 12);
+        place(&mut origin, 4, 2, 20);
+        let drag = RollDrag::Resize { start: 0 };
+        let long = drag_from_origin(&origin, drag, 8, 12);
+        assert_eq!(notes(&long).len(), 1);
+        assert_eq!(drag_from_origin(&origin, drag, 0, 12), origin);
     }
 
     #[test]

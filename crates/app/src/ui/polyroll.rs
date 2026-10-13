@@ -5,13 +5,14 @@
 //! strip auditions the pitch.
 
 use super::poly_edit::{
-    PolyDrag, PolyGeom, ROWS, add, delete, move_to, note_at, resize, set_velocity_in,
+    PolyDrag, PolyGeom, ROWS, add, delete, move_to, note_at, resize, resolve_overlaps,
+    set_velocity_in,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
 use acid_engine::machine::MachineId;
-use acid_engine::project::TICKS_PER_STEP;
+use acid_engine::project::{NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 
 const TICK_W: f32 = 6.0;
@@ -272,6 +273,17 @@ impl SidAcidApp {
                         }
                     }
                     if resp.drag_stopped() && self.view.poly_drag[n] != Some(PolyDrag::Velocity) {
+                        // On drop, same-pitch overlaps the drag made merge into
+                        // the dragged note (inside the same undo gesture).
+                        if let Some(PolyDrag::Move { index, .. } | PolyDrag::Resize { index }) =
+                            self.view.poly_drag[n]
+                        {
+                            let before = pattern.notes.len();
+                            let moved = pattern.notes.get(index).copied();
+                            let at = resolve_overlaps(&mut pattern, index);
+                            changed |= pattern.notes.len() != before
+                                || pattern.notes.get(at).copied() != moved;
+                        }
                         self.view.poly_drag[n] = None;
                         finished = true;
                     }
@@ -329,8 +341,27 @@ impl SidAcidApp {
             });
 
         self.audition(machine, key_down);
-        if changed {
-            let dragging = self.view.poly_drag[n].is_some();
+        let dragging = self.view.poly_drag[n].is_some();
+        self.commit_poly(
+            machine,
+            slot,
+            changed.then_some(pattern),
+            dragging,
+            finished,
+        );
+    }
+
+    /// Applies a frame's roll edit (merging into the open gesture while a
+    /// drag is live) and closes the gesture when the edit is finished.
+    pub(crate) fn commit_poly(
+        &mut self,
+        machine: usize,
+        slot: u8,
+        pattern: Option<NotePattern>,
+        dragging: bool,
+        finished: bool,
+    ) {
+        if let Some(pattern) = pattern {
             let cmds = self.doc.apply(
                 Edit::NotePattern {
                     machine,
@@ -343,6 +374,26 @@ impl SidAcidApp {
             self.view.focus = machine;
         }
         if finished {
+            self.doc.end_gesture();
+        }
+    }
+
+    /// Once per frame, after the panels: a held key or open drag whose roll
+    /// was not drawn this frame (its panel collapsed mid-gesture) is
+    /// released once the pointer is up, so no audition note keeps sounding
+    /// and no undo gesture stays open.
+    pub(crate) fn release_stale_poly_input(&mut self, pointer_down: bool) {
+        if pointer_down {
+            return;
+        }
+        if let Some((m, _)) = self.view.audition {
+            self.audition(m, None);
+        }
+        let mut open = false;
+        for d in &mut self.view.poly_drag {
+            open |= d.take().is_some();
+        }
+        if open {
             self.doc.end_gesture();
         }
     }
@@ -370,5 +421,93 @@ impl SidAcidApp {
         }
         self.view.audition = now;
         self.send(cmds);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::poly_edit::move_to;
+    use acid_engine::project::Project;
+
+    fn fm_app() -> SidAcidApp {
+        SidAcidApp::headless(Document::new(Project::default()))
+    }
+
+    fn cmd(c: &Command) -> (bool, u8, u8) {
+        match c {
+            Command::NoteOn { machine, pitch, .. } => (true, *machine, *pitch),
+            Command::NoteOff { machine, pitch } => (false, *machine, *pitch),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn audition_pairs_note_on_with_note_off() {
+        let mut app = fm_app();
+        app.audition(4, Some(60));
+        app.audition(4, Some(62));
+        app.audition(4, None);
+        let seen: Vec<_> = app.pending.iter().map(cmd).collect();
+        assert_eq!(
+            seen,
+            [(true, 4, 60), (false, 4, 60), (true, 4, 62), (false, 4, 62)]
+        );
+        assert_eq!(app.view.audition, None);
+    }
+
+    #[test]
+    fn releasing_another_machine_sends_nothing() {
+        let mut app = fm_app();
+        app.audition(4, Some(60));
+        app.pending.clear();
+        app.audition(5, None);
+        assert!(app.pending.is_empty());
+        assert_eq!(app.view.audition, Some((4, 60)));
+    }
+
+    #[test]
+    fn a_stale_audition_and_drag_are_released_once_the_pointer_is_up() {
+        let mut app = fm_app();
+        app.audition(4, Some(60));
+        app.view.poly_drag[0] = Some(PolyDrag::Resize { index: 0 });
+        app.pending.clear();
+        app.release_stale_poly_input(true);
+        assert_eq!(app.view.audition, Some((4, 60)), "pointer still down");
+        assert!(app.view.poly_drag[0].is_some());
+        app.release_stale_poly_input(false);
+        assert_eq!(app.view.audition, None);
+        assert_eq!(app.view.poly_drag, [None; 2]);
+        assert_eq!(
+            app.pending.iter().map(cmd).collect::<Vec<_>>(),
+            [(false, 4, 60)]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_panel_frame_releases_a_held_key() {
+        let mut app = fm_app();
+        app.audition(4, Some(60));
+        crate::ui::run_frames(&mut app, 1);
+        assert_eq!(app.view.audition, None);
+    }
+
+    #[test]
+    fn poly_drag_is_one_undo_step() {
+        let mut app = fm_app();
+        let mut p = app.doc.project.fm.patterns[0].clone();
+        add(&mut p, 0, 4, 60, 100);
+        app.commit_poly(4, 0, Some(p.clone()), false, true);
+        let before = app.doc.project.fm.patterns[0].clone();
+        assert_eq!(before, p);
+        for start in [4, 8, 12] {
+            move_to(&mut p, 0, start, 62);
+            app.commit_poly(4, 0, Some(p.clone()), true, false);
+        }
+        app.commit_poly(4, 0, None, false, true);
+        assert_eq!(app.doc.project.fm.patterns[0].notes[0].start, 12);
+        app.doc.undo();
+        assert_eq!(app.doc.project.fm.patterns[0], before, "one undo");
     }
 }

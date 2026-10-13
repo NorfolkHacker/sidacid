@@ -3,12 +3,13 @@
 //! right-click to delete. Accent/slide lanes sit underneath.
 
 use super::roll_edit::{
-    ROLL_ROWS, RollDrag, RollGeom, move_note, note_at, notes, place, resize, toggle_accent,
+    ROLL_ROWS, RollDrag, RollGeom, drag_from_origin, note_at, notes, place, toggle_accent,
     toggle_slide,
 };
 use super::step_edit::NOTE_NAMES;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
+use acid_engine::project::SynthPattern;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
 const CELL_W: f32 = 22.0;
@@ -132,15 +133,17 @@ impl SidAcidApp {
                 if resp.clicked()
                     && let Some(p) = pointer
                 {
-                    let (step, _) = geom.cell_at_clamped(p.x, p.y);
-                    if in_lane(p.y, accent_lane) {
-                        toggle_accent(&mut pattern, step);
-                        changed = true;
-                        finished = true;
-                    } else if in_lane(p.y, slide_lane) {
-                        toggle_slide(&mut pattern, step);
-                        changed = true;
-                        finished = true;
+                    if in_lane(p.y, accent_lane) || in_lane(p.y, slide_lane) {
+                        // A click left of the grid (the key strip) hits no step.
+                        if let Some(step) = geom.lane_step(p.x) {
+                            if in_lane(p.y, accent_lane) {
+                                toggle_accent(&mut pattern, step);
+                            } else {
+                                toggle_slide(&mut pattern, step);
+                            }
+                            changed = true;
+                            finished = true;
+                        }
                     } else if let Some((step, row)) = geom.cell_at(p.x, p.y)
                         && note_at(&pattern, step).is_none()
                     {
@@ -160,7 +163,7 @@ impl SidAcidApp {
                     && let Some(p) = pointer
                     && let Some((step, row)) = geom.cell_at(p.x, p.y)
                 {
-                    self.view.roll_drag[synth] = Some(match note_at(&pattern, step) {
+                    let drag = match note_at(&pattern, step) {
                         Some(n) if geom.near_right_edge(&n, p.x) => {
                             RollDrag::Resize { start: n.start }
                         }
@@ -173,46 +176,44 @@ impl SidAcidApp {
                             changed = true;
                             RollDrag::Resize { start: step }
                         }
-                    });
+                    };
+                    self.view.roll_drag[synth] = Some(drag);
+                    // Every frame of the drag is recomputed from here.
+                    self.view.roll_origin[synth] = Some(Box::new(pattern.clone()));
                 }
                 if resp.dragged()
                     && let Some(p) = pointer
                     && let Some(drag) = self.view.roll_drag[synth]
+                    && let Some(origin) = &self.view.roll_origin[synth]
                 {
                     let (step, row) = geom.cell_at_clamped(p.x, p.y);
-                    match drag {
-                        RollDrag::Resize { start } => {
-                            let new_len = step.saturating_sub(start) + 1;
-                            if note_at(&pattern, start)
-                                .is_some_and(|n| n.start == start && n.len != new_len)
-                            {
-                                resize(&mut pattern, start, new_len);
-                                changed = true;
-                            }
-                        }
-                        RollDrag::Move { start, grab } => {
-                            let new_start = step.saturating_sub(grab);
-                            if let Some(n) = note_at(&pattern, start)
-                                && n.start == start
-                                && (new_start != start || row != n.row)
-                            {
-                                move_note(&mut pattern, start, new_start, row);
-                                self.view.roll_drag[synth] = Some(RollDrag::Move {
-                                    start: new_start,
-                                    grab,
-                                });
-                                changed = true;
-                            }
-                        }
+                    let next = drag_from_origin(origin, drag, step, row);
+                    if next != pattern {
+                        pattern = next;
+                        changed = true;
                     }
                 }
                 if resp.drag_stopped() {
                     self.view.roll_drag[synth] = None;
+                    self.view.roll_origin[synth] = None;
                     finished = true;
                 }
             });
-        if changed {
-            let dragging = self.view.roll_drag[synth].is_some();
+        let dragging = self.view.roll_drag[synth].is_some();
+        self.commit_roll(synth, slot, changed.then_some(pattern), dragging, finished);
+    }
+
+    /// Applies a frame's roll edit (merging into the open gesture while a
+    /// drag is live) and closes the gesture when the edit is finished.
+    pub(crate) fn commit_roll(
+        &mut self,
+        synth: usize,
+        slot: u8,
+        pattern: Option<SynthPattern>,
+        dragging: bool,
+        finished: bool,
+    ) {
+        if let Some(pattern) = pattern {
             let cmds = self.doc.apply(
                 Edit::SynthPattern {
                     synth,
@@ -227,5 +228,32 @@ impl SidAcidApp {
         if finished {
             self.doc.end_gesture();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::roll_edit::{drag_from_origin, place};
+    use acid_engine::project::Project;
+
+    #[test]
+    fn roll_drag_is_one_undo_step() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let mut original = app.doc.project.synths[0].patterns[0].clone();
+        place(&mut original, 0, 2, 12);
+        app.commit_roll(0, 0, Some(original.clone()), false, true);
+        let before = app.doc.project.synths[0].patterns[0].clone();
+        assert_eq!(before, original);
+        let drag = RollDrag::Move { start: 0, grab: 0 };
+        for step in [1, 2, 3, 4] {
+            let next = drag_from_origin(&before, drag, step, 12);
+            app.commit_roll(0, 0, Some(next), true, false);
+        }
+        app.commit_roll(0, 0, None, false, true);
+        assert_ne!(app.doc.project.synths[0].patterns[0], before);
+        app.doc.undo();
+        assert_eq!(app.doc.project.synths[0].patterns[0], before, "one undo");
     }
 }

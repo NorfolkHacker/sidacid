@@ -106,7 +106,7 @@ impl SidAcidApp {
                 self.fm_operator_editor(ui);
                 egui::CollapsingHeader::new("LFO · Pitch EG · Effects")
                     .id_salt("fm_more")
-                    .default_open(false)
+                    .default_open(self.view.fm_more_open)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
@@ -274,6 +274,11 @@ impl SidAcidApp {
 
     fn fm_voice_browser(&mut self, ui: &mut egui::Ui) {
         let has_bank = self.doc.project.fm.bank.is_some();
+        // Undoing an import leaves no bank: show the starter list, so the
+        // tab buttons and the grid agree.
+        if !has_bank {
+            self.view.fm_browser = FmBrowser::Starter;
+        }
         ui.horizontal(|ui| {
             ui.label("Voices");
             if ui
@@ -304,12 +309,25 @@ impl SidAcidApp {
             (FmBrowser::Imported, Some(bank)) => bank.iter().map(|v| v.name.clone()).collect(),
             _ => starter().iter().map(|v| v.name.clone()).collect(),
         };
+        // Decision #11: the loaded voice is highlighted by where it was loaded
+        // from, `(browser, index)` in `view.fm_voice_src`, not by name (duplicate
+        // names in a bank all lit up). The source is KEPT across knob edits until
+        // the next load (a tweaked voice is still "that voice, edited") and is
+        // cleared on a document load or a single-voice import. It is trusted only
+        // while the project's voice name still equals the source entry's name, so
+        // undoing the load (which restores the old name) drops the highlight.
+        let highlighted_at = highlighted_voice(
+            self.view.fm_voice_src,
+            self.view.fm_browser,
+            &names,
+            &self.doc.project.fm.voice_name,
+        );
         let mut picked = None;
         egui::Grid::new("fm_voices")
             .spacing([4.0, 2.0])
             .show(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
-                    let current = *name == self.doc.project.fm.voice_name;
+                    let current = highlighted_at == Some(i);
                     if ui.selectable_label(current, name.as_str()).clicked() {
                         picked = Some(i);
                     }
@@ -324,8 +342,21 @@ impl SidAcidApp {
                 _ => starter()[i].clone(),
             };
             self.load_fm_voice(&voice);
+            self.view.fm_voice_src = Some((self.view.fm_browser, i));
         }
     }
+}
+
+/// Index of the browser row to highlight: the load source when it is in the
+/// list being shown and its entry still carries the project's voice name.
+fn highlighted_voice(
+    src: Option<(FmBrowser, usize)>,
+    shown: FmBrowser,
+    names: &[String],
+    voice_name: &str,
+) -> Option<usize> {
+    let (browser, i) = src?;
+    (browser == shown && names.get(i).is_some_and(|n| n == voice_name)).then_some(i)
 }
 
 /// A small display-only drawing of an operator envelope.
@@ -344,4 +375,40 @@ fn env_sketch(ui: &mut egui::Ui, rates: [f32; 4], levels: [f32; 4]) {
         })
         .collect();
     painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, theme::ACID)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_loaded_row_highlights_even_with_duplicate_names() {
+        let names: Vec<String> = ["A", "B", "A"].map(String::from).to_vec();
+        let src = Some((FmBrowser::Starter, 2));
+        assert_eq!(
+            highlighted_voice(src, FmBrowser::Starter, &names, "A"),
+            Some(2)
+        );
+        assert_eq!(
+            highlighted_voice(src, FmBrowser::Imported, &names, "A"),
+            None
+        );
+        assert_eq!(
+            highlighted_voice(src, FmBrowser::Starter, &names, "B"),
+            None
+        );
+        assert_eq!(
+            highlighted_voice(None, FmBrowser::Starter, &names, "A"),
+            None
+        );
+        assert_eq!(
+            highlighted_voice(
+                Some((FmBrowser::Starter, 9)),
+                FmBrowser::Starter,
+                &names,
+                "A"
+            ),
+            None
+        );
+    }
 }

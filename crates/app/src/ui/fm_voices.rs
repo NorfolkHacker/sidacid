@@ -23,7 +23,10 @@ pub(crate) fn starter() -> &'static [Dx7Voice] {
 }
 
 impl SidAcidApp {
+    /// Loads a voice that did not come from the browser grid (so none of
+    /// its rows is highlighted); the grid sets `fm_voice_src` after this.
     pub(crate) fn load_fm_voice(&mut self, voice: &Dx7Voice) {
+        self.view.fm_voice_src = None;
         let cmds = self.doc.apply(
             Edit::FmVoice {
                 name: voice.name.clone(),

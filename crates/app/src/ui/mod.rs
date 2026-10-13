@@ -56,6 +56,9 @@ pub struct ViewState {
     pub knob_scroll: Option<(acid_engine::params::ParamId, step_edit::ScrollGesture)>,
     /// Mouse drag in progress in each synth's piano roll.
     pub roll_drag: [Option<roll_edit::RollDrag>; 2],
+    /// The synth pattern as it was when that drag began; every frame of
+    /// the drag is recomputed from it (see `roll_edit::drag_from_origin`).
+    pub roll_origin: [Option<Box<acid_engine::project::SynthPattern>>; 2],
     /// Egui time until which the "audio fault recovered" label shows.
     pub fault_until: f64,
     /// Action waiting on the unsaved-changes question.
@@ -108,6 +111,13 @@ pub struct ViewState {
     /// Note held by a click on the roll's key strip: (machine, pitch).
     pub audition: Option<(usize, u8)>,
     pub fm_browser: fm_voices::FmBrowser,
+    /// Where the loaded FM voice came from: (browser, index in that list).
+    /// Set when a voice is loaded from the browser, cleared by a single-voice
+    /// import and on document load. It is kept across knob edits (decision
+    /// #11, see `fm_panel::fm_voice_browser`).
+    pub fm_voice_src: Option<(fm_voices::FmBrowser, usize)>,
+    /// The FM "LFO · Pitch EG · Effects" section starts open (tests only).
+    pub fm_more_open: bool,
     /// Operator shown in the FM operator editor (0..6).
     pub fm_op: usize,
     /// Cached waveform peaks per slot: (pcm pointer, pcm length, columns, peaks).
@@ -295,6 +305,9 @@ impl SidAcidApp {
                 .show(ui, |ui| self.rack(ui));
         });
         self.dialogs(ctx);
+        // A collapsed panel stops drawing its roll, so a key or drag held
+        // when it collapsed would never see its release.
+        self.release_stale_poly_input(ctx.input(|i| i.pointer.any_down()));
         self.tick_queued_save(ctx);
         if let Some(left) = self.tick_scroll_gestures(ctx.input(|i| i.time)) {
             // Keep frames coming so the gesture ends without more input.
@@ -353,10 +366,21 @@ fn send_in_order(
 
 #[cfg(test)]
 pub(crate) fn run_frames(app: &mut SidAcidApp, frames: usize) {
-    let ctx = egui::Context::default();
+    run_frames_in(&egui::Context::default(), app, frames);
+}
+
+/// Like `run_frames`, on a caller-kept `Context`; returns the last frame's
+/// shape count (a rough measure of how much was drawn).
+#[cfg(test)]
+pub(crate) fn run_frames_in(ctx: &egui::Context, app: &mut SidAcidApp, frames: usize) -> usize {
+    let mut shapes = 0;
     for _ in 0..frames {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx));
+        shapes = ctx
+            .run(egui::RawInput::default(), |ctx| app.ui(ctx))
+            .shapes
+            .len();
     }
+    shapes
 }
 
 #[cfg(test)]
@@ -1236,6 +1260,53 @@ mod tests {
             run_frames(&mut app, 1);
         }
         assert!(app.view.poly_scrolled[0], "the FM roll is still drawn");
+    }
+
+    #[test]
+    fn undoing_an_import_returns_the_browser_to_the_starter_list() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let bank = fm_voices::starter().to_vec();
+        app.import_syx_bytes(&acid_engine::fm::sysex::bank_sysex(&bank));
+        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Imported);
+        app.doc.undo();
+        run_frames(&mut app, 1);
+        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Starter);
+    }
+
+    #[test]
+    fn the_fm_panel_draws_with_imported_selected_and_no_bank() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        run_frames(&mut app, 2);
+        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Starter);
+    }
+
+    #[test]
+    fn the_fm_lfo_and_effects_section_draws_when_open() {
+        let mut closed = SidAcidApp::headless(Document::new(Project::default()));
+        let mut open = SidAcidApp::headless(Document::new(Project::default()));
+        open.view.fm_more_open = true;
+        let closed_shapes = run_frames_in(&egui::Context::default(), &mut closed, 2);
+        let open_shapes = run_frames_in(&egui::Context::default(), &mut open, 2);
+        assert!(
+            open_shapes > closed_shapes,
+            "the section's knobs draw: {open_shapes} vs {closed_shapes}"
+        );
+    }
+
+    #[test]
+    fn a_voice_source_is_cleared_by_direct_loads_and_document_loads() {
+        let mut doc = Document::new(Project::default());
+        let mut bank = fm_voices::starter().to_vec();
+        bank[1].name = bank[0].name.clone();
+        doc.project.fm.bank = Some(bank.clone());
+        let mut app = SidAcidApp::headless(doc);
+        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.load_fm_voice(&bank[1]);
+        assert_eq!(app.view.fm_voice_src, None, "a direct load has no source");
+        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 1));
+        app.load_document(Document::new(Project::default()));
+        assert_eq!(app.view.fm_voice_src, None, "a document load clears it");
     }
 
     #[test]

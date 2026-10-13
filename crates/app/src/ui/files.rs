@@ -177,6 +177,7 @@ impl SidAcidApp {
         }
         self.view.writers = [None; 2];
         self.view.roll_drag = [None; 2];
+        self.view.roll_origin = [None, None];
         self.view.scroll_accum = [0.0; 2];
         self.view.scroll_at = [None; 2];
         self.view.knob_scroll = None;
@@ -189,6 +190,7 @@ impl SidAcidApp {
         self.view.wave_drag = None;
         self.view.pad_note = None;
         self.view.fm_browser = Default::default();
+        self.view.fm_voice_src = None;
         self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;

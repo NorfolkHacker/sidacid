@@ -34,7 +34,9 @@ impl SidAcidApp {
                                 slot,
                                 length,
                             },
-                            true,
+                            // Only a drag merges into one undo step; an arrow key
+                            // or typed value is its own step.
+                            r.dragged(),
                         );
                         self.send(cmds);
                         self.view.focus = m;
