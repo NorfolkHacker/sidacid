@@ -240,11 +240,25 @@ impl SidAcidApp {
         if let Some(audio) = self.audio.as_mut()
             && audio.load_project(&self.doc.project).is_err()
         {
-            self.view.message =
-                Some("The audio engine is busy; the project will play after Retry audio.".into());
-            self.audio = None;
-            self.audio_error = Some("engine busy while loading".into());
+            self.engine_busy_at_load();
         }
+    }
+
+    /// The new engine could not be handed over: drop audio until Retry.
+    /// A "Could not save" from the queued save run just before stays up
+    /// with it.
+    fn engine_busy_at_load(&mut self) {
+        self.add_message("The audio engine is busy; the project will play after Retry audio.");
+        self.audio = None;
+        self.audio_error = Some("engine busy while loading".into());
+    }
+
+    /// Shows `msg`, below any message still up rather than in its place.
+    fn add_message(&mut self, msg: &str) {
+        self.view.message = Some(match self.view.message.take() {
+            Some(prev) => format!("{prev}\n\n{msg}"),
+            None => msg.to_string(),
+        });
     }
 
     /// Saves to the current path (or asks for one). Returns true when a
@@ -846,6 +860,20 @@ mod tests {
         assert_eq!(app.view.status_line, None);
         run_frames(&mut app, 3);
         assert_eq!(app.doc.project.name, "Untitled");
+    }
+
+    #[test]
+    fn a_failed_queued_save_and_a_busy_engine_at_load_both_report() {
+        let mut app = app();
+        app.doc.path = Some(PathBuf::from("/nonexistent-sidacid-dir/x.sidacid"));
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        app.load_document(Document::new(Project::default()));
+        // `load_document` ends with this when the engine refuses the load.
+        app.engine_busy_at_load();
+        let msg = app.view.message.as_deref().unwrap_or_default();
+        assert!(msg.starts_with("Could not save"), "{msg}");
+        assert!(msg.contains("The audio engine is busy"), "{msg}");
     }
 
     #[test]
