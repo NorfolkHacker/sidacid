@@ -253,8 +253,20 @@ impl SidAcidApp {
         self.queue_save(save_as, None)
     }
 
-    /// The unsaved-changes question's "Save": save, then run `action`.
+    /// The unsaved-changes question's "Save": save, then run `action`. A
+    /// plain save already queued or waiting on the overwrite question is
+    /// that save, so `action` joins it rather than doing nothing.
     pub(crate) fn save_then(&mut self, action: Pending) -> bool {
+        let pending_then = match (&mut self.view.saving, &mut self.view.overwrite) {
+            (Some(save), _) => Some(&mut save.then),
+            (None, Some(ask)) => Some(&mut ask.then),
+            (None, None) => None,
+        };
+        if let Some(then @ None) = pending_then {
+            *then = Some(action);
+            self.view.confirm = None;
+            return true;
+        }
         let queued = self.queue_save(false, Some(action));
         if queued {
             self.view.confirm = None;
@@ -777,6 +789,35 @@ mod tests {
         assert!(app.doc.is_dirty());
         assert_eq!(app.view.confirm, Some(Pending::New), "asked again");
         assert_eq!(app.doc.project.name, "Demo", "New did not run");
+    }
+
+    #[test]
+    fn save_in_the_unsaved_question_joins_a_save_waiting_on_the_overwrite_question() {
+        let (mut app, existing) = app_saving_over_an_existing_file("overwrite-then-quit");
+        assert!(app.save(false));
+        app.request(Pending::Quit);
+        assert_eq!(app.view.confirm, Some(Pending::Quit), "both questions up");
+        assert!(app.save_then(Pending::Quit), "Save does something");
+        assert!(app.view.confirm.is_none());
+        app.answer_overwrite(true);
+        run_frames(&mut app, 3);
+        assert!(Project::load(&existing.0).is_ok(), "saved");
+        assert!(app.view.quit, "then quit");
+    }
+
+    #[test]
+    fn save_in_the_unsaved_question_joins_a_queued_save() {
+        let file = TempFile::new("queued-then-quit");
+        let mut app = app();
+        app.doc.path = Some(file.0.clone());
+        app.doc.mark_dirty();
+        assert!(app.save(false));
+        app.request(Pending::Quit);
+        assert!(app.save_then(Pending::Quit));
+        assert!(app.view.confirm.is_none());
+        run_frames(&mut app, 3);
+        assert!(Project::load(&file.0).is_ok(), "saved");
+        assert!(app.view.quit, "then quit");
     }
 
     #[test]

@@ -193,6 +193,32 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
 }
 
 #[test]
+fn a_steal_by_a_note_shorter_than_its_fade_does_not_allocate() {
+    use acid_engine::sampler::slot::{SlotData, SlotMeta};
+    let mut p = Project::default();
+    let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
+    let pad = SlotMeta::chromatic(36, 59, 48, 44_100);
+    p.sampler.slots[0] = Some(SlotData::new("Pad", 44_100, 1, &tone, pad));
+    // Key 60 plays a 20-frame slice, well inside the 2 ms steal fade.
+    let tick = SlotMeta::sliced(60, vec![0, 20], 120.0, 44_100);
+    p.sampler.slots[1] = Some(SlotData::new("Tick", 44_100, 1, &tone, tick));
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+    let n = count_allocs(|| {
+        // 16 held pad notes fill the voices; each tick steals one.
+        for k in 36..52 {
+            e.note_on(5, k, 100);
+        }
+        render_seconds(&mut e, &mut l, &mut r, 0.05);
+        for _ in 0..4 {
+            e.note_on(5, 60, 100);
+            render_seconds(&mut e, &mut l, &mut r, 0.01);
+        }
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn toggling_fm_effects_does_not_allocate() {
     use acid_engine::params::FmParam;
     let mut e = Engine::from_project(SR, &busy_project());
