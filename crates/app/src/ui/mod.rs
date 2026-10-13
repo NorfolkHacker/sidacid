@@ -768,6 +768,29 @@ mod tests {
     }
 
     #[test]
+    fn a_record_write_cut_at_the_song_cap_says_so() {
+        use acid_engine::params::{ParamId, SynthParam};
+        use acid_engine::song::MAX_SONG_STEPS;
+        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let mut app = recording_app();
+        app.view.touched_knob = Some(id);
+        app.view.live.insert(id, 0.5);
+        app.status.song_step = 4;
+        app.record_automation();
+        assert!(app.view.message.is_none(), "a normal write is quiet");
+        // a bogus position far past the longest song
+        app.status.song_step = MAX_SONG_STEPS as u32 + 100;
+        app.record_automation();
+        let lane = acid_engine::song::lane(&app.doc.project.song, id).unwrap();
+        assert_eq!(
+            lane.points.len(),
+            MAX_SONG_STEPS + 1,
+            "the cap from step 5 on"
+        );
+        assert!(app.view.message.is_some(), "the cut is reported");
+    }
+
+    #[test]
     fn nothing_is_recorded_unless_armed_in_song_mode_and_playing() {
         use acid_engine::params::{ParamId, SynthParam};
         let id = ParamId::Synth(0, SynthParam::Cutoff);

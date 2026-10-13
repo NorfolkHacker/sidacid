@@ -9,5 +9,5 @@ Task 8: minor (deferred): empty lanes left after delete; per-frame project clone
 Task 9: minor (deferred): no repaint during export without audio device; evolve undo test doesn't check change; groove pairing untested
 Resolved in Plan 7 (backlog cleanup), see docs/superpowers/plans/2026-10-12-sidacid-plan7-backlog.md
 Plan 7: left on purpose — insert_bars computes the shifted loop as u16 a+n without saturating — unreachable: MAX_BARS caps both the loop and the bars added, so the sum stays far below u16::MAX. — fixed in Plan 8 (leftovers).
-Plan 7: left on purpose — write_automation cuts a range longer than MAX_SONG_STEPS without telling the caller — documented on the function, and no caller (record pass, song editor) can produce such a range.
+Plan 7: left on purpose — write_automation cuts a range longer than MAX_SONG_STEPS without telling the caller — documented on the function, and no caller (record pass, song editor) can produce such a range. — fixed in Plan 8 (leftovers).
 Plan 7: left on purpose — after an optimistic Stop, a Status already queued (playing=true) can flip the transport back to playing for one frame (P3-T7c follow-up) — one frame, which the spec accepts as harmless; a "stop pending" filter would couple status handling to transport state.

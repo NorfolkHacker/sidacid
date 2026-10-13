@@ -108,16 +108,17 @@ pub const MAX_SONG_STEPS: usize = MAX_BARS * STEPS;
 /// Writes `value` at every step from `from` to `to` (inclusive, either order)
 /// in `param`'s lane, creating the lane if needed. A non-finite value is
 /// ignored. At most `MAX_SONG_STEPS` points are written: a wilder range
-/// stops after that many steps from its low end.
-pub fn write_automation(song: &mut Song, param: ParamId, from: u32, to: u32, value: f32) {
+/// stops after that many steps from its low end, and true is returned so
+/// the caller can say the write was cut short.
+pub fn write_automation(song: &mut Song, param: ParamId, from: u32, to: u32, value: f32) -> bool {
     if !value.is_finite() {
-        return;
+        return false;
     }
     let value = value.clamp(0.0, 1.0);
     let a = from.min(to);
-    let b = from
-        .max(to)
-        .min(a.saturating_add(MAX_SONG_STEPS as u32 - 1));
+    let last = a.saturating_add(MAX_SONG_STEPS as u32 - 1);
+    let cut = from.max(to) > last;
+    let b = from.max(to).min(last);
     let index = match song.automation.iter().position(|l| l.param == param) {
         Some(i) => i,
         None => {
@@ -131,6 +132,7 @@ pub fn write_automation(song: &mut Song, param: ParamId, from: u32, to: u32, val
     for step in a..=b {
         song.automation[index].points.insert(step, value);
     }
+    cut
 }
 
 pub fn clear_automation(song: &mut Song, param: ParamId) {
@@ -525,6 +527,24 @@ mod tests {
             lane(&song, id).unwrap().points.len(),
             4,
             "no overflow at the top"
+        );
+    }
+
+    #[test]
+    fn write_automation_reports_a_cut_range() {
+        let mut song = Song::default();
+        let id = ParamId::Master(MasterParam::Level);
+        let last = MAX_SONG_STEPS as u32 - 1;
+        assert!(!write_automation(&mut song, id, 0, last, 0.5), "fits");
+        assert!(
+            !write_automation(&mut song, id, last, 0, 0.5),
+            "either order"
+        );
+        assert!(write_automation(&mut song, id, 0, last + 1, 0.5));
+        assert!(write_automation(&mut song, id, u32::MAX, 0, 0.5));
+        assert!(
+            !write_automation(&mut song, id, 0, u32::MAX, f32::NAN),
+            "ignored, not cut"
         );
     }
 

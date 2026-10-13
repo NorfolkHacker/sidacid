@@ -115,7 +115,13 @@ impl SidAcidApp {
             _ => step,
         };
         let mut new_song = self.doc.project.song.clone();
-        song::write_automation(&mut new_song, id, from, step, value);
+        if song::write_automation(&mut new_song, id, from, step, value)
+            && self.view.message.is_none()
+        {
+            self.view.message = Some(
+                "Part of the recorded automation was cut: it ran past the longest song.".into(),
+            );
+        }
         let cmds = self.doc.record(Edit::Song {
             song: Box::new(new_song),
         });
