@@ -77,6 +77,7 @@ impl SidAcidApp {
         let mut changed = false;
         let mut finished = false;
         let mut key_down: Option<u8> = None;
+        let mut dropped: Option<usize> = None;
 
         egui::ScrollArea::horizontal()
             .id_salt(("poly_h", machine))
@@ -273,16 +274,10 @@ impl SidAcidApp {
                         }
                     }
                     if resp.drag_stopped() && self.view.poly_drag[n] != Some(PolyDrag::Velocity) {
-                        // On drop, same-pitch overlaps the drag made merge into
-                        // the dragged note (inside the same undo gesture).
                         if let Some(PolyDrag::Move { index, .. } | PolyDrag::Resize { index }) =
                             self.view.poly_drag[n]
                         {
-                            let before = pattern.notes.len();
-                            let moved = pattern.notes.get(index).copied();
-                            let at = resolve_overlaps(&mut pattern, index);
-                            changed |= pattern.notes.len() != before
-                                || pattern.notes.get(at).copied() != moved;
+                            dropped = Some(index);
                         }
                         self.view.poly_drag[n] = None;
                         finished = true;
@@ -341,7 +336,30 @@ impl SidAcidApp {
             });
 
         self.audition(machine, key_down);
-        let dragging = self.view.poly_drag[n].is_some();
+        self.commit_poly_frame(machine, slot, pattern, changed, dropped, finished);
+    }
+
+    /// Commits one frame of the poly roll. On the frame a move/resize is
+    /// dropped (`dropped` = the note's index) same-pitch overlaps merge into
+    /// it first, and the frame counts as still dragging: `poly_drag` is
+    /// already cleared by then, but the drop's edits must merge into the
+    /// drag's undo step, not push a second one.
+    fn commit_poly_frame(
+        &mut self,
+        machine: usize,
+        slot: u8,
+        mut pattern: NotePattern,
+        mut changed: bool,
+        dropped: Option<usize>,
+        finished: bool,
+    ) {
+        if let Some(index) = dropped {
+            let before = pattern.clone();
+            resolve_overlaps(&mut pattern, index);
+            changed |= pattern != before;
+        }
+        let dragging =
+            dropped.is_some() || self.view.poly_drag[machine - MachineId::Fm.index()].is_some();
         self.commit_poly(
             machine,
             slot,
@@ -491,6 +509,26 @@ mod tests {
         app.audition(4, Some(60));
         crate::ui::run_frames(&mut app, 1);
         assert_eq!(app.view.audition, None);
+    }
+
+    #[test]
+    fn dropping_a_move_onto_a_same_pitch_note_is_one_undo_step() {
+        let mut app = fm_app();
+        let mut p = app.doc.project.fm.patterns[0].clone();
+        add(&mut p, 0, 4, 60, 100);
+        let i = add(&mut p, 8, 4, 60, 50).unwrap();
+        app.commit_poly(4, 0, Some(p.clone()), false, true);
+        let before = app.doc.project.fm.patterns[0].clone();
+        // The drag: move onto the first note (a live drag merges).
+        app.view.poly_drag[0] = Some(PolyDrag::Move { index: i, grab: 0 });
+        move_to(&mut p, i, 2, 60);
+        app.commit_poly_frame(4, 0, p.clone(), true, None, false);
+        // The drop frame: the drag state is already cleared.
+        app.view.poly_drag[0] = None;
+        app.commit_poly_frame(4, 0, p, false, Some(i), true);
+        assert_eq!(app.doc.project.fm.patterns[0].notes.len(), 1, "merged");
+        app.doc.undo();
+        assert_eq!(app.doc.project.fm.patterns[0], before, "one undo");
     }
 
     #[test]
