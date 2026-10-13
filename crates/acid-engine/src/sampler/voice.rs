@@ -93,6 +93,8 @@ enum Stage {
     Attack,
     Decay,
     Release,
+    /// The note is over; only a steal's declick is still fading.
+    Tail,
     Off,
 }
 
@@ -209,11 +211,17 @@ impl Voice {
     }
 
     pub fn release(&mut self, seconds: f32) {
-        if self.active && self.stage != Stage::Off {
+        if self.active && !matches!(self.stage, Stage::Tail | Stage::Off) {
             self.held = false;
             self.stage = Stage::Release;
             self.release_coef = (-1.0 / (seconds.max(1e-4) * self.sample_rate)).exp();
         }
+    }
+
+    /// Still sounding, but only the fade of a stolen note: not held, and
+    /// the first voice to take for a new note.
+    pub fn tail_only(&self) -> bool {
+        self.active && self.stage == Stage::Tail
     }
 
     pub fn choke(&mut self) {
@@ -228,8 +236,8 @@ impl Voice {
 
     /// The voice's own sound has ended. A steal's declick still fading
     /// is played out first (over this block and, if needed, the next ones,
-    /// which come back here), so a very short new note can't cut it off;
-    /// then the voice stops.
+    /// which come back here through `Stage::Tail`), so a very short new
+    /// note can't cut it off; then the voice stops.
     fn end_sound(&mut self, out_l: &mut [f32], out_r: &mut [f32], declick_len: f32) {
         for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
             if self.declick_left == 0 {
@@ -243,6 +251,9 @@ impl Voice {
         }
         if self.declick_left == 0 {
             self.kill();
+        } else {
+            self.held = false;
+            self.stage = Stage::Tail;
         }
     }
 
@@ -307,6 +318,10 @@ impl Voice {
                         self.end_sound(&mut out_l[i..], &mut out_r[i..], declick_len);
                         return;
                     }
+                }
+                Stage::Tail => {
+                    self.end_sound(&mut out_l[i..], &mut out_r[i..], declick_len);
+                    return;
                 }
                 Stage::Off => return,
             }
@@ -716,6 +731,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_voice_playing_only_its_steal_fade_is_not_held() {
+        let sample = constant(48_000, 0.8);
+        let s = SlotSettings::default();
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        let level = run(&mut v, &sample, &s, 2000)[1999];
+        v.start(&whole(20), 0, 40, 127, false, 2);
+        let mut joined = vec![level];
+        joined.extend(run(&mut v, &sample, &s, 50));
+        assert!(
+            v.active && !v.held,
+            "its own note is over; the fade goes on"
+        );
+        assert!(v.tail_only());
+        v.release(1.0);
+        joined.extend(run(&mut v, &sample, &s, 450));
+        assert!(max_step(&joined) < 0.1 * level, "a release can't revive it");
+        assert!(!v.active && !v.tail_only());
     }
 
     #[test]

@@ -157,6 +157,7 @@ impl Sampler {
         let i = voices
             .iter()
             .position(|v| !v.active)
+            .or_else(|| voices.iter().position(Voice::tail_only))
             .or_else(|| {
                 (0..VOICES)
                     .filter(|&i| !voices[i].held)
@@ -389,6 +390,48 @@ mod tests {
         s.note_on(81, 100, false);
         want[0] = 81;
         assert_eq!(s.held_keys(), want, "then the oldest held key (60) goes");
+    }
+
+    #[test]
+    fn a_voice_left_with_only_its_steal_fade_is_free_first() {
+        let dc = || {
+            Some(Arc::new(SampleData {
+                sample_rate: 48_000,
+                left: vec![0.5; 48_000].into(),
+                right: None,
+            }))
+        };
+        let mut s = Sampler::new(SR);
+        s.swap_sample(0, &mut dc());
+        s.swap_play(
+            0,
+            &mut SlotPlay::from_meta(&SlotMeta::chromatic(60, 83, 60, 48_000)),
+        );
+        // key 36 plays a 20-frame slice, well inside the 2 ms steal fade
+        s.swap_sample(1, &mut dc());
+        s.swap_play(
+            1,
+            &mut SlotPlay::from_meta(&SlotMeta::sliced(36, vec![0, 20], 120.0, 48_000)),
+        );
+        for k in 60..76 {
+            s.note_on(k, 100, false);
+        }
+        render(&mut s, 2000);
+        s.note_off(61, false);
+        s.note_on(36, 100, false);
+        render(&mut s, 50);
+        let mut want: Vec<u8> = (60..76).collect();
+        want.remove(1);
+        assert_eq!(s.held_keys(), want, "36's note is over");
+        assert_eq!(s.active_voices(), 16, "its fade still plays");
+        s.note_off(62, false);
+        s.note_on(80, 100, false);
+        want[1] = 80;
+        assert_eq!(
+            s.held_keys(),
+            want,
+            "80 took the fading voice, not the older released 62"
+        );
     }
 
     #[test]
