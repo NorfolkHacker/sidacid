@@ -89,6 +89,13 @@ impl Svf {
         self.ic1 = 0.0;
         self.ic2 = 0.0;
     }
+
+    /// Sets the state as if `x` had been the input forever: the low-pass
+    /// output starts at `x` instead of rising from zero.
+    pub fn prime(&mut self, x: f32) {
+        self.ic1 = 0.0;
+        self.ic2 = x;
+    }
 }
 
 fn soft_clip(x: f32) -> f32 {
@@ -121,6 +128,15 @@ mod tests {
         f.set(1000.0, 0.0);
         let out = run(&mut f, &vec![0.5; 4410]);
         assert!((out[4409] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_primed_lowpass_passes_dc_from_the_first_sample() {
+        let mut f = Svf::new(SR);
+        f.set(1000.0, 0.8);
+        f.prime(0.5);
+        let out = run(&mut f, &[0.5; 64]);
+        assert!(out.iter().all(|y| (y - 0.5).abs() < 1e-6), "{out:?}");
     }
 
     #[test]

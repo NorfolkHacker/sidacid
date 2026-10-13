@@ -264,9 +264,11 @@ impl Voice {
             .min(loop_len * 0.5)
             .max(1.0);
         let filter_on = s.cutoff_knob < 0.999 || s.resonance > 0.0;
+        // Switched on: start from this render's first input, not from the
+        // state it had when it was last on, nor from silence.
+        let mut prime = filter_on && !self.filter_was_on;
         if filter_on {
-            if !self.filter_was_on {
-                // don't resume from the state it had when it was last on
+            if prime {
                 self.filter = [Svf::new(sr), Svf::new(sr)];
             }
             for f in &mut self.filter {
@@ -330,6 +332,11 @@ impl Voice {
                     .min(1.0)
             };
             if filter_on {
+                if prime {
+                    self.filter[0].prime(l);
+                    self.filter[1].prime(r);
+                    prime = false;
+                }
                 l = self.filter[0].process(l);
                 r = self.filter[1].process(r);
             }
@@ -488,6 +495,25 @@ mod tests {
         let fresh = run(&mut b, &sample, &bright, 200);
         for (x, y) in after.iter().zip(&fresh) {
             assert!((x - y).abs() < 1e-6, "stale filter state: {x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn a_filter_switched_on_mid_note_starts_at_the_dry_level() {
+        let open = SlotSettings::default();
+        let mut barely = open;
+        barely.set(SlotParam::Cutoff, 0.998);
+        for (sample, tolerance) in [(constant(48_000, 0.8), 1e-4), (sine_sample(48_000), 0.02)] {
+            let (mut dry, mut wet) = (Voice::new(SR), Voice::new(SR));
+            dry.start(&whole(48_000), 0, 36, 127, false, 1);
+            wet.start(&whole(48_000), 0, 36, 127, false, 1);
+            run(&mut dry, &sample, &open, 1000);
+            run(&mut wet, &sample, &open, 1000);
+            let want = run(&mut dry, &sample, &open, 64);
+            let got = run(&mut wet, &sample, &barely, 64);
+            for (i, (x, y)) in got.iter().zip(&want).enumerate() {
+                assert!((x - y).abs() < tolerance, "sample {i}: {x} vs dry {y}");
+            }
         }
     }
 
