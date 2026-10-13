@@ -153,13 +153,7 @@ impl SidAcidApp {
                                 } else if row == 3 && s.accent {
                                     rich = rich.color(theme::ACCENT);
                                 } else if row == 4 && s.slide {
-                                    rich = rich.color(theme::SLIDE_LIT);
-                                }
-                                // Notes light green; the rows that shape them light violet.
-                                if row == 0 {
-                                    theme::green_selection(ui.visuals_mut());
-                                } else {
-                                    theme::violet_selection(ui.visuals_mut());
+                                    rich = rich.color(theme::SLIDE);
                                 }
                                 let r = ui.add_sized(CELL, egui::Button::new(rich).selected(on));
                                 if row == 0 {

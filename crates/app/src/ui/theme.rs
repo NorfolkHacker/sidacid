@@ -6,14 +6,10 @@ use eframe::egui::{self, Color32};
 pub const ACID: Color32 = Color32::from_rgb(0xB8, 0xF5, 0x3A);
 /// Outline of a selected button.
 pub const ACID_LIGHT: Color32 = Color32::from_rgb(0xDC, 0xFA, 0x9D);
-/// Knob arcs and the 303 grid's shaping rows.
+/// Knob arcs.
 pub const VIOLET: Color32 = Color32::from_rgb(0xA6, 0x4B, 0xFF);
-/// Outline of a lit violet cell.
-pub const VIOLET_LIGHT: Color32 = Color32::from_rgb(0xD3, 0xA5, 0xFF);
 pub const ACCENT: Color32 = Color32::from_rgb(0xFF, 0x50, 0x3C);
 pub const SLIDE: Color32 = Color32::from_rgb(0x4C, 0xB8, 0xFF);
-/// Slide text on a lit (violet) cell, where SLIDE is too dark to read.
-pub const SLIDE_LIT: Color32 = Color32::from_rgb(0xC4, 0xE8, 0xFF);
 pub const QUEUED: Color32 = Color32::from_rgb(0xFF, 0xC8, 0x3C);
 pub const KNOB_BODY: Color32 = Color32::from_rgb(0x3A, 0x3E, 0x44);
 pub const KNOB_TRACK: Color32 = Color32::from_rgb(0x55, 0x5A, 0x60);
@@ -34,12 +30,6 @@ pub fn green_selection(visuals: &mut egui::Visuals) {
     visuals.selection.stroke.color = ACID_LIGHT;
 }
 
-/// Lit cells in the 303 grid's shaping rows light violet.
-pub fn violet_selection(visuals: &mut egui::Visuals) {
-    visuals.selection.bg_fill = VIOLET.gamma_multiply(0.45);
-    visuals.selection.stroke.color = VIOLET_LIGHT;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,17 +39,6 @@ mod tests {
         let ctx = egui::Context::default();
         apply(&ctx);
         let v = ctx.style().visuals.clone();
-        assert_eq!(v.selection.bg_fill, ACID.gamma_multiply(0.45));
-        assert_eq!(v.selection.stroke.color, ACID_LIGHT);
-    }
-
-    #[test]
-    fn green_selection_undoes_violet() {
-        let mut v = egui::Visuals::dark();
-        violet_selection(&mut v);
-        assert_eq!(v.selection.bg_fill, VIOLET.gamma_multiply(0.45));
-        assert_eq!(v.selection.stroke.color, VIOLET_LIGHT);
-        green_selection(&mut v);
         assert_eq!(v.selection.bg_fill, ACID.gamma_multiply(0.45));
         assert_eq!(v.selection.stroke.color, ACID_LIGHT);
     }
