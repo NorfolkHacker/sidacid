@@ -138,7 +138,12 @@ pub fn switch(ui: &mut egui::Ui, label: &str, index: usize, names: &[&str]) -> O
     let index = index.min(n - 1);
     let text = egui::RichText::new(format!("{label}\n{}", names[index])).size(10.0);
     let on = index > 0;
-    let response = ui.add_sized(CELL, egui::Button::new(text).selected(on));
+    let response = ui
+        .scope(|ui| {
+            theme::violet_selection(ui.visuals_mut());
+            ui.add_sized(CELL, egui::Button::new(text).selected(on))
+        })
+        .inner;
     if response.clicked() {
         Some((index + 1) % n)
     } else if response.secondary_clicked() {
