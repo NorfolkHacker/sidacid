@@ -221,8 +221,10 @@ impl SlotData {
     }
 
     /// Builds the engine's copy. Allocates: call off the audio thread.
-    /// Expects a valid slot (`is_valid`); otherwise only whole frames are
-    /// read, and a slot with more than two channels plays its first one.
+    /// Safe for an invalid slot too: only whole frames are read, a slot
+    /// with more than two channels plays its first one, and markers past
+    /// the audio (which the sample doesn't carry) are kept inside it when
+    /// played (`voice::segment`).
     pub fn to_sample(&self) -> SampleData {
         let ch = self.channels.max(1) as usize;
         let whole = &self.pcm[..self.frames() as usize * ch];

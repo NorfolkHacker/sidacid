@@ -33,7 +33,8 @@ pub struct Segment {
     pub rate: f64,
 }
 
-/// The segment `key` plays in a slot, or `None` outside its zone.
+/// The segment `key` plays in a slot, or `None` outside its zone. It
+/// stays inside the sample's `frames` whatever the play's markers say.
 pub fn segment(
     play: &SlotPlay,
     key: u8,
@@ -56,9 +57,10 @@ pub fn segment(
             if i >= play.slice_count {
                 return None;
             }
-            let start = play.slices[i];
+            // an invalid slot's slices past the audio clamp to its end
+            let start = play.slices[i].min(frames);
             let end = if i + 1 < play.slice_count {
-                play.slices[i + 1]
+                play.slices[i + 1].min(frames)
             } else {
                 frames
             };
@@ -675,6 +677,45 @@ mod tests {
         );
         assert!(!v.active, "the voice stops once the fade is done");
         assert_eq!(*joined.last().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn an_invalid_slot_plays_inside_its_pcm() {
+        use crate::sampler::slot::SlotData;
+        let audio: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        let mut sliced = SlotMeta::sliced(36, vec![0, 500, 2000, 3000, 1500], 120.0, 5000);
+        sliced.end = 9000;
+        let mut chromatic = SlotMeta::chromatic(60, 72, 60, 9000);
+        chromatic.loop_on = true;
+        chromatic.loop_start = 400;
+        chromatic.loop_end = 7000;
+        let s = SlotSettings::default();
+        for meta in [sliced, chromatic] {
+            let data = SlotData::new("bad", 48_000, 1, &audio, meta);
+            assert!(!data.is_valid());
+            let sample = data.to_sample();
+            let frames = sample.frames();
+            assert_eq!(frames, 1000);
+            let play = SlotPlay::from_meta(&data.meta);
+            for key in 0..=127 {
+                let Some(seg) = segment(&play, key, &s, 48_000, frames, SR, 120.0) else {
+                    continue;
+                };
+                let inside = |x: f64| (0.0..=frames as f64).contains(&x);
+                assert!(
+                    inside(seg.start) && inside(seg.end) && seg.start < seg.end,
+                    "key {key}: {seg:?}"
+                );
+                if let Some((a, b)) = seg.looping {
+                    assert!(inside(a) && inside(b) && a < b, "key {key}: {seg:?}");
+                }
+                for reverse in [false, true] {
+                    let mut v = Voice::new(SR);
+                    v.start(&Segment { reverse, ..seg }, 0, key, 127, false, 1);
+                    assert!(all_finite(&run(&mut v, &sample, &s, 4800)));
+                }
+            }
+        }
     }
 
     #[test]
