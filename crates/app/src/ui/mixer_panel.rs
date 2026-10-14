@@ -1,7 +1,7 @@
 //! Mixer strips, delay and reverb returns, master compressor, meters.
 
 use super::{SidAcidApp, theme};
-use acid_engine::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId};
+use acid_engine::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId, channel_param};
 use eframe::egui::{self, Sense, vec2};
 
 pub const CHANNEL_NAMES: [&str; CHANNELS] = ["Synth 1", "Synth 2", "808", "909", "FM", "Sampler"];
@@ -98,7 +98,7 @@ impl SidAcidApp {
                                             for (i, (p, label)) in STRIP.iter().enumerate() {
                                                 self.param_knob(
                                                     ui,
-                                                    ParamId::Channel(ch, *p),
+                                                    channel_param(ch as usize, *p),
                                                     label,
                                                 );
                                                 if i % 4 == 3 {

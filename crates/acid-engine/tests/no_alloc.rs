@@ -4,7 +4,7 @@
 
 use acid_engine::engine::Engine;
 use acid_engine::host::{self, Command, Event};
-use acid_engine::params::{MasterParam, ParamId};
+use acid_engine::params::{MasterParam, ParamId, fm_param, sampler_param, slot_param};
 use acid_engine::project::{Bar, Note, NotePattern, PatternRef, Project};
 use acid_engine::sequencer::Mode;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -85,14 +85,10 @@ fn busy_project() -> Project {
         &tone,
         acid_engine::sampler::slot::SlotMeta::sliced(36, slices, 120.0, 44_100),
     ));
-    p.params.insert(
-        ParamId::SamplerSlot(0, acid_engine::params::SlotParam::Choke),
-        1.0,
-    );
-    p.params.insert(
-        ParamId::Sampler(acid_engine::params::SamplerParam::Grit),
-        1.0,
-    );
+    p.params
+        .insert(slot_param(0, acid_engine::params::SlotParam::Choke), 1.0);
+    p.params
+        .insert(sampler_param(acid_engine::params::SamplerParam::Grit), 1.0);
     let bar = Bar {
         patterns: [Some(PatternRef(0)); acid_engine::machine::MACHINES],
         ..Bar::default()
@@ -226,8 +222,8 @@ fn toggling_fm_effects_does_not_allocate() {
     e.play();
     let n = count_allocs(|| {
         for on in [1.0, 0.0, 1.0, 0.0, 1.0] {
-            e.set_param(ParamId::Fm(FmParam::FilterOn), on);
-            e.set_param(ParamId::Fm(FmParam::PhaserMix), on);
+            e.set_param(fm_param(FmParam::FilterOn), on);
+            e.set_param(fm_param(FmParam::PhaserMix), on);
             render_seconds(&mut e, &mut l, &mut r, 0.2);
         }
     });

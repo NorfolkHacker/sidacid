@@ -2,7 +2,7 @@
 
 use super::SidAcidApp;
 use crate::document::Edit;
-use acid_engine::params::{ParamId, SynthParam};
+use acid_engine::params::{SynthParam, synth_param};
 use acid_engine::project::{PatternRef, SeqView};
 use eframe::egui;
 
@@ -34,7 +34,7 @@ impl SidAcidApp {
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for (p, label) in KNOBS {
-                        self.param_knob(ui, ParamId::Synth(synth as u8, p), label);
+                        self.param_knob(ui, synth_param(synth, p), label);
                     }
                 });
                 egui::ScrollArea::horizontal()

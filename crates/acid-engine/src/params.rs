@@ -1,6 +1,7 @@
 //! Every automatable control, its name, default (0..1 normalised) and
 //! number of discrete positions, plus helpers mapping 0..1 to real units.
 
+use crate::machine::{MachineType, MachineUid};
 use serde::{Deserialize, Serialize};
 
 pub const SYNTHS: usize = 2;
@@ -11,8 +12,6 @@ pub const DRUM_INSTRUMENTS: usize = 8;
 pub const FM_OPS: usize = 6;
 /// Sample slots in the sampler.
 pub const SAMPLER_SLOTS: usize = 16;
-/// Number of entries in `ParamId::all()`.
-pub const PARAM_COUNT: usize = 589;
 
 /// Positions of the FM controls that pick from a list. The numeric ones
 /// are continuous knobs the synth rounds with `step_index(v, N)`.
@@ -97,18 +96,33 @@ param_enum!(MasterParam {
     Level => "Master", LoFi => "Lo-Fi",
 });
 
+/// A control on one machine. Which variants a machine accepts depends on
+/// its type (`fits`); every machine has the channel-strip params.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ParamId {
-    Synth(u8, SynthParam),
-    Drum(u8, u8, DrumParam),
-    Kit(u8, KitParam),
-    Channel(u8, ChannelParam),
+pub enum MachineParam {
+    Synth(SynthParam),
+    Drum(u8, DrumParam),
+    Kit(KitParam),
+    Channel(ChannelParam),
+    Fm(FmParam),
+    FmOp(u8, OpParam),
+    Sampler(SamplerParam),
+    SamplerSlot(u8, SlotParam),
+}
+
+/// A control shared by the whole rack: send effects and master bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum GlobalParam {
     Fx(FxParam),
     Master(MasterParam),
-    Fm(FmParam),
-    Sampler(SamplerParam),
-    FmOp(u8, OpParam),
-    SamplerSlot(u8, SlotParam),
+}
+
+/// Every automatable control: a machine's (by uid) or a global one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ParamId {
+    Machine(MachineUid, MachineParam),
+    Fx(FxParam),
+    Master(MasterParam),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,14 +149,16 @@ const fn disc(name: &'static str, default: f32, steps: u8) -> ParamInfo {
     }
 }
 
-impl ParamId {
+const fn is_kit(ty: MachineType) -> bool {
+    matches!(ty, MachineType::Kit808 | MachineType::Kit909)
+}
+
+impl MachineParam {
     pub fn info(self) -> ParamInfo {
         use ChannelParam as C;
-        use FxParam as F;
-        use MasterParam as M;
         use SynthParam as S;
         match self {
-            ParamId::Synth(_, p) => {
+            MachineParam::Synth(p) => {
                 let n = p.name();
                 match p {
                     S::Tune => cont(n, 0.5),
@@ -162,9 +178,11 @@ impl ParamId {
                     S::Volume => cont(n, 0.7),
                 }
             }
-            ParamId::Drum(_, _, p) => cont(p.name(), if p == DrumParam::Level { 0.8 } else { 0.5 }),
-            ParamId::Kit(_, p) => cont(p.name(), if p == KitParam::Volume { 0.7 } else { 0.5 }),
-            ParamId::Channel(_, p) => {
+            MachineParam::Drum(_, p) => {
+                cont(p.name(), if p == DrumParam::Level { 0.8 } else { 0.5 })
+            }
+            MachineParam::Kit(p) => cont(p.name(), if p == KitParam::Volume { 0.7 } else { 0.5 }),
+            MachineParam::Channel(p) => {
                 let n = p.name();
                 match p {
                     C::Level => cont(n, 0.7),
@@ -181,23 +199,7 @@ impl ParamId {
                     C::DelaySend | C::ReverbSend => cont(n, 0.0),
                 }
             }
-            ParamId::Fx(p) => {
-                let n = p.name();
-                match p {
-                    F::DelaySync => disc(n, 1.0, 2),
-                    F::DelayDivision => disc(n, 0.4, 6),
-                    F::DelayMs => cont(n, 0.3),
-                    F::DelayFeedback => cont(n, 0.4),
-                    F::DelayTone => cont(n, 0.6),
-                    F::DelayPingPong => disc(n, 1.0, 2),
-                    F::DelayReturn => cont(n, 0.7),
-                    F::ReverbSize => cont(n, 0.6),
-                    F::ReverbDamping => cont(n, 0.5),
-                    F::ReverbWidth => cont(n, 1.0),
-                    F::ReverbReturn => cont(n, 0.6),
-                }
-            }
-            ParamId::Fm(p) => {
+            MachineParam::Fm(p) => {
                 use FmParam as F;
                 let n = p.name();
                 let of99 = |x: f32| x / 99.0;
@@ -220,7 +222,7 @@ impl ParamId {
                     F::ChorusDepth | F::PhaserDepth => cont(n, 0.5),
                 }
             }
-            ParamId::FmOp(op, p) => {
+            MachineParam::FmOp(op, p) => {
                 use OpParam as O;
                 let n = p.name();
                 match p {
@@ -236,11 +238,11 @@ impl ParamId {
                     O::On => disc(n, 1.0, 2),
                 }
             }
-            ParamId::Sampler(p) => match p {
+            MachineParam::Sampler(p) => match p {
                 SamplerParam::Volume => cont(p.name(), 0.7),
                 SamplerParam::Grit => disc(p.name(), 0.0, 2),
             },
-            ParamId::SamplerSlot(_, p) => {
+            MachineParam::SamplerSlot(_, p) => {
                 use SlotParam as S;
                 let n = p.name();
                 match p {
@@ -252,7 +254,123 @@ impl ParamId {
                     S::Reverse | S::Choke | S::TempoLock => disc(n, 0.0, 2),
                 }
             }
-            ParamId::Master(p) => {
+        }
+    }
+
+    /// Valid on a machine of `ty`: channel params on every machine, the
+    /// type's own params on that type, with in-range indices.
+    pub fn fits(self, ty: MachineType) -> bool {
+        match self {
+            MachineParam::Channel(_) => true,
+            MachineParam::Synth(_) => ty == MachineType::Synth,
+            MachineParam::Drum(i, _) => is_kit(ty) && (i as usize) < DRUM_INSTRUMENTS,
+            MachineParam::Kit(_) => is_kit(ty),
+            MachineParam::Fm(_) => ty == MachineType::Fm,
+            MachineParam::FmOp(op, _) => ty == MachineType::Fm && (op as usize) < FM_OPS,
+            MachineParam::Sampler(_) => ty == MachineType::Sampler,
+            MachineParam::SamplerSlot(s, _) => {
+                ty == MachineType::Sampler && (s as usize) < SAMPLER_SLOTS
+            }
+        }
+    }
+
+    /// Position in `MachineParam::all_for(ty)`; `None` if `!fits(ty)`.
+    pub fn index_for(self, ty: MachineType) -> Option<usize> {
+        if !self.fits(ty) {
+            return None;
+        }
+        let base = ChannelParam::ALL.len();
+        let drum_n = DrumParam::ALL.len();
+        Some(match self {
+            MachineParam::Channel(p) => p as usize,
+            MachineParam::Synth(p) => base + p as usize,
+            MachineParam::Drum(i, p) => base + i as usize * drum_n + p as usize,
+            MachineParam::Kit(p) => base + DRUM_INSTRUMENTS * drum_n + p as usize,
+            MachineParam::Fm(p) => base + p as usize,
+            MachineParam::FmOp(op, p) => {
+                base + FmParam::ALL.len() + op as usize * OpParam::ALL.len() + p as usize
+            }
+            MachineParam::Sampler(p) => base + p as usize,
+            MachineParam::SamplerSlot(s, p) => {
+                base + SamplerParam::ALL.len() + s as usize * SlotParam::ALL.len() + p as usize
+            }
+        })
+    }
+
+    /// Every param of a machine of `ty`: channel params first, then the
+    /// type's own in declaration order.
+    pub fn all_for(ty: MachineType) -> Vec<MachineParam> {
+        let mut v: Vec<MachineParam> = ChannelParam::ALL
+            .iter()
+            .map(|&p| MachineParam::Channel(p))
+            .collect();
+        match ty {
+            MachineType::Synth => v.extend(SynthParam::ALL.iter().map(|&p| MachineParam::Synth(p))),
+            MachineType::Kit808 | MachineType::Kit909 => {
+                for i in 0..DRUM_INSTRUMENTS as u8 {
+                    v.extend(DrumParam::ALL.iter().map(|&p| MachineParam::Drum(i, p)));
+                }
+                v.extend(KitParam::ALL.iter().map(|&p| MachineParam::Kit(p)));
+            }
+            MachineType::Fm => {
+                v.extend(FmParam::ALL.iter().map(|&p| MachineParam::Fm(p)));
+                for op in 0..FM_OPS as u8 {
+                    v.extend(OpParam::ALL.iter().map(|&p| MachineParam::FmOp(op, p)));
+                }
+            }
+            MachineType::Sampler => {
+                v.extend(SamplerParam::ALL.iter().map(|&p| MachineParam::Sampler(p)));
+                for s in 0..SAMPLER_SLOTS as u8 {
+                    v.extend(
+                        SlotParam::ALL
+                            .iter()
+                            .map(|&p| MachineParam::SamplerSlot(s, p)),
+                    );
+                }
+            }
+        }
+        v
+    }
+
+    pub fn count_for(ty: MachineType) -> usize {
+        ChannelParam::ALL.len()
+            + match ty {
+                MachineType::Synth => SynthParam::ALL.len(),
+                MachineType::Kit808 | MachineType::Kit909 => {
+                    DRUM_INSTRUMENTS * DrumParam::ALL.len() + KitParam::ALL.len()
+                }
+                MachineType::Fm => FmParam::ALL.len() + FM_OPS * OpParam::ALL.len(),
+                MachineType::Sampler => {
+                    SamplerParam::ALL.len() + SAMPLER_SLOTS * SlotParam::ALL.len()
+                }
+            }
+    }
+}
+
+impl GlobalParam {
+    pub const COUNT: usize = FxParam::ALL.len() + MasterParam::ALL.len();
+
+    pub fn info(self) -> ParamInfo {
+        use FxParam as F;
+        use MasterParam as M;
+        match self {
+            GlobalParam::Fx(p) => {
+                let n = p.name();
+                match p {
+                    F::DelaySync => disc(n, 1.0, 2),
+                    F::DelayDivision => disc(n, 0.4, 6),
+                    F::DelayMs => cont(n, 0.3),
+                    F::DelayFeedback => cont(n, 0.4),
+                    F::DelayTone => cont(n, 0.6),
+                    F::DelayPingPong => disc(n, 1.0, 2),
+                    F::DelayReturn => cont(n, 0.7),
+                    F::ReverbSize => cont(n, 0.6),
+                    F::ReverbDamping => cont(n, 0.5),
+                    F::ReverbWidth => cont(n, 1.0),
+                    F::ReverbReturn => cont(n, 0.6),
+                }
+            }
+            GlobalParam::Master(p) => {
                 let n = p.name();
                 match p {
                     M::CompOn => disc(n, 1.0, 2),
@@ -268,83 +386,89 @@ impl ParamId {
         }
     }
 
-    /// True when every index is within the machine counts.
-    pub fn is_valid(self) -> bool {
+    /// Position in `GlobalParam::all()`.
+    pub fn index(self) -> usize {
         match self {
-            ParamId::Synth(s, _) => (s as usize) < SYNTHS,
-            ParamId::Drum(k, i, _) => (k as usize) < KITS && (i as usize) < DRUM_INSTRUMENTS,
-            ParamId::Kit(k, _) => (k as usize) < KITS,
-            ParamId::Channel(c, _) => (c as usize) < CHANNELS,
-            ParamId::FmOp(op, _) => (op as usize) < FM_OPS,
-            ParamId::SamplerSlot(s, _) => (s as usize) < SAMPLER_SLOTS,
-            ParamId::Fm(_) | ParamId::Sampler(_) | ParamId::Fx(_) | ParamId::Master(_) => true,
+            GlobalParam::Fx(p) => p as usize,
+            GlobalParam::Master(p) => FxParam::ALL.len() + p as usize,
         }
     }
 
-    /// Position of this id in `ParamId::all()`; `None` for an invalid id.
-    pub fn index(self) -> Option<usize> {
-        if !self.is_valid() {
-            return None;
+    /// Fx params then Master params.
+    pub fn all() -> Vec<GlobalParam> {
+        FxParam::ALL
+            .iter()
+            .map(|&p| GlobalParam::Fx(p))
+            .chain(MasterParam::ALL.iter().map(|&p| GlobalParam::Master(p)))
+            .collect()
+    }
+}
+
+impl ParamId {
+    pub fn info(self) -> ParamInfo {
+        match self {
+            ParamId::Machine(_, p) => p.info(),
+            ParamId::Fx(p) => GlobalParam::Fx(p).info(),
+            ParamId::Master(p) => GlobalParam::Master(p).info(),
         }
-        let synth_n = SynthParam::ALL.len();
-        let drum_n = DrumParam::ALL.len();
-        let per_kit = DRUM_INSTRUMENTS * drum_n + KitParam::ALL.len();
-        let kit_base = SYNTHS * synth_n;
-        let channel_base = kit_base + KITS * per_kit;
-        let fx_base = channel_base + CHANNELS * ChannelParam::ALL.len();
-        let master_base = fx_base + FxParam::ALL.len();
-        let fm_base = master_base + MasterParam::ALL.len();
-        let sampler_base = fm_base + FmParam::ALL.len();
-        let fm_op_base = sampler_base + SamplerParam::ALL.len();
-        let slot_base = fm_op_base + FM_OPS * OpParam::ALL.len();
-        Some(match self {
-            ParamId::Synth(s, p) => s as usize * synth_n + p as usize,
-            ParamId::Drum(k, i, p) => {
-                kit_base + k as usize * per_kit + i as usize * drum_n + p as usize
-            }
-            ParamId::Kit(k, p) => {
-                kit_base + k as usize * per_kit + DRUM_INSTRUMENTS * drum_n + p as usize
-            }
-            ParamId::Channel(c, p) => {
-                channel_base + c as usize * ChannelParam::ALL.len() + p as usize
-            }
-            ParamId::Fx(p) => fx_base + p as usize,
-            ParamId::Master(p) => master_base + p as usize,
-            ParamId::Fm(p) => fm_base + p as usize,
-            ParamId::Sampler(p) => sampler_base + p as usize,
-            ParamId::FmOp(op, p) => fm_op_base + op as usize * OpParam::ALL.len() + p as usize,
-            ParamId::SamplerSlot(s, p) => {
-                slot_base + s as usize * SlotParam::ALL.len() + p as usize
-            }
-        })
     }
 
-    pub fn all() -> Vec<ParamId> {
-        let mut v = Vec::new();
-        for s in 0..SYNTHS as u8 {
-            v.extend(SynthParam::ALL.iter().map(|&p| ParamId::Synth(s, p)));
+    pub fn global(self) -> Option<GlobalParam> {
+        match self {
+            ParamId::Machine(..) => None,
+            ParamId::Fx(p) => Some(GlobalParam::Fx(p)),
+            ParamId::Master(p) => Some(GlobalParam::Master(p)),
         }
-        for k in 0..KITS as u8 {
-            for i in 0..DRUM_INSTRUMENTS as u8 {
-                v.extend(DrumParam::ALL.iter().map(|&p| ParamId::Drum(k, i, p)));
-            }
-            v.extend(KitParam::ALL.iter().map(|&p| ParamId::Kit(k, p)));
-        }
-        for c in 0..CHANNELS as u8 {
-            v.extend(ChannelParam::ALL.iter().map(|&p| ParamId::Channel(c, p)));
-        }
-        v.extend(FxParam::ALL.iter().map(|&p| ParamId::Fx(p)));
-        v.extend(MasterParam::ALL.iter().map(|&p| ParamId::Master(p)));
-        v.extend(FmParam::ALL.iter().map(|&p| ParamId::Fm(p)));
-        v.extend(SamplerParam::ALL.iter().map(|&p| ParamId::Sampler(p)));
-        for op in 0..FM_OPS as u8 {
-            v.extend(OpParam::ALL.iter().map(|&p| ParamId::FmOp(op, p)));
-        }
-        for s in 0..SAMPLER_SLOTS as u8 {
-            v.extend(SlotParam::ALL.iter().map(|&p| ParamId::SamplerSlot(s, p)));
-        }
-        v
     }
+}
+
+impl From<GlobalParam> for ParamId {
+    fn from(g: GlobalParam) -> Self {
+        match g {
+            GlobalParam::Fx(p) => ParamId::Fx(p),
+            GlobalParam::Master(p) => ParamId::Master(p),
+        }
+    }
+}
+
+// Temporary helpers for the fixed six-machine rack (uids 1..=6); deleted
+// together with `MachineId`.
+
+/// Synth `s` (0 or 1): uid `s + 1`.
+pub const fn synth_param(s: usize, p: SynthParam) -> ParamId {
+    ParamId::Machine(MachineUid(s as u16 + 1), MachineParam::Synth(p))
+}
+
+/// Kit `k` (0 = 808, 1 = 909): uid `k + 3`.
+pub const fn drum_param(k: usize, i: u8, p: DrumParam) -> ParamId {
+    ParamId::Machine(MachineUid(k as u16 + 3), MachineParam::Drum(i, p))
+}
+
+pub const fn kit_param(k: usize, p: KitParam) -> ParamId {
+    ParamId::Machine(MachineUid(k as u16 + 3), MachineParam::Kit(p))
+}
+
+/// Channel strip of machine index `m`: uid `m + 1`.
+pub const fn channel_param(m: usize, p: ChannelParam) -> ParamId {
+    ParamId::Machine(MachineUid(m as u16 + 1), MachineParam::Channel(p))
+}
+
+/// The FM machine: uid 5.
+pub const fn fm_param(p: FmParam) -> ParamId {
+    ParamId::Machine(MachineUid(5), MachineParam::Fm(p))
+}
+
+pub const fn fm_op_param(op: u8, p: OpParam) -> ParamId {
+    ParamId::Machine(MachineUid(5), MachineParam::FmOp(op, p))
+}
+
+/// The sampler: uid 6.
+pub const fn sampler_param(p: SamplerParam) -> ParamId {
+    ParamId::Machine(MachineUid(6), MachineParam::Sampler(p))
+}
+
+pub const fn slot_param(slot: u8, p: SlotParam) -> ParamId {
+    ParamId::Machine(MachineUid(6), MachineParam::SamplerSlot(slot, p))
 }
 
 pub fn lin(v: f32, lo: f32, hi: f32) -> f32 {
@@ -406,48 +530,87 @@ pub mod sampler_map {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MachineType;
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_every_param_once() {
-        let all = ParamId::all();
+    fn per_type_index_spaces_match_all_for() {
+        for ty in MachineType::ALL {
+            let all = MachineParam::all_for(ty);
+            assert_eq!(all.len(), MachineParam::count_for(ty));
+            for (i, p) in all.iter().enumerate() {
+                assert!(p.fits(ty));
+                assert_eq!(p.index_for(ty), Some(i), "{ty:?} {p:?}");
+            }
+        }
         assert_eq!(
-            all.len(),
-            2 * 15 + 2 * 8 * 4 + 2 * 2 + 6 * 16 + 11 + 8 + 34 + 2 + 6 * 22 + 16 * 13
+            MachineParam::Fm(FmParam::Volume).index_for(MachineType::Synth),
+            None
         );
-        let unique: HashSet<_> = all.iter().collect();
-        assert_eq!(unique.len(), all.len());
+        assert_eq!(
+            MachineParam::Drum(8, DrumParam::Tune).index_for(MachineType::Kit808),
+            None
+        );
+        assert!(MachineParam::Channel(ChannelParam::Level).fits(MachineType::Sampler));
     }
 
     #[test]
-    fn fm_params_follow_the_master_params() {
-        let all = ParamId::all();
-        let first_fm = all
-            .iter()
-            .position(|id| matches!(id, ParamId::Fm(_)))
-            .unwrap();
-        assert_eq!(all[first_fm], ParamId::Fm(FmParam::Volume));
-        assert!(matches!(all[first_fm - 1], ParamId::Master(_)));
-        assert!(all.contains(&ParamId::FmOp(5, OpParam::On)));
+    fn global_params_index_densely() {
+        for (i, g) in GlobalParam::all().into_iter().enumerate() {
+            assert_eq!(g.index(), i);
+        }
+        assert_eq!(GlobalParam::all().len(), GlobalParam::COUNT);
+    }
+
+    #[test]
+    fn per_type_counts_cover_the_old_flat_table() {
+        // Old PARAM_COUNT = 589: 2 synths + 2 kits + 6 channels + fx + master + fm + ops + slots.
+        let ch = ChannelParam::ALL.len();
+        let c = |t| MachineParam::count_for(t) - ch;
+        let total = 2 * c(MachineType::Synth)
+            + c(MachineType::Kit808)
+            + c(MachineType::Kit909)
+            + c(MachineType::Fm)
+            + c(MachineType::Sampler)
+            + 6 * ch
+            + GlobalParam::COUNT;
+        assert_eq!(total, 589);
+    }
+
+    #[test]
+    fn every_machine_type_lists_each_param_once() {
+        for ty in MachineType::ALL {
+            let all = MachineParam::all_for(ty);
+            let unique: HashSet<_> = all.iter().collect();
+            assert_eq!(unique.len(), all.len(), "{ty:?}");
+        }
+        let fm = MachineParam::all_for(MachineType::Fm);
         assert_eq!(
-            all[all.len() - 1],
-            ParamId::SamplerSlot(15, SlotParam::TempoLock)
+            fm[ChannelParam::ALL.len()],
+            MachineParam::Fm(FmParam::Volume)
         );
-        assert!(all.contains(&ParamId::Sampler(SamplerParam::Volume)));
-        assert_eq!(ParamId::Fm(FmParam::Volume).info().default, 0.7);
+        assert!(fm.contains(&MachineParam::FmOp(5, OpParam::On)));
+        let sampler = MachineParam::all_for(MachineType::Sampler);
+        assert_eq!(
+            sampler[sampler.len() - 1],
+            MachineParam::SamplerSlot(15, SlotParam::TempoLock)
+        );
+        assert!(sampler.contains(&MachineParam::Sampler(SamplerParam::Volume)));
+        assert_eq!(fm_param(FmParam::Volume).info().default, 0.7);
     }
 
     #[test]
     fn sampler_params_and_maps() {
-        assert!(ParamId::SamplerSlot(15, SlotParam::Level).is_valid());
-        assert!(!ParamId::SamplerSlot(16, SlotParam::Level).is_valid());
-        assert_eq!(ParamId::SamplerSlot(16, SlotParam::Level).index(), None);
-        assert_eq!(ParamId::Sampler(SamplerParam::Grit).info().steps, 2);
-        assert_eq!(ParamId::SamplerSlot(3, SlotParam::Choke).info().steps, 2);
+        let sampler = MachineType::Sampler;
+        assert!(MachineParam::SamplerSlot(15, SlotParam::Level).fits(sampler));
+        assert!(!MachineParam::SamplerSlot(16, SlotParam::Level).fits(sampler));
         assert_eq!(
-            ParamId::SamplerSlot(3, SlotParam::Release).info().default,
-            0.3
+            MachineParam::SamplerSlot(16, SlotParam::Level).index_for(sampler),
+            None
         );
+        assert_eq!(sampler_param(SamplerParam::Grit).info().steps, 2);
+        assert_eq!(slot_param(3, SlotParam::Choke).info().steps, 2);
+        assert_eq!(slot_param(3, SlotParam::Release).info().default, 0.3);
         assert_eq!(sampler_map::tune_semitones(0.5), 0);
         assert_eq!(sampler_map::tune_semitones(1.0), 24);
         assert_eq!(sampler_map::tune_semitones(0.0), -24);
@@ -473,33 +636,30 @@ mod tests {
     #[test]
     fn fm_defaults_are_the_dx7_init_voice() {
         let d = |id: ParamId| id.info().default;
-        assert_eq!(d(ParamId::FmOp(0, OpParam::Level)), 1.0);
-        assert_eq!(d(ParamId::FmOp(1, OpParam::Level)), 0.0);
-        assert_eq!(d(ParamId::FmOp(3, OpParam::R1)), 1.0);
-        assert_eq!(d(ParamId::FmOp(3, OpParam::L4)), 0.0);
-        assert!((d(ParamId::FmOp(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
+        assert_eq!(d(fm_op_param(0, OpParam::Level)), 1.0);
+        assert_eq!(d(fm_op_param(1, OpParam::Level)), 0.0);
+        assert_eq!(d(fm_op_param(3, OpParam::R1)), 1.0);
+        assert_eq!(d(fm_op_param(3, OpParam::L4)), 0.0);
+        assert!((d(fm_op_param(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
         // Decoded through the step counts, the defaults are the DX7 INIT
         // values: changing an fm_steps constant must change its default too.
         let step = |id: ParamId, steps: usize| step_index(d(id), steps as u8);
-        assert_eq!(step(ParamId::FmOp(2, OpParam::Coarse), fm_steps::COARSE), 1);
-        assert_eq!(step(ParamId::FmOp(2, OpParam::Detune), fm_steps::DETUNE), 7);
+        assert_eq!(step(fm_op_param(2, OpParam::Coarse), fm_steps::COARSE), 1);
+        assert_eq!(step(fm_op_param(2, OpParam::Detune), fm_steps::DETUNE), 7);
         assert_eq!(
-            step(ParamId::Fm(FmParam::PitchModSens), fm_steps::PITCH_MOD_SENS),
+            step(fm_param(FmParam::PitchModSens), fm_steps::PITCH_MOD_SENS),
             3
         );
+        assert_eq!(step(fm_param(FmParam::Transpose), fm_steps::TRANSPOSE), 24);
+        assert_eq!(d(fm_op_param(2, OpParam::Detune)), 0.5);
+        assert_eq!(d(fm_op_param(5, OpParam::On)), 1.0);
+        assert!((d(fm_param(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);
+        assert_eq!(d(fm_param(FmParam::Transpose)), 0.5);
+        assert_eq!(d(fm_param(FmParam::Algorithm)), 0.0);
+        assert_eq!(fm_param(FmParam::LfoWave).info().steps, 6);
+        assert_eq!(fm_op_param(0, OpParam::LeftCurve).info().steps, 4);
         assert_eq!(
-            step(ParamId::Fm(FmParam::Transpose), fm_steps::TRANSPOSE),
-            24
-        );
-        assert_eq!(d(ParamId::FmOp(2, OpParam::Detune)), 0.5);
-        assert_eq!(d(ParamId::FmOp(5, OpParam::On)), 1.0);
-        assert!((d(ParamId::Fm(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);
-        assert_eq!(d(ParamId::Fm(FmParam::Transpose)), 0.5);
-        assert_eq!(d(ParamId::Fm(FmParam::Algorithm)), 0.0);
-        assert_eq!(ParamId::Fm(FmParam::LfoWave).info().steps, 6);
-        assert_eq!(ParamId::FmOp(0, OpParam::LeftCurve).info().steps, 4);
-        assert_eq!(
-            ParamId::Fm(FmParam::Algorithm).info().steps,
+            fm_param(FmParam::Algorithm).info().steps,
             0,
             "a rounded knob"
         );
@@ -507,36 +667,47 @@ mod tests {
 
     #[test]
     fn fm_operator_ids_are_bounded() {
-        assert!(ParamId::FmOp(5, OpParam::Fine).is_valid());
-        assert!(!ParamId::FmOp(6, OpParam::Fine).is_valid());
-        assert_eq!(ParamId::FmOp(6, OpParam::Fine).index(), None);
+        assert!(MachineParam::FmOp(5, OpParam::Fine).fits(MachineType::Fm));
+        assert!(!MachineParam::FmOp(6, OpParam::Fine).fits(MachineType::Fm));
+        assert_eq!(
+            MachineParam::FmOp(6, OpParam::Fine).index_for(MachineType::Fm),
+            None
+        );
     }
 
     #[test]
     fn defaults_are_normalised_and_names_nonempty() {
-        for id in ParamId::all() {
-            let info = id.info();
-            assert!((0.0..=1.0).contains(&info.default), "{id:?}");
+        let infos = MachineType::ALL
+            .into_iter()
+            .flat_map(MachineParam::all_for)
+            .map(MachineParam::info)
+            .chain(GlobalParam::all().into_iter().map(GlobalParam::info));
+        for info in infos {
+            assert!((0.0..=1.0).contains(&info.default), "{info:?}");
             assert!(!info.name.is_empty());
         }
     }
 
     #[test]
-    fn index_validity() {
-        assert!(ParamId::all().iter().all(|id| id.is_valid()));
-        assert!(!ParamId::Synth(2, SynthParam::Tune).is_valid());
-        assert!(!ParamId::Drum(0, 8, DrumParam::Tune).is_valid());
-        assert!(!ParamId::Drum(2, 0, DrumParam::Tune).is_valid());
-        assert!(!ParamId::Kit(2, KitParam::Volume).is_valid());
-        assert!(!ParamId::Channel(6, ChannelParam::Level).is_valid());
+    fn params_fit_only_their_machine_types() {
+        use MachineType as T;
+        assert!(!MachineParam::Synth(SynthParam::Tune).fits(T::Kit808));
+        assert!(!MachineParam::Drum(8, DrumParam::Tune).fits(T::Kit909));
+        assert!(MachineParam::Drum(7, DrumParam::Tune).fits(T::Kit909));
+        assert!(!MachineParam::Kit(KitParam::Volume).fits(T::Synth));
+        assert!(!MachineParam::Sampler(SamplerParam::Grit).fits(T::Fm));
+        assert!(!MachineParam::FmOp(0, OpParam::On).fits(T::Sampler));
+        for ty in T::ALL {
+            assert!(MachineParam::Channel(ChannelParam::Level).fits(ty));
+        }
     }
 
     #[test]
     fn discrete_params_report_steps() {
-        assert_eq!(ParamId::Synth(0, SynthParam::Wave).info().steps, 2);
-        assert_eq!(ParamId::Synth(0, SynthParam::FilterMode).info().steps, 3);
+        assert_eq!(synth_param(0, SynthParam::Wave).info().steps, 2);
+        assert_eq!(synth_param(0, SynthParam::FilterMode).info().steps, 3);
         assert_eq!(ParamId::Fx(FxParam::DelayDivision).info().steps, 6);
-        assert_eq!(ParamId::Synth(0, SynthParam::Cutoff).info().steps, 0);
+        assert_eq!(synth_param(0, SynthParam::Cutoff).info().steps, 0);
     }
 
     #[test]
@@ -551,16 +722,5 @@ mod tests {
         assert_eq!(step_index(7.0, 3), 2);
         assert!(on(0.5) && !on(0.49));
         assert!((db_to_gain(-6.0) - 0.501).abs() < 1e-3);
-    }
-
-    #[test]
-    fn index_matches_registry_order() {
-        let all = ParamId::all();
-        assert_eq!(all.len(), PARAM_COUNT);
-        for (i, id) in all.iter().enumerate() {
-            assert_eq!(id.index(), Some(i), "{id:?}");
-        }
-        assert_eq!(ParamId::Synth(2, SynthParam::Tune).index(), None);
-        assert_eq!(ParamId::Drum(0, 8, DrumParam::Tune).index(), None);
     }
 }

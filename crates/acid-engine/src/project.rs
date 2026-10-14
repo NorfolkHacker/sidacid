@@ -2,14 +2,14 @@
 //! as RON (`.sidacid`). Fixed-size arrays are Vecs of exact length, checked
 //! by `validate` on load.
 
-use crate::machine::{MACHINES, MachineKind, TRANSPOSED, kind_of};
-use crate::params::{DRUM_INSTRUMENTS, ParamId};
+use crate::machine::{MACHINES, MachineId, MachineKind, TRANSPOSED, kind_of, standard_rack};
+use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-pub const PROJECT_VERSION: u32 = 2;
+pub const PROJECT_VERSION: u32 = 3;
 pub const STEPS: usize = 64;
 
 /// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
@@ -379,13 +379,36 @@ impl Default for Project {
             drums: Default::default(),
             fm: FmMachine::default(),
             sampler: SamplerMachine::default(),
-            params: ParamId::all()
+            params: standard_params()
                 .into_iter()
                 .map(|id| (id, id.info().default))
                 .collect(),
             selected: [0; MACHINES],
             song: Song::default(),
         }
+    }
+}
+
+/// Every param of the standard six-machine rack plus the global ones.
+fn standard_params() -> Vec<ParamId> {
+    let machines = standard_rack().into_iter().flat_map(|(uid, ty, _)| {
+        MachineParam::all_for(ty)
+            .into_iter()
+            .map(move |p| ParamId::Machine(uid, p))
+    });
+    machines
+        .chain(GlobalParam::all().into_iter().map(ParamId::from))
+        .collect()
+}
+
+/// Interim (until the rack is data): a param is valid when it names one
+/// of the six fixed machines and fits that machine's type.
+fn param_in_rack(id: ParamId) -> bool {
+    match id {
+        ParamId::Machine(uid, p) => {
+            MachineId::from_uid(uid).is_some_and(|m| p.fits(m.machine_type()))
+        }
+        ParamId::Fx(_) | ParamId::Master(_) => true,
     }
 }
 
@@ -417,6 +440,12 @@ impl From<std::io::Error> for ProjectError {
     fn from(e: std::io::Error) -> Self {
         ProjectError::Io(e)
     }
+}
+
+/// Parses with embedded 16-bit PCM limited to half the f32 memory limit.
+fn with_pcm_budget<T>(f: impl FnOnce() -> T) -> T {
+    let budget = crate::sampler::MEMORY_LIMIT as u64 / 2;
+    crate::sampler::slot::pcm_codec::with_budget(budget, f)
 }
 
 #[derive(Deserialize)]
@@ -454,7 +483,7 @@ impl Project {
         if self
             .params
             .iter()
-            .any(|(id, v)| !id.is_valid() || !v.is_finite())
+            .any(|(id, v)| !param_in_rack(*id) || !v.is_finite())
         {
             return bad("invalid parameter value".into());
         }
@@ -471,7 +500,7 @@ impl Project {
                     ));
                 }
                 if let Some(lane) = &p.param_lane
-                    && (!lane.param.is_valid()
+                    && (!param_in_rack(lane.param)
                         || lane.values.iter().flatten().any(|v| !v.is_finite()))
                 {
                     return bad(format!(
@@ -555,7 +584,7 @@ impl Project {
         }
         let mut seen = std::collections::BTreeSet::new();
         for lane in &self.song.automation {
-            if !lane.param.is_valid() || !seen.insert(lane.param) {
+            if !param_in_rack(lane.param) || !seen.insert(lane.param) {
                 return bad("song automation lane is invalid or repeated".into());
             }
             if lane
@@ -582,15 +611,12 @@ impl Project {
         let p = match head.version {
             0 | 1 => ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
+                .upgrade()
                 .upgrade(),
-            PROJECT_VERSION => {
-                // Embedded 16-bit PCM may total half the f32 memory limit.
-                let budget = crate::sampler::MEMORY_LIMIT as u64 / 2;
-                crate::sampler::slot::pcm_codec::with_budget(budget, || {
-                    ron::from_str::<Project>(text)
-                })
+            2 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
                 .map_err(parse)?
-            }
+                .upgrade(),
+            PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
         p.validate()?;
@@ -615,7 +641,7 @@ impl Project {
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default project
 mod tests {
     use super::*;
-    use crate::params::SynthParam;
+    use crate::params::{SynthParam, synth_param};
 
     #[test]
     fn sampler_slots_round_trip_validate_and_place_zones() {
@@ -817,7 +843,7 @@ mod tests {
         assert_eq!(p.synths[0].patterns[0].steps.len(), STEPS);
         assert_eq!(p.drums[0].patterns[0].steps.len(), STEPS);
         assert_eq!(p.synths[0].patterns[0].length, 16);
-        assert_eq!(p.params.len(), ParamId::all().len());
+        assert_eq!(p.params.len(), 589);
         p.validate().unwrap();
     }
 
@@ -850,7 +876,7 @@ mod tests {
     #[test]
     fn param_lookup_falls_back_to_default() {
         let mut p = Project::default();
-        let id = ParamId::Synth(1, SynthParam::Cutoff);
+        let id = synth_param(1, SynthParam::Cutoff);
         p.params.remove(&id);
         assert_eq!(p.param(id), id.info().default);
         p.params.insert(id, 0.9);
@@ -870,8 +896,7 @@ mod tests {
             slide: true,
         };
         p.drums[0].patterns[2].steps[4][0] = DrumHit::Accent;
-        p.params
-            .insert(ParamId::Synth(0, SynthParam::Resonance), 0.95);
+        p.params.insert(synth_param(0, SynthParam::Resonance), 0.95);
         p.song.bars.push(Bar {
             patterns: [
                 Some(PatternRef(5)),
@@ -929,19 +954,19 @@ mod tests {
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
         p.params
-            .insert(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
+            .insert(synth_param(0, SynthParam::Cutoff), f32::NAN);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
-        p.params.insert(ParamId::Synth(5, SynthParam::Cutoff), 0.5);
+        p.params.insert(synth_param(5, SynthParam::Cutoff), 0.5);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
         let mut lane = ParamLane {
-            param: ParamId::Drum(0, 9, crate::params::DrumParam::Tune),
+            param: crate::params::drum_param(0, 9, crate::params::DrumParam::Tune),
             values: vec![None; STEPS],
         };
         p.synths[0].patterns[0].param_lane = Some(lane.clone());
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
-        lane.param = ParamId::Synth(0, SynthParam::Cutoff);
+        lane.param = synth_param(0, SynthParam::Cutoff);
         lane.values[3] = Some(f32::NAN);
         p.synths[0].patterns[0].param_lane = Some(lane);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
@@ -971,7 +996,6 @@ mod tests {
 
     #[test]
     fn song_shapes_are_validated() {
-        use crate::params::SynthParam;
         let mut p = Project::default();
         p.song.bars = vec![Bar::default(); crate::song::MAX_BARS + 1];
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
@@ -985,7 +1009,7 @@ mod tests {
         p.song.loop_range = Some((1, 2));
         p.validate().unwrap();
 
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut p = Project::default();
         let lane = AutoLane {
             param: id,
@@ -997,7 +1021,7 @@ mod tests {
             "duplicate lane"
         );
         p.song.automation = vec![AutoLane {
-            param: ParamId::Synth(7, SynthParam::Cutoff),
+            param: synth_param(7, SynthParam::Cutoff),
             ..lane.clone()
         }];
         assert!(
@@ -1107,11 +1131,11 @@ mod tests {
 
     #[test]
     fn v1_files_load_with_empty_new_machines() {
-        use crate::migrate::{BarV1, ProjectV1, SongV1};
+        use crate::migrate::{BarV1, LegacyParamId, ProjectV1, SongV1, SynthMachineV2};
         let base = Project::default();
         let mut params = BTreeMap::new();
-        params.insert(ParamId::Synth(0, SynthParam::Cutoff), 0.9);
-        let mut synths = base.synths.clone();
+        params.insert(LegacyParamId::Synth(0, SynthParam::Cutoff), 0.9);
+        let mut synths = [SynthMachineV2::default(), SynthMachineV2::default()];
         synths[1].patterns[2].length = 7;
         let v1 = ProjectV1 {
             version: 1,
@@ -1138,8 +1162,8 @@ mod tests {
         assert_eq!((p.name.as_str(), p.bpm, p.swing), ("Old", 131.0, 0.2));
         assert_eq!(p.synths[1].patterns[2].length, 7);
         assert_eq!(p.selected, [1, 2, 3, 4, 0, 0]);
-        assert_eq!(p.param(ParamId::Synth(0, SynthParam::Cutoff)), 0.9);
-        let ch5 = ParamId::Channel(5, crate::params::ChannelParam::Level);
+        assert_eq!(p.param(synth_param(0, SynthParam::Cutoff)), 0.9);
+        let ch5 = crate::params::channel_param(5, crate::params::ChannelParam::Level);
         assert_eq!(p.params.get(&ch5), Some(&ch5.info().default));
         let bar = p.song.bars[0];
         assert_eq!(

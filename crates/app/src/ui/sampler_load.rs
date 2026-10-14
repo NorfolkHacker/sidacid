@@ -4,7 +4,7 @@
 
 use super::SidAcidApp;
 use crate::document::Edit;
-use acid_engine::params::{ParamId, SlotParam};
+use acid_engine::params::{SlotParam, slot_param};
 use acid_engine::sampler::decode::decode;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
 use acid_engine::sampler::slot::{SlotData, SlotMeta};
@@ -123,7 +123,7 @@ impl SidAcidApp {
         let values = SlotParam::ALL
             .iter()
             .map(|&p| {
-                let id = ParamId::SamplerSlot(slot as u8, p);
+                let id = slot_param(slot as u8, p);
                 let v = match p {
                     SlotParam::Choke | SlotParam::TempoLock if slice_mode => 1.0,
                     _ => id.info().default,

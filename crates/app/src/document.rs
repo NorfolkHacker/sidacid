@@ -753,21 +753,21 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acid_engine::params::{ParamId, SynthParam};
+    use acid_engine::params::{ParamId, SynthParam, synth_param};
     use acid_engine::project::{DrumHit, Gate, SeqView, SynthStep};
 
     fn doc() -> Document {
         Document::new(Project::default())
     }
 
-    const CUTOFF: ParamId = ParamId::Synth(0, SynthParam::Cutoff);
+    const CUTOFF: ParamId = synth_param(0, SynthParam::Cutoff);
 
     #[test]
     fn loading_an_fm_voice_is_one_undo_step() {
-        use acid_engine::params::{FmParam, OpParam};
+        use acid_engine::params::{FmParam, OpParam, fm_op_param, fm_param};
         let mut d = doc();
-        let alg = ParamId::Fm(FmParam::Algorithm);
-        let lvl = ParamId::FmOp(2, OpParam::Level);
+        let alg = fm_param(FmParam::Algorithm);
+        let lvl = fm_op_param(2, OpParam::Level);
         let cmds = d.apply(
             Edit::FmVoice {
                 name: "BRASS".into(),
@@ -852,7 +852,7 @@ mod tests {
         }
     }
 
-    const WAVE: ParamId = ParamId::Synth(0, SynthParam::Wave);
+    const WAVE: ParamId = synth_param(0, SynthParam::Wave);
 
     #[test]
     fn a_record_pass_is_one_undo_step_across_switch_and_bpm_edits() {
@@ -979,7 +979,7 @@ mod tests {
         );
         d.apply(
             Edit::Param {
-                id: ParamId::Synth(0, SynthParam::Resonance),
+                id: synth_param(0, SynthParam::Resonance),
                 value: 0.9,
             },
             true,
@@ -1250,7 +1250,7 @@ mod tests {
 
     #[test]
     fn sampler_slot_edits_undo_and_sync_the_engine() {
-        use acid_engine::params::SlotParam;
+        use acid_engine::params::{SlotParam, slot_param};
         use acid_engine::sampler::slot::{SlotData, SlotMeta};
         let mut d = doc();
         let tone: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
@@ -1261,7 +1261,7 @@ mod tests {
             &tone,
             SlotMeta::sliced(24, vec![0, 500], 120.0, 1000),
         );
-        let choke = ParamId::SamplerSlot(2, SlotParam::Choke);
+        let choke = slot_param(2, SlotParam::Choke);
         let cmds = d.apply(
             Edit::SamplerSlot {
                 slot: 2,
@@ -1538,9 +1538,9 @@ mod tests {
 
     #[test]
     fn repeated_ids_in_a_voice_load_undo_to_the_original_value() {
-        use acid_engine::params::FmParam;
+        use acid_engine::params::{FmParam, fm_param};
         let mut d = doc();
-        let alg = ParamId::Fm(FmParam::Algorithm);
+        let alg = fm_param(FmParam::Algorithm);
         d.apply(
             Edit::FmVoice {
                 name: "TWICE".into(),
@@ -1557,9 +1557,9 @@ mod tests {
 
     #[test]
     fn repeated_ids_in_a_slot_load_undo_to_the_original_value() {
-        use acid_engine::params::SlotParam;
+        use acid_engine::params::{SlotParam, slot_param};
         let mut d = doc();
-        let choke = ParamId::SamplerSlot(0, SlotParam::Choke);
+        let choke = slot_param(0, SlotParam::Choke);
         d.apply(
             Edit::SamplerSlot {
                 slot: 0,

@@ -5,24 +5,29 @@ use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
+use acid_engine::machine::MachineId;
 use acid_engine::params::{
-    FmParam, FxParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map, step_index,
+    FmParam, FxParam, MachineParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map,
+    step_index,
 };
 use eframe::egui;
 
 /// Display names for each position of a named switch; empty for a knob.
 pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
+    use MachineParam as M;
     match id {
-        ParamId::Synth(_, SynthParam::Wave) => &["Saw", "Pulse"],
-        ParamId::Synth(_, SynthParam::FilterMode) => &["LP", "BP", "HP"],
+        ParamId::Machine(_, M::Synth(SynthParam::Wave)) => &["Saw", "Pulse"],
+        ParamId::Machine(_, M::Synth(SynthParam::FilterMode)) => &["LP", "BP", "HP"],
         ParamId::Fx(FxParam::DelayDivision) => &["1/16", "1/8", "3/16", "1/4", "3/8", "1/2"],
-        ParamId::Fm(FmParam::LfoWave) => &["Tri", "Saw Dn", "Saw Up", "Square", "Sine", "S&H"],
-        ParamId::Fm(FmParam::Mono) => &["Poly", "Mono"],
-        ParamId::Fm(FmParam::FilterMode) => &["LP", "HP"],
-        ParamId::FmOp(_, OpParam::LeftCurve | OpParam::RightCurve) => {
+        ParamId::Machine(_, M::Fm(FmParam::LfoWave)) => {
+            &["Tri", "Saw Dn", "Saw Up", "Square", "Sine", "S&H"]
+        }
+        ParamId::Machine(_, M::Fm(FmParam::Mono)) => &["Poly", "Mono"],
+        ParamId::Machine(_, M::Fm(FmParam::FilterMode)) => &["LP", "HP"],
+        ParamId::Machine(_, M::FmOp(_, OpParam::LeftCurve | OpParam::RightCurve)) => {
             &["-Lin", "-Exp", "+Exp", "+Lin"]
         }
-        ParamId::FmOp(_, OpParam::FixedFreq) => &["Ratio", "Fixed"],
+        ParamId::Machine(_, M::FmOp(_, OpParam::FixedFreq)) => &["Ratio", "Fixed"],
         _ if id.info().steps == 2 => &["Off", "On"],
         _ => &[],
     }
@@ -41,6 +46,7 @@ fn seconds_text(s: f32) -> String {
 /// (seconds for Glide, Hz for Cutoff), a percentage otherwise.
 pub fn value_text(id: ParamId, v: f32) -> String {
     use FmParam as F;
+    use MachineParam as M;
     use OpParam as O;
     let pick = |n: usize| step_index(v, n as u8) as i32;
     let signed = |x: i32| {
@@ -51,72 +57,81 @@ pub fn value_text(id: ParamId, v: f32) -> String {
         }
     };
     match id {
-        ParamId::Fm(F::Algorithm) => (pick(fm_steps::ALGORITHM) + 1).to_string(),
-        ParamId::Fm(F::Feedback) => pick(fm_steps::FEEDBACK).to_string(),
-        ParamId::Fm(F::PitchModSens) => pick(fm_steps::PITCH_MOD_SENS).to_string(),
-        ParamId::Fm(F::Transpose) => signed(pick(fm_steps::TRANSPOSE) - 24),
-        ParamId::FmOp(_, O::Coarse) => pick(fm_steps::COARSE).to_string(),
-        ParamId::FmOp(_, O::Detune) => signed(pick(fm_steps::DETUNE) - 7),
-        ParamId::FmOp(_, O::RateScaling) => pick(fm_steps::RATE_SCALING).to_string(),
-        ParamId::FmOp(_, O::AmpModSens) => pick(fm_steps::AMP_MOD_SENS).to_string(),
-        ParamId::FmOp(_, O::VelSens) => pick(fm_steps::VEL_SENS).to_string(),
-        ParamId::SamplerSlot(_, SlotParam::Tune) => signed(sampler_map::tune_semitones(v)),
-        ParamId::SamplerSlot(_, SlotParam::Fine) => {
+        ParamId::Machine(_, M::Fm(F::Algorithm)) => (pick(fm_steps::ALGORITHM) + 1).to_string(),
+        ParamId::Machine(_, M::Fm(F::Feedback)) => pick(fm_steps::FEEDBACK).to_string(),
+        ParamId::Machine(_, M::Fm(F::PitchModSens)) => pick(fm_steps::PITCH_MOD_SENS).to_string(),
+        ParamId::Machine(_, M::Fm(F::Transpose)) => signed(pick(fm_steps::TRANSPOSE) - 24),
+        ParamId::Machine(_, M::FmOp(_, O::Coarse)) => pick(fm_steps::COARSE).to_string(),
+        ParamId::Machine(_, M::FmOp(_, O::Detune)) => signed(pick(fm_steps::DETUNE) - 7),
+        ParamId::Machine(_, M::FmOp(_, O::RateScaling)) => pick(fm_steps::RATE_SCALING).to_string(),
+        ParamId::Machine(_, M::FmOp(_, O::AmpModSens)) => pick(fm_steps::AMP_MOD_SENS).to_string(),
+        ParamId::Machine(_, M::FmOp(_, O::VelSens)) => pick(fm_steps::VEL_SENS).to_string(),
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Tune)) => {
+            signed(sampler_map::tune_semitones(v))
+        }
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Fine)) => {
             format!("{} c", signed(sampler_map::fine_cents(v) as i32))
         }
-        ParamId::SamplerSlot(_, SlotParam::Attack) => seconds_text(sampler_map::attack_seconds(v)),
-        ParamId::SamplerSlot(_, SlotParam::Decay) => seconds_text(sampler_map::decay_seconds(v)),
-        ParamId::SamplerSlot(_, SlotParam::Release) => {
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Attack)) => {
+            seconds_text(sampler_map::attack_seconds(v))
+        }
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Decay)) => {
+            seconds_text(sampler_map::decay_seconds(v))
+        }
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Release)) => {
             seconds_text(sampler_map::release_seconds(v))
         }
-        ParamId::SamplerSlot(_, SlotParam::Cutoff) => {
+        ParamId::Machine(_, M::SamplerSlot(_, SlotParam::Cutoff)) => {
             format!("{:.0} Hz", sampler_map::cutoff_hz(v))
         }
-        ParamId::Fm(F::Glide) => format!("{:.2} s", patch::glide_seconds(v)),
-        ParamId::Fm(F::Cutoff) => format!("{:.0} Hz", patch::cutoff_hz(v)),
-        ParamId::Fm(
-            F::PitchR1
-            | F::PitchR2
-            | F::PitchR3
-            | F::PitchR4
-            | F::PitchL1
-            | F::PitchL2
-            | F::PitchL3
-            | F::PitchL4
-            | F::LfoSpeed
-            | F::LfoDelay
-            | F::LfoPmd
-            | F::LfoAmd,
-        )
-        | ParamId::FmOp(_, _) => format!("{:.0}", patch::d99(v)),
+        ParamId::Machine(_, M::Fm(F::Glide)) => format!("{:.2} s", patch::glide_seconds(v)),
+        ParamId::Machine(_, M::Fm(F::Cutoff)) => format!("{:.0} Hz", patch::cutoff_hz(v)),
+        ParamId::Machine(
+            _,
+            M::Fm(
+                F::PitchR1
+                | F::PitchR2
+                | F::PitchR3
+                | F::PitchR4
+                | F::PitchL1
+                | F::PitchL2
+                | F::PitchL3
+                | F::PitchL4
+                | F::LfoSpeed
+                | F::LfoDelay
+                | F::LfoPmd
+                | F::LfoAmd,
+            )
+            | M::FmOp(_, _),
+        ) => format!("{:.0}", patch::d99(v)),
         _ => format!("{:.0}%", v * 100.0),
     }
 }
 
 /// "Synth 1 Cutoff", "808 BD Tune", "909 Volume", "Synth 2 Level", "Feedback", "Master Ratio".
 pub fn param_label(id: ParamId) -> String {
-    const KITS: [&str; 2] = ["808", "909"];
-    let pick = |names: &[&'static str], i: u8| names.get(i as usize).copied().unwrap_or("?");
-    match id {
-        ParamId::Synth(s, p) => format!("Synth {} {}", s + 1, p.name()),
-        ParamId::Drum(k, i, p) => format!(
-            "{} {} {}",
-            pick(&KITS, k),
-            pick(&super::drum_panel::INST_NAMES, i),
+    let (uid, p) = match id {
+        ParamId::Fx(p) => return p.name().to_string(),
+        ParamId::Master(p) => return format!("Master {}", p.name()),
+        ParamId::Machine(uid, p) => (uid, p),
+    };
+    let machine = MachineId::from_uid(uid).map_or("?", MachineId::name);
+    match p {
+        MachineParam::Synth(p) => format!("{machine} {}", p.name()),
+        MachineParam::Drum(i, p) => format!(
+            "{machine} {} {}",
+            super::drum_panel::INST_NAMES
+                .get(i as usize)
+                .copied()
+                .unwrap_or("?"),
             p.name()
         ),
-        ParamId::Kit(k, p) => format!("{} {}", pick(&KITS, k), p.name()),
-        ParamId::Channel(c, p) => format!(
-            "{} {}",
-            pick(&super::mixer_panel::CHANNEL_NAMES, c),
-            p.name()
-        ),
-        ParamId::Fx(p) => p.name().to_string(),
-        ParamId::Master(p) => format!("Master {}", p.name()),
-        ParamId::Fm(p) => format!("FM {}", p.name()),
-        ParamId::Sampler(p) => format!("Sampler {}", p.name()),
-        ParamId::FmOp(op, p) => format!("FM OP{} {}", op + 1, p.name()),
-        ParamId::SamplerSlot(s, p) => format!("Sampler Slot {} {}", s + 1, p.name()),
+        MachineParam::Kit(p) => format!("{machine} {}", p.name()),
+        MachineParam::Channel(p) => format!("{machine} {}", p.name()),
+        MachineParam::Fm(p) => format!("{machine} {}", p.name()),
+        MachineParam::Sampler(p) => format!("{machine} {}", p.name()),
+        MachineParam::FmOp(op, p) => format!("{machine} OP{} {}", op + 1, p.name()),
+        MachineParam::SamplerSlot(s, p) => format!("{machine} Slot {} {}", s + 1, p.name()),
     }
 }
 
@@ -237,6 +252,9 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acid_engine::params::{
+        channel_param, drum_param, fm_op_param, fm_param, sampler_param, slot_param, synth_param,
+    };
 
     #[test]
     fn an_edit_without_a_drag_counts_as_a_touch_while_recording() {
@@ -305,7 +323,7 @@ mod tests {
     #[test]
     fn a_notch_at_the_knob_limit_takes_no_other_edits_serial() {
         use crate::document::Document;
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let cmds = app.doc.apply(Edit::Param { id, value: 1.0 }, false);
         app.send(cmds);
@@ -320,7 +338,7 @@ mod tests {
     #[test]
     fn wheel_notches_close_together_are_one_undo_step() {
         use crate::document::Document;
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(id);
         // Notches 100 ms apart, idle frames in between.
@@ -351,7 +369,7 @@ mod tests {
     #[test]
     fn another_edit_during_the_rest_ends_the_scroll_step_first() {
         use crate::document::Document;
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(id);
         frame(&mut app, id, scroll(0.2), 0.0);
@@ -366,7 +384,7 @@ mod tests {
         frame(&mut app, id, reset, 0.1);
         frame(&mut app, id, idle(), 0.15);
         // Another knob's drag is open when the old scroll would have closed.
-        let other = ParamId::Synth(0, SynthParam::Resonance);
+        let other = synth_param(0, SynthParam::Resonance);
         let drag = |v| knob::KnobOutput {
             value: Some(v),
             released: false,
@@ -391,8 +409,8 @@ mod tests {
     #[test]
     fn a_sub_notch_wheel_on_another_knob_ends_the_first_knobs_scroll_step() {
         use crate::document::Document;
-        let a = ParamId::Synth(0, SynthParam::Cutoff);
-        let b = ParamId::Synth(0, SynthParam::Resonance);
+        let a = synth_param(0, SynthParam::Cutoff);
+        let b = synth_param(0, SynthParam::Resonance);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(a);
         frame(&mut app, a, scroll(0.2), 0.0);
@@ -425,52 +443,37 @@ mod tests {
     fn sampler_labels_and_values() {
         use acid_engine::params::SamplerParam;
         assert_eq!(
-            param_label(ParamId::SamplerSlot(2, SlotParam::Tune)),
+            param_label(slot_param(2, SlotParam::Tune)),
             "Sampler Slot 3 Tune"
         );
         assert_eq!(
-            param_label(ParamId::Sampler(SamplerParam::Grit)),
+            param_label(sampler_param(SamplerParam::Grit)),
             "Sampler Grit"
         );
         assert_eq!(
-            discrete_names(ParamId::SamplerSlot(0, SlotParam::Reverse)),
+            discrete_names(slot_param(0, SlotParam::Reverse)),
             &["Off", "On"]
         );
+        assert_eq!(value_text(slot_param(0, SlotParam::Tune), 1.0), "+24");
+        assert_eq!(value_text(slot_param(0, SlotParam::Fine), 0.0), "-50 c");
+        assert_eq!(value_text(slot_param(0, SlotParam::Attack), 0.0), "1 ms");
+        assert_eq!(value_text(slot_param(0, SlotParam::Release), 1.0), "4.00 s");
         assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Tune), 1.0),
-            "+24"
-        );
-        assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Fine), 0.0),
-            "-50 c"
-        );
-        assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Attack), 0.0),
-            "1 ms"
-        );
-        assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Release), 1.0),
-            "4.00 s"
-        );
-        assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Cutoff), 1.0),
+            value_text(slot_param(0, SlotParam::Cutoff), 1.0),
             "18000 Hz"
         );
-        assert_eq!(
-            value_text(ParamId::SamplerSlot(0, SlotParam::Level), 0.5),
-            "50%"
-        );
+        assert_eq!(value_text(slot_param(0, SlotParam::Level), 0.5), "50%");
     }
 
     #[test]
     fn param_labels_name_the_machine() {
         use acid_engine::params::{DrumParam, MasterParam, SynthParam};
         assert_eq!(
-            param_label(ParamId::Synth(0, SynthParam::Cutoff)),
+            param_label(synth_param(0, SynthParam::Cutoff)),
             "Synth 1 Cutoff"
         );
         assert_eq!(
-            param_label(ParamId::Drum(1, 0, DrumParam::Tune)),
+            param_label(drum_param(1, 0, DrumParam::Tune)),
             "909 BD Tune"
         );
         assert_eq!(
@@ -478,14 +481,11 @@ mod tests {
             "Master Ratio"
         );
         assert_eq!(
-            param_label(ParamId::Fm(acid_engine::params::FmParam::Volume)),
+            param_label(fm_param(acid_engine::params::FmParam::Volume)),
             "FM Volume"
         );
         assert_eq!(
-            param_label(ParamId::Channel(
-                5,
-                acid_engine::params::ChannelParam::Level
-            )),
+            param_label(channel_param(5, acid_engine::params::ChannelParam::Level)),
             "Sampler Level"
         );
     }
@@ -494,38 +494,32 @@ mod tests {
     fn fm_labels_switches_and_values() {
         use acid_engine::params::{FmParam, OpParam};
         assert_eq!(
-            param_label(ParamId::FmOp(2, OpParam::Coarse)),
+            param_label(fm_op_param(2, OpParam::Coarse)),
             "FM OP3 Coarse"
         );
-        assert_eq!(param_label(ParamId::Fm(FmParam::Cutoff)), "FM Cutoff");
-        assert_eq!(discrete_names(ParamId::Fm(FmParam::LfoWave)).len(), 6);
+        assert_eq!(param_label(fm_param(FmParam::Cutoff)), "FM Cutoff");
+        assert_eq!(discrete_names(fm_param(FmParam::LfoWave)).len(), 6);
         assert_eq!(
-            discrete_names(ParamId::FmOp(0, OpParam::LeftCurve))[3],
+            discrete_names(fm_op_param(0, OpParam::LeftCurve))[3],
             "+Lin"
         );
-        assert_eq!(
-            discrete_names(ParamId::FmOp(0, OpParam::On)),
-            &["Off", "On"]
-        );
-        assert!(discrete_names(ParamId::Fm(FmParam::Algorithm)).is_empty());
-        assert_eq!(value_text(ParamId::Fm(FmParam::Algorithm), 1.0), "32");
-        assert_eq!(value_text(ParamId::FmOp(0, OpParam::Detune), 0.0), "-7");
-        assert_eq!(value_text(ParamId::Fm(FmParam::Transpose), 1.0), "+24");
-        assert_eq!(value_text(ParamId::FmOp(0, OpParam::R1), 1.0), "99");
-        assert_eq!(value_text(ParamId::FmOp(0, OpParam::L1), 0.5), "50");
-        assert_eq!(value_text(ParamId::Fm(FmParam::Glide), 0.5), "0.50 s");
-        assert_eq!(value_text(ParamId::Fm(FmParam::Glide), 1.0), "2.00 s");
-        assert_eq!(value_text(ParamId::Fm(FmParam::Cutoff), 0.0), "40 Hz");
-        assert_eq!(value_text(ParamId::Fm(FmParam::Cutoff), 1.0), "18000 Hz");
-        assert_eq!(
-            value_text(ParamId::Synth(0, SynthParam::Cutoff), 0.5),
-            "50%"
-        );
+        assert_eq!(discrete_names(fm_op_param(0, OpParam::On)), &["Off", "On"]);
+        assert!(discrete_names(fm_param(FmParam::Algorithm)).is_empty());
+        assert_eq!(value_text(fm_param(FmParam::Algorithm), 1.0), "32");
+        assert_eq!(value_text(fm_op_param(0, OpParam::Detune), 0.0), "-7");
+        assert_eq!(value_text(fm_param(FmParam::Transpose), 1.0), "+24");
+        assert_eq!(value_text(fm_op_param(0, OpParam::R1), 1.0), "99");
+        assert_eq!(value_text(fm_op_param(0, OpParam::L1), 0.5), "50");
+        assert_eq!(value_text(fm_param(FmParam::Glide), 0.5), "0.50 s");
+        assert_eq!(value_text(fm_param(FmParam::Glide), 1.0), "2.00 s");
+        assert_eq!(value_text(fm_param(FmParam::Cutoff), 0.0), "40 Hz");
+        assert_eq!(value_text(fm_param(FmParam::Cutoff), 1.0), "18000 Hz");
+        assert_eq!(value_text(synth_param(0, SynthParam::Cutoff), 0.5), "50%");
     }
 
     #[test]
     fn every_discrete_param_has_a_name_per_step() {
-        for id in ParamId::all() {
+        for &id in acid_engine::project::Project::default().params.keys() {
             let steps = id.info().steps;
             if steps >= 2 {
                 assert_eq!(discrete_names(id).len(), steps as usize, "{id:?}");

@@ -274,14 +274,14 @@ pub fn starter_bank() -> Vec<Dx7Voice> {
 mod tests {
     use super::*;
     use crate::fm::FmSynth;
-    use crate::params::ParamId;
+    use crate::params::{MachineParam, ParamId};
     use crate::testutil::{all_finite, peak};
 
     fn load(s: &mut FmSynth, v: &Dx7Voice) {
         for (id, x) in v.to_params() {
             match id {
-                ParamId::Fm(p) => s.set_param(p, x),
-                ParamId::FmOp(op, p) => s.set_op_param(op as usize, p, x),
+                ParamId::Machine(_, MachineParam::Fm(p)) => s.set_param(p, x),
+                ParamId::Machine(_, MachineParam::FmOp(op, p)) => s.set_op_param(op as usize, p, x),
                 _ => unreachable!(),
             }
         }

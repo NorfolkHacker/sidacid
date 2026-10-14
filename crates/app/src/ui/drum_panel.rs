@@ -3,7 +3,7 @@
 
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
-use acid_engine::params::{DrumParam, KitParam, ParamId};
+use acid_engine::params::{DrumParam, KitParam, drum_param, kit_param};
 use acid_engine::project::{DrumHit, PatternRef};
 use eframe::egui;
 
@@ -46,15 +46,15 @@ impl SidAcidApp {
                             for (p, label) in KNOB_ROWS {
                                 ui.label(label);
                                 for inst in 0..8u8 {
-                                    self.param_knob(ui, ParamId::Drum(kit as u8, inst, p), "");
+                                    self.param_knob(ui, drum_param(kit, inst, p), "");
                                 }
                                 ui.end_row();
                             }
                         });
                     ui.separator();
                     ui.vertical(|ui| {
-                        self.param_knob(ui, ParamId::Kit(kit as u8, KitParam::Volume), "Volume");
-                        self.param_knob(ui, ParamId::Kit(kit as u8, KitParam::Accent), "Accent");
+                        self.param_knob(ui, kit_param(kit, KitParam::Volume), "Volume");
+                        self.param_knob(ui, kit_param(kit, KitParam::Accent), "Accent");
                     });
                 });
                 egui::ScrollArea::horizontal()

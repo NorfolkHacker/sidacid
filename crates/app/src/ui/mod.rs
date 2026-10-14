@@ -773,8 +773,8 @@ mod tests {
 
     #[test]
     fn recording_writes_held_knob_values_as_one_undo_step() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = recording_app();
         app.view.touched_knob = Some(id);
         app.view.live.insert(id, 0.7);
@@ -809,15 +809,15 @@ mod tests {
 
     #[test]
     fn switch_and_tempo_edits_join_the_record_pass_undo_step() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = recording_app();
         let before = app.doc.project.clone();
         app.view.touched_knob = Some(id);
         app.view.live.insert(id, 0.7);
         app.status.song_step = 4;
         app.record_automation();
-        app.edit_switch(ParamId::Synth(0, SynthParam::Wave), 1.0);
+        app.edit_switch(synth_param(0, SynthParam::Wave), 1.0);
         app.edit_transport(Edit::Bpm(150.0));
         app.edit_transport(Edit::Swing(0.3));
         app.status.song_step = 6;
@@ -831,26 +831,23 @@ mod tests {
 
     #[test]
     fn outside_a_record_pass_switches_and_tempo_are_their_own_steps() {
-        use acid_engine::params::{ParamId, SynthParam};
+        use acid_engine::params::{SynthParam, synth_param};
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.edit_switch(ParamId::Synth(0, SynthParam::Wave), 1.0);
+        app.edit_switch(synth_param(0, SynthParam::Wave), 1.0);
         app.edit_transport(Edit::Bpm(150.0));
         app.edit_transport(Edit::Bpm(151.0));
         app.doc.end_gesture();
         app.doc.undo();
         assert_eq!(app.doc.project.bpm, 128.0, "a tempo drag is one step");
-        assert_eq!(
-            app.doc.project.param(ParamId::Synth(0, SynthParam::Wave)),
-            1.0
-        );
+        assert_eq!(app.doc.project.param(synth_param(0, SynthParam::Wave)), 1.0);
         app.doc.undo();
         assert!(!app.doc.can_undo());
     }
 
     #[test]
     fn stopping_a_pass_releases_a_held_knob_once_and_rearming_touches_it_again() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         let held = || knob::KnobOutput {
             value: None,
             released: false,
@@ -886,8 +883,8 @@ mod tests {
 
     #[test]
     fn stop_twice_without_a_status_in_between_returns_to_the_start() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = recording_app();
         app.doc.project.song.loop_range = Some((1, 2));
         app.view.song_cursor = 3;
@@ -974,8 +971,8 @@ mod tests {
 
     #[test]
     fn recording_the_same_value_at_the_same_step_is_not_an_edit() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = recording_app();
         app.view.touched_knob = Some(id);
         app.view.live.insert(id, 0.5);
@@ -991,9 +988,9 @@ mod tests {
 
     #[test]
     fn a_record_write_cut_at_the_song_cap_says_so() {
-        use acid_engine::params::{ParamId, SynthParam};
+        use acid_engine::params::{SynthParam, synth_param};
         use acid_engine::song::MAX_SONG_STEPS;
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut app = recording_app();
         app.view.touched_knob = Some(id);
         app.view.live.insert(id, 0.5);
@@ -1014,8 +1011,8 @@ mod tests {
 
     #[test]
     fn nothing_is_recorded_unless_armed_in_song_mode_and_playing() {
-        use acid_engine::params::{ParamId, SynthParam};
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        use acid_engine::params::{SynthParam, synth_param};
+        let id = synth_param(0, SynthParam::Cutoff);
         for case in 0..3 {
             let mut app = recording_app();
             match case {
@@ -1199,9 +1196,9 @@ mod tests {
 
     #[test]
     fn repeated_param_commands_coalesce() {
-        use acid_engine::params::{ParamId, SynthParam};
+        use acid_engine::params::{SynthParam, synth_param};
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         app.send(vec![
             Command::SetParam(id, 0.1),
             Command::SetParam(id, 0.2),
@@ -1318,9 +1315,9 @@ mod tests {
 
     #[test]
     fn coalescing_stops_at_a_non_param_command() {
-        use acid_engine::params::{ParamId, SynthParam};
+        use acid_engine::params::{SynthParam, synth_param};
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         app.send(vec![
             Command::SetParam(id, 0.1),
             Command::Play,
@@ -1512,7 +1509,7 @@ mod tests {
     #[test]
     fn importing_a_bank_and_loading_voices() {
         use acid_engine::fm::sysex::{bank_sysex, single_sysex};
-        use acid_engine::params::{FmParam, ParamId};
+        use acid_engine::params::{FmParam, fm_param};
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         let bank = fm_voices::starter().to_vec();
         app.import_syx_bytes(&bank_sysex(&bank));
@@ -1523,7 +1520,7 @@ mod tests {
 
         app.import_syx_bytes(&single_sysex(&bank[5]));
         assert_eq!(app.doc.project.fm.voice_name, bank[5].name);
-        let alg = ParamId::Fm(FmParam::Algorithm);
+        let alg = fm_param(FmParam::Algorithm);
         assert!((app.doc.project.param(alg) - bank[5].algorithm as f32 / 31.0).abs() < 1e-6);
 
         let before = app.doc.project.clone();
@@ -1622,7 +1619,7 @@ mod tests {
         app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
         let cmds = app.doc.apply(
             Edit::Param {
-                id: acid_engine::params::ParamId::Fm(acid_engine::params::FmParam::Volume),
+                id: acid_engine::params::fm_param(acid_engine::params::FmParam::Volume),
                 value: 0.3,
             },
             false,
@@ -1676,7 +1673,7 @@ mod tests {
 
     #[test]
     fn loading_samples_picks_modes_zones_and_params() {
-        use acid_engine::params::{ParamId, SlotParam};
+        use acid_engine::params::{SlotParam, slot_param};
         use acid_engine::sampler::slot::SlotMode;
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         app.load_sample_bytes(0, "Break", Some("wav"), &test_wav(2.0));
@@ -1685,16 +1682,9 @@ mod tests {
         assert_eq!(slot.meta.base_key, 24);
         assert!(slot.meta.slices.len() >= 2);
         assert_eq!(slot.meta.original_bpm, 120.0);
+        assert_eq!(app.doc.project.param(slot_param(0, SlotParam::Choke)), 1.0);
         assert_eq!(
-            app.doc
-                .project
-                .param(ParamId::SamplerSlot(0, SlotParam::Choke)),
-            1.0
-        );
-        assert_eq!(
-            app.doc
-                .project
-                .param(ParamId::SamplerSlot(0, SlotParam::TempoLock)),
+            app.doc.project.param(slot_param(0, SlotParam::TempoLock)),
             1.0
         );
         let span = slot.meta.slices.len() as u8;
@@ -1703,12 +1693,7 @@ mod tests {
         let stab = app.doc.project.sampler.slots[1].as_ref().unwrap();
         assert_eq!(stab.meta.mode, SlotMode::Chromatic);
         assert_eq!(stab.meta.base_key, 24 + span, "placed above the break");
-        assert_eq!(
-            app.doc
-                .project
-                .param(ParamId::SamplerSlot(1, SlotParam::Choke)),
-            0.0
-        );
+        assert_eq!(app.doc.project.param(slot_param(1, SlotParam::Choke)), 0.0);
 
         app.doc.undo();
         assert!(

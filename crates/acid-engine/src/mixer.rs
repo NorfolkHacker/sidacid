@@ -3,7 +3,11 @@
 //! master level, optional lo-fi, final clip and NaN guard.
 
 use crate::fx::{Compressor, Delay, Distortion, LoFi, Reverb};
-use crate::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId, exp, on, step_index};
+use crate::machine::MachineId;
+use crate::params::{
+    CHANNELS, ChannelParam, FxParam, GlobalParam, MachineParam, MasterParam, ParamId,
+    channel_param, exp, on, step_index,
+};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 
 pub struct StereoBuf {
@@ -106,7 +110,10 @@ impl Mixer {
             wet: StereoBuf::new(max_block),
             meters: [0.0; CHANNELS + 1],
         };
-        for id in ParamId::all() {
+        let ids = (0..CHANNELS)
+            .flat_map(|c| ChannelParam::ALL.map(|p| channel_param(c, p)))
+            .chain(GlobalParam::all().into_iter().map(ParamId::from));
+        for id in ids {
             m.set_param(id, id.info().default);
         }
         m
@@ -125,7 +132,13 @@ impl Mixer {
 
     pub fn set_param(&mut self, id: ParamId, v: f32) {
         match id {
-            ParamId::Channel(c, p) => self.strips[c as usize].set(p, v),
+            ParamId::Machine(uid, MachineParam::Channel(p)) => {
+                if let Some(strip) =
+                    MachineId::from_uid(uid).and_then(|m| self.strips.get_mut(m.index()))
+                {
+                    strip.set(p, v);
+                }
+            }
             ParamId::Fx(p) => match p {
                 FxParam::DelaySync => self.delay.set_sync(on(v)),
                 FxParam::DelayDivision => self.delay.set_division(step_index(v, 6)),
@@ -286,7 +299,7 @@ mod tests {
     #[test]
     fn mute_silences_channel() {
         let mut m = quiet_mixer();
-        m.set_param(ParamId::Channel(1, ChannelParam::Mute), 1.0);
+        m.set_param(channel_param(1, ChannelParam::Mute), 1.0);
         let (l, _) = run(&mut m, &mut chans_with(1, 0.25));
         assert_eq!(peak(&l), 0.0);
     }
@@ -294,7 +307,7 @@ mod tests {
     #[test]
     fn solo_isolates_channel() {
         let mut m = quiet_mixer();
-        m.set_param(ParamId::Channel(2, ChannelParam::Solo), 1.0);
+        m.set_param(channel_param(2, ChannelParam::Solo), 1.0);
         let (l, _) = run(&mut m, &mut chans_with(0, 0.25));
         assert_eq!(peak(&l), 0.0);
         let (l, _) = run(&mut m, &mut chans_with(2, 0.25));
@@ -304,7 +317,7 @@ mod tests {
     #[test]
     fn hard_left_pan() {
         let mut m = quiet_mixer();
-        m.set_param(ParamId::Channel(0, ChannelParam::Pan), 0.0);
+        m.set_param(channel_param(0, ChannelParam::Pan), 0.0);
         let (l, r) = run(&mut m, &mut chans_with(0, 0.25));
         assert!(peak(&l) > 0.1);
         assert!(peak(&r) < 1e-6);
@@ -313,7 +326,7 @@ mod tests {
     #[test]
     fn delay_send_produces_echo() {
         let mut m = quiet_mixer();
-        m.set_param(ParamId::Channel(0, ChannelParam::DelaySend), 1.0);
+        m.set_param(channel_param(0, ChannelParam::DelaySend), 1.0);
         m.set_param(ParamId::Fx(FxParam::DelaySync), 0.0);
         m.set_param(ParamId::Fx(FxParam::DelayMs), 0.0); // 10 ms = 441 samples
         let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
@@ -326,8 +339,8 @@ mod tests {
     #[test]
     fn output_is_clipped_and_finite() {
         let mut m = quiet_mixer();
-        for c in 0..CHANNELS as u8 {
-            m.set_param(ParamId::Channel(c, ChannelParam::Level), 1.0);
+        for c in 0..CHANNELS {
+            m.set_param(channel_param(c, ChannelParam::Level), 1.0);
         }
         let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
         for c in &mut chans {
@@ -350,7 +363,7 @@ mod tests {
     #[test]
     fn nan_input_is_contained() {
         let mut m = quiet_mixer();
-        m.set_param(ParamId::Channel(0, ChannelParam::ReverbSend), 1.0);
+        m.set_param(channel_param(0, ChannelParam::ReverbSend), 1.0);
         let mut chans = chans_with(0, f32::NAN);
         let (l, _) = run(&mut m, &mut chans);
         assert!(all_finite(&l));

@@ -276,7 +276,7 @@ pub fn duplicate_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'
 #[allow(clippy::field_reassign_with_default)] // tests set one field of a default song
 mod tests {
     use super::*;
-    use crate::params::{MasterParam, SynthParam};
+    use crate::params::{MasterParam, SynthParam, synth_param};
     use crate::project::{DrumPattern, Project, SynthPattern};
 
     fn project_with_lengths(synth0: u8, drum0: u8) -> Project {
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn value_at_holds_the_last_point() {
         let mut song = Song::default();
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         write_automation(&mut song, id, 4, 4, 0.2);
         write_automation(&mut song, id, 10, 10, 0.8);
         let l = lane(&song, id).unwrap();
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn deleting_all_of_a_lanes_points_removes_the_lane() {
         let (mut p, id) = sixteen_step_song(3);
-        let other = ParamId::Synth(0, SynthParam::Cutoff);
+        let other = synth_param(0, SynthParam::Cutoff);
         write_automation(&mut p.song, id, 18, 20, 0.5);
         write_automation(&mut p.song, other, 40, 40, 0.5);
         let snapshot = p.clone();

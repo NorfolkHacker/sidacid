@@ -974,10 +974,10 @@ mod tests {
 
     #[test]
     fn param_lane_emits_param_events() {
-        use crate::params::{ParamId, SynthParam};
+        use crate::params::{SynthParam, synth_param};
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[0] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
@@ -1001,10 +1001,10 @@ mod tests {
 
     #[test]
     fn lane_override_is_restored_on_the_next_step_without_a_value() {
-        use crate::params::{ParamId, SynthParam};
+        use crate::params::{SynthParam, synth_param};
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[0] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
@@ -1022,11 +1022,11 @@ mod tests {
 
     #[test]
     fn lane_param_change_restores_the_old_param() {
-        use crate::params::{ParamId, SynthParam};
+        use crate::params::{SynthParam, synth_param};
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let cutoff = ParamId::Synth(0, SynthParam::Cutoff);
-        let reso = ParamId::Synth(0, SynthParam::Resonance);
+        let cutoff = synth_param(0, SynthParam::Cutoff);
+        let reso = synth_param(0, SynthParam::Resonance);
         f.synths[0][0].param_lane = Some(ParamLane {
             param: cutoff,
             values: vec![Some(0.8); 64],
@@ -1467,10 +1467,10 @@ mod tests {
 
     #[test]
     fn a_track_turning_silent_restores_its_lane_param() {
-        use crate::params::{ParamId, SynthParam};
+        use crate::params::{SynthParam, synth_param};
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = ParamId::Synth(0, SynthParam::Cutoff);
+        let id = synth_param(0, SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[15] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });

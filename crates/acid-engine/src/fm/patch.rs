@@ -2,7 +2,8 @@
 //! units, plus each operator's frequency.
 
 use super::OPS;
-use crate::params::{FmParam, OpParam, ParamId, exp, fm_steps, on, step_index};
+use crate::machine::MachineType;
+use crate::params::{FmParam, MachineParam, OpParam, exp, fm_steps, on, step_index};
 
 /// A 0..1 knob as a whole DX7 0..99 value, so playback matches the
 /// tooltip and the exported voice.
@@ -237,10 +238,10 @@ impl Default for FmPatch {
     /// Every FM param at its default: the DX7 INIT VOICE.
     fn default() -> Self {
         let mut p = BLANK;
-        for id in ParamId::all() {
+        for id in MachineParam::all_for(MachineType::Fm) {
             match id {
-                ParamId::Fm(f) => p.set(f, id.info().default),
-                ParamId::FmOp(op, o) => p.set_op(op as usize, o, id.info().default),
+                MachineParam::Fm(f) => p.set(f, id.info().default),
+                MachineParam::FmOp(op, o) => p.set_op(op as usize, o, id.info().default),
                 _ => {}
             }
         }

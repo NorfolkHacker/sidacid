@@ -8,7 +8,7 @@ use super::sampler_ui::{
 use super::{SidAcidApp, theme};
 use acid_engine::host::Command;
 use acid_engine::machine::MachineId;
-use acid_engine::params::{ParamId, SamplerParam, SlotParam};
+use acid_engine::params::{SamplerParam, SlotParam, sampler_param, slot_param};
 use acid_engine::project::PatternRef;
 use acid_engine::sampler::SLOTS;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, mono_mix};
@@ -43,8 +43,8 @@ impl SidAcidApp {
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    self.param_knob(ui, ParamId::Sampler(SamplerParam::Volume), "Volume");
-                    self.param_knob(ui, ParamId::Sampler(SamplerParam::Grit), "Grit");
+                    self.param_knob(ui, sampler_param(SamplerParam::Volume), "Volume");
+                    self.param_knob(ui, sampler_param(SamplerParam::Grit), "Grit");
                 });
                 self.sampler_pads(ui);
                 self.sampler_slot_row(ui);
@@ -52,7 +52,7 @@ impl SidAcidApp {
                 let s = self.view.sampler_slot.min(SLOTS - 1) as u8;
                 ui.horizontal_wrapped(|ui| {
                     for (p, label) in SLOT_KNOBS {
-                        self.param_knob(ui, ParamId::SamplerSlot(s, p), label);
+                        self.param_knob(ui, slot_param(s, p), label);
                     }
                 });
                 self.note_pattern_row(ui, m);

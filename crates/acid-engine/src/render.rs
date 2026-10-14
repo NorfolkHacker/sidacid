@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn song_export_keeps_the_fm_release_tail() {
-        use crate::params::{OpParam, ParamId};
+        use crate::params::{OpParam, fm_op_param};
         let mut p = Project {
             bpm: 120.0, // 1 bar = 2 s
             ..Project::default()
@@ -207,7 +207,7 @@ mod tests {
             vel: 120,
         });
         // OP1 releases slowly: the note rings past the song's end.
-        p.params.insert(ParamId::FmOp(0, OpParam::R4), 0.3);
+        p.params.insert(fm_op_param(0, OpParam::R4), 0.3);
         let mut bar = crate::project::Bar::default();
         bar.patterns[crate::machine::MachineId::Fm.index()] = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];

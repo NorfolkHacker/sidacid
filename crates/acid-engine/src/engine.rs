@@ -7,7 +7,12 @@ use crate::drums::{DrumKit, KitKind};
 use crate::fm::FmSynth;
 use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
 use crate::mixer::{Mixer, StereoBuf};
-use crate::params::{CHANNELS, PARAM_COUNT, ParamId};
+use crate::params::{
+    CHANNELS, ChannelParam, DRUM_INSTRUMENTS, DrumParam, FM_OPS, FmParam, FxParam, KITS, KitParam,
+    MachineParam, MasterParam, OpParam, ParamId, SAMPLER_SLOTS, SYNTHS, SamplerParam, SlotParam,
+    SynthParam, channel_param, drum_param, fm_op_param, fm_param, kit_param, sampler_param,
+    slot_param, synth_param,
+};
 use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
@@ -22,7 +27,90 @@ use std::sync::Arc;
 const MAX_TICKS_PER_POSITION: usize = 64;
 /// Sequencer event buffer size: never grows on the audio thread. Room for
 /// every param, plus per note machine 128 releases and MAX_NOTES starts.
-const EVENT_RESERVE: usize = 64 + 2 * PARAM_COUNT + NOTE_MACHINES * (128 + MAX_NOTES);
+const EVENT_RESERVE: usize = 64 + 2 * FLAT_COUNT + NOTE_MACHINES * (128 + MAX_NOTES);
+
+/// Interim (Tasks 3–4): number of params in the fixed six-machine layout.
+const FLAT_COUNT: usize = 589;
+
+// Old flat-table block bases: synths, kits, channels, fx, master, fm,
+// sampler, fm ops, sampler slots.
+const SYNTH_N: usize = SynthParam::ALL.len();
+const DRUM_N: usize = DrumParam::ALL.len();
+const PER_KIT: usize = DRUM_INSTRUMENTS * DRUM_N + KitParam::ALL.len();
+const KIT_BASE: usize = SYNTHS * SYNTH_N;
+const CHANNEL_BASE: usize = KIT_BASE + KITS * PER_KIT;
+const FX_BASE: usize = CHANNEL_BASE + CHANNELS * ChannelParam::ALL.len();
+const MASTER_BASE: usize = FX_BASE + FxParam::ALL.len();
+const FM_BASE: usize = MASTER_BASE + MasterParam::ALL.len();
+const SAMPLER_BASE: usize = FM_BASE + FmParam::ALL.len();
+const FM_OP_BASE: usize = SAMPLER_BASE + SamplerParam::ALL.len();
+const SLOT_BASE: usize = FM_OP_BASE + FM_OPS * OpParam::ALL.len();
+
+/// Interim (Tasks 3–4): flat position of a param in the fixed six-machine
+/// layout — the same order the old `ParamId::all()` used, so knob storage
+/// and automation behave exactly as before. Replaced by per-slot storage in Task 5.
+fn flat_index(id: ParamId) -> Option<usize> {
+    let (uid, p) = match id {
+        ParamId::Fx(p) => return Some(FX_BASE + p as usize),
+        ParamId::Master(p) => return Some(MASTER_BASE + p as usize),
+        ParamId::Machine(uid, p) => (uid, p),
+    };
+    let m = MachineId::from_uid(uid)?;
+    if !p.fits(m.machine_type()) {
+        return None;
+    }
+    let machine = m.index();
+    Some(match (p, m.kind()) {
+        (MachineParam::Channel(p), _) => {
+            CHANNEL_BASE + machine * ChannelParam::ALL.len() + p as usize
+        }
+        (MachineParam::Synth(p), MachineKind::Synth(s)) => s * SYNTH_N + p as usize,
+        (MachineParam::Drum(i, p), MachineKind::Drum(k)) => {
+            KIT_BASE + k * PER_KIT + i as usize * DRUM_N + p as usize
+        }
+        (MachineParam::Kit(p), MachineKind::Drum(k)) => {
+            KIT_BASE + k * PER_KIT + DRUM_INSTRUMENTS * DRUM_N + p as usize
+        }
+        (MachineParam::Fm(p), _) => FM_BASE + p as usize,
+        (MachineParam::Sampler(p), _) => SAMPLER_BASE + p as usize,
+        (MachineParam::FmOp(op, p), _) => {
+            FM_OP_BASE + op as usize * OpParam::ALL.len() + p as usize
+        }
+        (MachineParam::SamplerSlot(s, p), _) => {
+            SLOT_BASE + s as usize * SlotParam::ALL.len() + p as usize
+        }
+        _ => return None,
+    })
+}
+
+/// Interim (Tasks 3–4): every param of the fixed six-machine layout in
+/// `flat_index` order (the old `ParamId::all()` order).
+fn flat_ids() -> Vec<ParamId> {
+    let mut v = Vec::with_capacity(FLAT_COUNT);
+    for s in 0..SYNTHS {
+        v.extend(SynthParam::ALL.map(|p| synth_param(s, p)));
+    }
+    for k in 0..KITS {
+        for i in 0..DRUM_INSTRUMENTS as u8 {
+            v.extend(DrumParam::ALL.map(|p| drum_param(k, i, p)));
+        }
+        v.extend(KitParam::ALL.map(|p| kit_param(k, p)));
+    }
+    for c in 0..CHANNELS {
+        v.extend(ChannelParam::ALL.map(|p| channel_param(c, p)));
+    }
+    v.extend(FxParam::ALL.map(ParamId::Fx));
+    v.extend(MasterParam::ALL.map(ParamId::Master));
+    v.extend(FmParam::ALL.map(fm_param));
+    v.extend(SamplerParam::ALL.map(sampler_param));
+    for op in 0..FM_OPS as u8 {
+        v.extend(OpParam::ALL.map(|p| fm_op_param(op, p)));
+    }
+    for s in 0..SAMPLER_SLOTS as u8 {
+        v.extend(SlotParam::ALL.map(|p| slot_param(s, p)));
+    }
+    v
+}
 
 pub struct Engine {
     sample_rate: f32,
@@ -38,14 +126,14 @@ pub struct Engine {
     note_patterns: [Vec<NotePattern>; NOTE_MACHINES],
     chans: [StereoBuf; CHANNELS],
     events: Vec<SeqEvent>,
-    /// Knob values set through `set_param`, indexed by `ParamId::index`.
+    /// Knob values set through `set_param`, indexed by `flat_index`.
     knobs: Vec<f32>,
     /// Effective value per param: the knob, or song automation / live
     /// record value. Lane restores return here.
     base: Vec<f32>,
     /// Params held by the user while recording: automation skips them.
     touched: Vec<bool>,
-    /// `ParamId::all()`, so knobs can be re-applied without allocating.
+    /// `flat_ids()`, so knobs can be re-applied without allocating.
     ids: Vec<ParamId>,
     guard_fired: bool,
     song: crate::project::Song,
@@ -80,10 +168,10 @@ impl Engine {
             note_patterns: std::array::from_fn(|_| vec![NotePattern::default(); PATTERNS]),
             chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
             events: Vec::with_capacity(EVENT_RESERVE),
-            knobs: ParamId::all().iter().map(|id| id.info().default).collect(),
-            base: ParamId::all().iter().map(|id| id.info().default).collect(),
-            touched: vec![false; PARAM_COUNT],
-            ids: ParamId::all(),
+            knobs: flat_ids().iter().map(|id| id.info().default).collect(),
+            base: flat_ids().iter().map(|id| id.info().default).collect(),
+            touched: vec![false; FLAT_COUNT],
+            ids: flat_ids(),
             guard_fired: false,
             song: crate::project::Song::default(),
             ended_by_song: false,
@@ -98,7 +186,7 @@ impl Engine {
             self.drum_patterns[s] = p.drums[s].patterns.clone();
         }
         self.note_patterns = [p.fm.patterns.clone(), p.sampler.patterns.clone()];
-        for id in ParamId::all() {
+        for id in flat_ids() {
             self.set_param(id, p.param(id));
         }
         for i in 0..SLOTS {
@@ -119,7 +207,7 @@ impl Engine {
     /// Out-of-range ids and non-finite values are ignored; values are
     /// clamped to 0..=1. The value is remembered as the knob position.
     pub fn set_param(&mut self, id: ParamId, v: f32) {
-        let Some(i) = id.index() else { return };
+        let Some(i) = flat_index(id) else { return };
         if !v.is_finite() {
             return;
         }
@@ -131,31 +219,39 @@ impl Engine {
 
     /// Applies a value without remembering it (param-lane overrides).
     fn apply_param(&mut self, id: ParamId, v: f32) {
-        if !id.is_valid() || !v.is_finite() {
+        if flat_index(id).is_none() || !v.is_finite() {
             return;
         }
         let v = v.clamp(0.0, 1.0);
-        match id {
-            ParamId::Synth(s, p) => self.synths[s as usize].set_param(p, v),
-            ParamId::Drum(k, i, p) => self.kits[k as usize].set_param(i as usize, p, v),
-            ParamId::Kit(k, p) => self.kits[k as usize].set_kit_param(p, v),
-            ParamId::Fm(p) => self.fm.set_param(p, v),
-            ParamId::FmOp(op, p) => self.fm.set_op_param(op as usize, p, v),
-            ParamId::Sampler(p) => self.sampler.set_param(p, v),
-            ParamId::SamplerSlot(s, p) => self.sampler.set_slot_param(s as usize, p, v),
+        let ParamId::Machine(uid, p) = id else {
+            return self.mixer.set_param(id, v);
+        };
+        let Some(kind) = MachineId::from_uid(uid).map(MachineId::kind) else {
+            return;
+        };
+        match (p, kind) {
+            (MachineParam::Synth(p), MachineKind::Synth(s)) => self.synths[s].set_param(p, v),
+            (MachineParam::Drum(i, p), MachineKind::Drum(k)) => {
+                self.kits[k].set_param(i as usize, p, v)
+            }
+            (MachineParam::Kit(p), MachineKind::Drum(k)) => self.kits[k].set_kit_param(p, v),
+            (MachineParam::Fm(p), _) => self.fm.set_param(p, v),
+            (MachineParam::FmOp(op, p), _) => self.fm.set_op_param(op as usize, p, v),
+            (MachineParam::Sampler(p), _) => self.sampler.set_param(p, v),
+            (MachineParam::SamplerSlot(s, p), _) => self.sampler.set_slot_param(s as usize, p, v),
             _ => self.mixer.set_param(id, v),
         }
     }
 
     fn restore_param(&mut self, id: ParamId) {
-        if let Some(i) = id.index() {
+        if let Some(i) = flat_index(id) {
             let v = self.base[i];
             self.apply_param(id, v);
         }
     }
 
     fn restore_all_knobs(&mut self) {
-        for i in 0..PARAM_COUNT {
+        for i in 0..FLAT_COUNT {
             let (id, v) = (self.ids[i], self.knobs[i]);
             self.apply_param(id, v);
         }
@@ -257,7 +353,7 @@ impl Engine {
 
     /// Plays a value without changing the saved knob (record mode).
     pub fn set_param_live(&mut self, id: ParamId, v: f32) {
-        let Some(i) = id.index() else { return };
+        let Some(i) = flat_index(id) else { return };
         if !v.is_finite() {
             return;
         }
@@ -268,13 +364,13 @@ impl Engine {
 
     /// While touched, song automation for `id` is not applied.
     pub fn touch(&mut self, id: ParamId, on: bool) {
-        if let Some(i) = id.index() {
+        if let Some(i) = flat_index(id) {
             self.touched[i] = on;
         }
     }
 
     fn apply_automation(&mut self, id: ParamId, v: f32) {
-        let Some(i) = id.index() else { return };
+        let Some(i) = flat_index(id) else { return };
         if self.touched[i] || !v.is_finite() {
             return;
         }
@@ -284,7 +380,7 @@ impl Engine {
 
     /// No automation applies here yet: back to the knob (unless held).
     fn reset_automation(&mut self, id: ParamId) {
-        let Some(i) = id.index() else { return };
+        let Some(i) = flat_index(id) else { return };
         if self.touched[i] {
             return;
         }
@@ -301,8 +397,11 @@ impl Engine {
             .flat_map(|b| b.patterns)
             .flatten()
             .all(|r| (r.0 as usize) < PATTERNS);
-        let lanes_ok = song.automation.len() <= PARAM_COUNT
-            && song.automation.iter().all(|l| l.param.is_valid());
+        let lanes_ok = song.automation.len() <= FLAT_COUNT
+            && song
+                .automation
+                .iter()
+                .all(|l| flat_index(l.param).is_some());
         if song.bars.len() > MAX_BARS || !refs_ok || !lanes_ok {
             return false;
         }
@@ -334,19 +433,19 @@ impl Engine {
     /// The value a param currently plays at (knob, automation or live).
     #[cfg(test)]
     pub(crate) fn live_param(&self, id: ParamId) -> f32 {
-        id.index().map_or(0.0, |i| self.base[i])
+        flat_index(id).map_or(0.0, |i| self.base[i])
     }
 
     /// The saved knob position of a param.
     #[cfg(test)]
     pub(crate) fn knob(&self, id: ParamId) -> f32 {
-        id.index().map_or(0.0, |i| self.knobs[i])
+        flat_index(id).map_or(0.0, |i| self.knobs[i])
     }
 
     /// Whether a knob is held against automation.
     #[cfg(test)]
     pub(crate) fn is_touched(&self, id: ParamId) -> bool {
-        id.index().is_some_and(|i| self.touched[i])
+        flat_index(id).is_some_and(|i| self.touched[i])
     }
 
     #[cfg(test)]
@@ -569,8 +668,22 @@ impl Engine {
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default pattern
 mod tests {
     use super::*;
-    use crate::params::{ChannelParam, DrumParam, KitParam, MasterParam, SynthParam};
     use crate::testutil::{all_finite, peak, rms};
+
+    #[test]
+    fn flat_ids_and_flat_index_round_trip() {
+        let ids = flat_ids();
+        assert_eq!(ids.len(), FLAT_COUNT);
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(flat_index(id), Some(i), "{id:?}");
+        }
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), FLAT_COUNT);
+        assert_eq!(flat_index(synth_param(2, SynthParam::Tune)), None);
+        assert_eq!(flat_index(drum_param(0, 8, DrumParam::Tune)), None);
+        assert_eq!(flat_index(fm_op_param(6, OpParam::On)), None);
+        assert_eq!(flat_index(channel_param(6, ChannelParam::Level)), None);
+    }
 
     const SR: f32 = 44_100.0;
 
@@ -648,10 +761,8 @@ mod tests {
         meta.loop_start = 10_000;
         meta.loop_end = 30_000;
         p.sampler.slots[0] = Some(tone_slot(meta));
-        p.params.insert(
-            ParamId::SamplerSlot(0, crate::params::SlotParam::Release),
-            1.0,
-        );
+        p.params
+            .insert(slot_param(0, crate::params::SlotParam::Release), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.note_on(5, 60, 100);
         render(&mut e, 0.1);
@@ -735,7 +846,7 @@ mod tests {
         use crate::params::OpParam;
         let mut p = Project::default();
         // OP1's L4 at full: a released note keeps sounding.
-        p.params.insert(ParamId::FmOp(0, OpParam::L4), 1.0);
+        p.params.insert(fm_op_param(0, OpParam::L4), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         e.note_on(4, 60, 100);
@@ -812,7 +923,7 @@ mod tests {
             pitch: 60,
             vel: 120,
         });
-        p.params.insert(ParamId::Fm(FmParam::Volume), 0.0);
+        p.params.insert(fm_param(FmParam::Volume), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -871,8 +982,8 @@ mod tests {
     fn stop_closes_synth_gates_and_tails_die() {
         let mut e = demo_engine();
         for c in 0..4 {
-            e.set_param(ParamId::Channel(c, ChannelParam::DelaySend), 0.0);
-            e.set_param(ParamId::Channel(c, ChannelParam::ReverbSend), 0.0);
+            e.set_param(channel_param(c, ChannelParam::DelaySend), 0.0);
+            e.set_param(channel_param(c, ChannelParam::ReverbSend), 0.0);
         }
         e.play();
         render(&mut e, 1.0);
@@ -927,10 +1038,10 @@ mod tests {
         e.play();
         e.select_pattern(0, 200);
         e.select_pattern(9, 0);
-        e.set_param(ParamId::Drum(0, 9, DrumParam::Tune), 0.5);
-        e.set_param(ParamId::Synth(7, SynthParam::Cutoff), 0.5);
-        e.set_param(ParamId::Channel(6, ChannelParam::Level), 0.5);
-        e.set_param(ParamId::Kit(2, KitParam::Volume), 0.5);
+        e.set_param(drum_param(0, 9, DrumParam::Tune), 0.5);
+        e.set_param(synth_param(7, SynthParam::Cutoff), 0.5);
+        e.set_param(channel_param(6, ChannelParam::Level), 0.5);
+        e.set_param(kit_param(2, KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
         assert_eq!(e.current_patterns(), [0; MACHINES]);
@@ -968,12 +1079,12 @@ mod tests {
     #[test]
     fn non_finite_param_is_dropped_and_values_clamped() {
         let mut e = demo_engine();
-        e.set_param(ParamId::Synth(0, SynthParam::Cutoff), f32::NAN);
-        e.set_param(ParamId::Channel(0, ChannelParam::Level), 50.0);
+        e.set_param(synth_param(0, SynthParam::Cutoff), f32::NAN);
+        e.set_param(channel_param(0, ChannelParam::Level), 50.0);
         e.play();
         let (l, _) = render(&mut e, 0.1);
         assert!(all_finite(&l));
-        e.set_param(ParamId::Synth(0, SynthParam::Cutoff), 0.5);
+        e.set_param(synth_param(0, SynthParam::Cutoff), 0.5);
         let (l, _) = render(&mut e, 3.0);
         assert!(all_finite(&l) && peak(&l) > 0.01);
         assert!(peak(&l) <= 1.0);
@@ -1324,7 +1435,7 @@ mod tests {
             pitch: 60,
             vel: 120,
         });
-        p.params.insert(ParamId::FmOp(0, OpParam::Level), 0.0);
+        p.params.insert(fm_op_param(0, OpParam::Level), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -1345,9 +1456,9 @@ mod tests {
             pitch: 57,
             vel: 120,
         });
-        p.params.insert(ParamId::FmOp(1, OpParam::Level), 0.9);
+        p.params.insert(fm_op_param(1, OpParam::Level), 0.9);
         let mut a = Engine::from_project(SR, &p);
-        p.params.insert(ParamId::Fm(FmParam::Algorithm), 1.0);
+        p.params.insert(fm_param(FmParam::Algorithm), 1.0);
         let mut b = Engine::from_project(SR, &p);
         a.play();
         b.play();
@@ -1403,8 +1514,7 @@ mod tests {
     #[test]
     fn fm_mono_play_keeps_the_audition_and_forgets_pattern_keys() {
         let mut p = tone_slot_project();
-        p.params
-            .insert(ParamId::Fm(crate::params::FmParam::Mono), 1.0);
+        p.params.insert(fm_param(crate::params::FmParam::Mono), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.poly_on(4, 48, 100, false);
         e.note_on(4, 72, 100);
@@ -1423,7 +1533,7 @@ mod tests {
         use crate::params::OpParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.params.insert(ParamId::FmOp(0, OpParam::L4), 1.0);
+        p.params.insert(fm_op_param(0, OpParam::L4), 1.0);
         p.fm.patterns[0].notes.push(Note {
             start: 0,
             len: 8,

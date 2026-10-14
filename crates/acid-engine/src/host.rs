@@ -563,9 +563,9 @@ mod tests {
 
     #[test]
     fn each_command_reaches_the_engine() {
-        use crate::params::{MasterParam, SynthParam};
+        use crate::params::{MasterParam, SynthParam, synth_param};
         let (mut host, mut tx, mut rx) = host_with_demo();
-        let cutoff = ParamId::Synth(0, SynthParam::Cutoff);
+        let cutoff = synth_param(0, SynthParam::Cutoff);
         let level = ParamId::Master(MasterParam::Level);
 
         tx.push(Command::SetParam(cutoff, 0.125)).unwrap();

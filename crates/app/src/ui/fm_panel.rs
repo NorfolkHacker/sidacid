@@ -7,7 +7,7 @@ use super::fm_voices::{FmBrowser, starter};
 use super::{SidAcidApp, theme};
 use acid_engine::fm::algorithms::ALGORITHMS;
 use acid_engine::machine::MachineId;
-use acid_engine::params::{FmParam, OpParam, ParamId, fm_steps, step_index};
+use acid_engine::params::{FmParam, OpParam, ParamId, fm_op_param, fm_param, fm_steps, step_index};
 use acid_engine::project::PatternRef;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
@@ -100,7 +100,7 @@ impl SidAcidApp {
                     self.alg_diagram(ui);
                     ui.horizontal_wrapped(|ui| {
                         for (p, label) in TOP {
-                            self.param_knob(ui, ParamId::Fm(p), label);
+                            self.param_knob(ui, fm_param(p), label);
                         }
                     });
                 });
@@ -112,12 +112,12 @@ impl SidAcidApp {
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
-                                self.param_knob(ui, ParamId::Fm(*p), label);
+                                self.param_knob(ui, fm_param(*p), label);
                             }
                         });
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in FX {
-                                self.param_knob(ui, ParamId::Fm(p), label);
+                                self.param_knob(ui, fm_param(p), label);
                             }
                         });
                     });
@@ -133,7 +133,7 @@ impl SidAcidApp {
 
     /// "×1.00" for a ratio operator, "100Hz" for a fixed one.
     fn op_freq_text(&self, op: usize) -> String {
-        let id = |p| ParamId::FmOp(op as u8, p);
+        let id = |p| fm_op_param(op as u8, p);
         let coarse = step_index(self.fm_value(id(OpParam::Coarse)), fm_steps::COARSE as u8) as f32;
         let fine = self.fm_value(id(OpParam::Fine)) * 99.0;
         if self.fm_value(id(OpParam::FixedFreq)) >= 0.5 {
@@ -147,7 +147,7 @@ impl SidAcidApp {
 
     fn alg_diagram(&mut self, ui: &mut egui::Ui) {
         let index = step_index(
-            self.fm_value(ParamId::Fm(FmParam::Algorithm)),
+            self.fm_value(fm_param(FmParam::Algorithm)),
             fm_steps::ALGORITHM as u8,
         );
         let alg = ALGORITHMS[index];
@@ -250,11 +250,11 @@ impl SidAcidApp {
         let op = self.view.fm_op.min(5) as u8;
         ui.horizontal_wrapped(|ui| {
             for (p, label) in OP_KNOBS {
-                self.param_knob(ui, ParamId::FmOp(op, p), label);
+                self.param_knob(ui, fm_op_param(op, p), label);
             }
         });
         ui.horizontal_wrapped(|ui| {
-            let v = |p| self.fm_value(ParamId::FmOp(op, p)) * 99.0;
+            let v = |p| self.fm_value(fm_op_param(op, p)) * 99.0;
             let rates = [
                 v(OpParam::R1),
                 v(OpParam::R2),
@@ -269,7 +269,7 @@ impl SidAcidApp {
             ];
             env_sketch(ui, rates, levels);
             for (p, label) in OP_ENV {
-                self.param_knob(ui, ParamId::FmOp(op, p), label);
+                self.param_knob(ui, fm_op_param(op, p), label);
             }
         });
     }

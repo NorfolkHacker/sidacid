@@ -2,7 +2,7 @@
 //! and Decay, accent (level + short decay + the "accent wow" sweep that
 //! builds over consecutive accents), slide, and 3-voice detuned unison.
 
-use crate::params::{ParamId, SynthParam, exp, lin, on, step_index};
+use crate::params::{MachineParam, SynthParam, exp, lin, on, step_index};
 use sid_core::{FILTER_BP, FILTER_HP, FILTER_LP, SidChip, SyncMode, Waveform};
 
 /// Pitch, cutoff and envelope update every this many samples.
@@ -76,7 +76,7 @@ impl BassSynth {
             control_counter: 0,
         };
         for p in SynthParam::ALL {
-            s.set_param(p, ParamId::Synth(0, p).info().default);
+            s.set_param(p, MachineParam::Synth(p).info().default);
         }
         s.apply_voice_setup();
         s

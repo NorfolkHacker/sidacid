@@ -1,6 +1,6 @@
 //! A slot's knobs in real units.
 
-use crate::params::{ParamId, SlotParam, on, sampler_map};
+use crate::params::{MachineParam, SlotParam, on, sampler_map};
 use std::f32::consts::{FRAC_PI_2, SQRT_2};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,7 +71,7 @@ impl Default for SlotSettings {
             tempo_lock: false,
         };
         for p in SlotParam::ALL {
-            s.set(p, ParamId::SamplerSlot(0, p).info().default);
+            s.set(p, MachineParam::SamplerSlot(0, p).info().default);
         }
         s
     }
