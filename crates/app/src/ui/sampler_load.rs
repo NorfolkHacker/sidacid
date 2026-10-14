@@ -162,7 +162,7 @@ impl SidAcidApp {
             false,
         );
         self.send(cmds);
-        self.view.sampler_slot = slot;
+        self.view.panel(uid).sampler_slot = slot;
         if decoded.truncated {
             self.view.message = Some(format!(
                 "Loaded \"{short}\", but the file ends early: only the audio that could be read was kept."

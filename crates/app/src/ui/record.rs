@@ -137,7 +137,7 @@ impl SidAcidApp {
 
     /// While recording, a pad click also writes the pattern into the song.
     pub(crate) fn record_pattern_change(&mut self, uid: MachineUid, slot: u8) {
-        if !self.recording() {
+        if !self.recording() || self.doc.project.machine(uid).is_none() {
             return;
         }
         let bar = self.status.song_bar as usize;

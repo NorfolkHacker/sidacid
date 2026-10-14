@@ -212,7 +212,7 @@ impl SidAcidApp {
                     theme::KNOB_BODY
                 },
             );
-            if op == self.view.fm_op {
+            if op == self.view.panel(uid).fm_op {
                 painter.rect_stroke(
                     r,
                     2.0,
@@ -239,7 +239,7 @@ impl SidAcidApp {
             }
         }
         if let Some(op) = clicked {
-            self.view.fm_op = op;
+            self.view.panel(uid).fm_op = op;
         }
     }
 
@@ -248,12 +248,15 @@ impl SidAcidApp {
         ui.horizontal(|ui| {
             for op in 0..6 {
                 let text = format!("OP{} {}", op + 1, self.op_freq_text(uid, op));
-                if ui.selectable_label(self.view.fm_op == op, text).clicked() {
-                    self.view.fm_op = op;
+                if ui
+                    .selectable_label(self.view.panel(uid).fm_op == op, text)
+                    .clicked()
+                {
+                    self.view.panel(uid).fm_op = op;
                 }
             }
         });
-        let op = self.view.fm_op.min(5) as u8;
+        let op = self.view.panel(uid).fm_op.min(5) as u8;
         ui.horizontal_wrapped(|ui| {
             for (p, label) in OP_KNOBS {
                 self.param_knob(ui, id(op, p), label);
@@ -285,25 +288,28 @@ impl SidAcidApp {
         // Undoing an import leaves no bank: show the starter list, so the
         // tab buttons and the grid agree.
         if !has_bank {
-            self.view.fm_browser = FmBrowser::Starter;
+            self.view.panel(uid).fm_browser = FmBrowser::Starter;
         }
         ui.horizontal(|ui| {
             ui.label("Voices");
             if ui
-                .selectable_label(self.view.fm_browser == FmBrowser::Starter, "Starter")
+                .selectable_label(
+                    self.view.panel(uid).fm_browser == FmBrowser::Starter,
+                    "Starter",
+                )
                 .clicked()
             {
-                self.view.fm_browser = FmBrowser::Starter;
+                self.view.panel(uid).fm_browser = FmBrowser::Starter;
             }
             if ui
                 .add_enabled(
                     has_bank,
                     egui::Button::new("Imported")
-                        .selected(self.view.fm_browser == FmBrowser::Imported),
+                        .selected(self.view.panel(uid).fm_browser == FmBrowser::Imported),
                 )
                 .clicked()
             {
-                self.view.fm_browser = FmBrowser::Imported;
+                self.view.panel(uid).fm_browser = FmBrowser::Imported;
             }
             if ui
                 .button("Import .syx…")
@@ -313,12 +319,12 @@ impl SidAcidApp {
                 self.import_syx(uid);
             }
         });
-        let names: Vec<String> = match (self.view.fm_browser, &self.fm_of(uid).bank) {
+        let names: Vec<String> = match (self.view.panel(uid).fm_browser, &self.fm_of(uid).bank) {
             (FmBrowser::Imported, Some(bank)) => bank.iter().map(|v| v.name.clone()).collect(),
             _ => starter().iter().map(|v| v.name.clone()).collect(),
         };
         // Decision #11: the loaded voice is highlighted by where it was loaded
-        // from, `(browser, index)` in `view.fm_voice_src`, not by name (duplicate
+        // from, `(browser, index)` in the panel's `fm_voice_src`, not by name (duplicate
         // names in a bank all lit up). The source is KEPT across knob edits until
         // the next load (a tweaked voice is still "that voice, edited") and is
         // cleared on a document load, a single-voice import, an undo or redo of
@@ -326,8 +332,8 @@ impl SidAcidApp {
         // a backstop it is trusted only while the project's voice name still
         // equals the source entry's name.
         let highlighted_at = highlighted_voice(
-            self.view.fm_voice_src,
-            self.view.fm_browser,
+            self.view.panel(uid).fm_voice_src,
+            self.view.panel(uid).fm_browser,
             &names,
             &self.fm_of(uid).voice_name,
         );
@@ -346,12 +352,13 @@ impl SidAcidApp {
                 }
             });
         if let Some(i) = picked {
-            let voice = match (self.view.fm_browser, &self.fm_of(uid).bank) {
+            let voice = match (self.view.panel(uid).fm_browser, &self.fm_of(uid).bank) {
                 (FmBrowser::Imported, Some(bank)) => bank[i].clone(),
                 _ => starter()[i].clone(),
             };
             self.load_fm_voice(uid, &voice);
-            self.view.fm_voice_src = Some((self.view.fm_browser, i));
+            let panel = self.view.panel(uid);
+            panel.fm_voice_src = Some((panel.fm_browser, i));
         }
     }
 }

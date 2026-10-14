@@ -18,6 +18,7 @@ mod perf;
 mod pianoroll;
 mod poly_edit;
 mod polyroll;
+mod rack_sync;
 mod record;
 mod roll_edit;
 mod sampler_load;
@@ -66,6 +67,18 @@ pub struct PanelState {
     pub poly_len: u16,
     /// The roll has been scrolled to its starting pitch once.
     pub poly_scrolled: bool,
+    /// Selected sampler slot (0..16; samplers).
+    pub sampler_slot: usize,
+    /// Operator shown in the FM operator editor (0..6; FM).
+    pub fm_op: usize,
+    /// List the FM voice browser shows.
+    pub fm_browser: fm_voices::FmBrowser,
+    /// Where the loaded FM voice came from: (browser, index in that list).
+    /// Set when a voice is loaded from the browser; cleared by a single-voice
+    /// import, an undo/redo of a voice load, a bank change (for an imported
+    /// row) and on document load. It is kept across knob edits (decision
+    /// #11, see `fm_panel::fm_voice_browser`).
+    pub fm_voice_src: Option<(fm_voices::FmBrowser, usize)>,
 }
 
 #[derive(Default)]
@@ -75,8 +88,6 @@ pub struct ViewState {
     /// the rack) means the first machine (see `SidAcidApp::focused`).
     pub focus: Option<MachineUid>,
     pub message: Option<String>,
-    /// Selected sampler slot (0..16).
-    pub sampler_slot: usize,
     /// Per-machine panel state, by uid.
     pub panels: HashMap<MachineUid, PanelState>,
     /// Open wheel gesture on a knob (its undo step closes after a rest).
@@ -131,18 +142,9 @@ pub struct ViewState {
     pub stops_sent: u32,
     /// Note held by a click on a roll's key strip: (machine, pitch).
     pub audition: Option<(MachineUid, u8)>,
-    pub fm_browser: fm_voices::FmBrowser,
-    /// Where the loaded FM voice came from: (browser, index in that list).
-    /// Set when a voice is loaded from the browser; cleared by a single-voice
-    /// import, an undo/redo of a voice load, a bank change (for an imported
-    /// row) and on document load. It is kept across knob edits (decision
-    /// #11, see `fm_panel::fm_voice_browser`).
-    pub fm_voice_src: Option<(fm_voices::FmBrowser, usize)>,
     /// Tests only: collapsing headers forced open or shut, by id salt.
     #[cfg(test)]
     pub force_open: Vec<(&'static str, bool)>,
-    /// Operator shown in the FM operator editor (0..6).
-    pub fm_op: usize,
     /// Cached waveform peaks per (sampler, slot): (pcm pointer, pcm
     /// length, columns, peaks).
     pub wave_cache: HashMap<(MachineUid, usize), WaveCacheEntry>,
@@ -166,6 +168,14 @@ pub struct SidAcidApp {
     pub(crate) status: Status,
     pub(crate) pending: Vec<Command>,
     pub(crate) view: ViewState,
+    /// The machine order the engine has, as far as the UI knows (see
+    /// `rack_sync`).
+    pub(crate) engine_rack: Vec<MachineUid>,
+    /// The rack generation (`Status::rack_gen`) a status describing
+    /// `engine_rack` carries; it mirrors the host's count (see `rack_sync`).
+    pub(crate) rack_expected: u32,
+    /// The generation at which a refused rack last reloaded the engine.
+    pub(crate) rack_reloaded_at: Option<u32>,
     /// Tests only: the commands a frame flushed with no audio device (a
     /// real app drops them), so a test can see what would reach the engine.
     #[cfg(test)]
@@ -289,6 +299,7 @@ impl SidAcidApp {
     /// An app with no audio device (tests, or before audio starts).
     pub fn headless(doc: Document) -> Self {
         Self {
+            engine_rack: doc.project.rack_uids(),
             doc,
             audio: None,
             audio_error: None,
@@ -297,6 +308,8 @@ impl SidAcidApp {
             status: Status::default(),
             pending: Vec::new(),
             view: ViewState::default(),
+            rack_expected: 0,
+            rack_reloaded_at: None,
             #[cfg(test)]
             flushed: Vec::new(),
         }
@@ -310,6 +323,7 @@ impl SidAcidApp {
         // Release the old stream before opening another: JACK and ASIO
         // allow one client stream per device.
         self.audio = None;
+        self.rack_for_new_host();
         match open_audio(&self.doc.project, &self.settings.audio) {
             Ok((link, notes)) => {
                 self.audio = Some(link);
@@ -360,18 +374,18 @@ impl SidAcidApp {
     /// guard can't tell same-named rows apart), and undoing a bank import
     /// puts other voices under the stored index.
     pub(crate) fn undo(&mut self) {
-        self.view.fm_voice_src =
-            fm_voices::voice_source_after(self.view.fm_voice_src, self.doc.next_undo());
+        self.view.voice_source_before(self.doc.next_undo());
         let cmds = self.doc.undo();
         self.send(cmds);
+        self.sync_rack();
     }
 
     /// Redo; see `undo`.
     pub(crate) fn redo(&mut self) {
-        self.view.fm_voice_src =
-            fm_voices::voice_source_after(self.view.fm_voice_src, self.doc.next_redo());
+        self.view.voice_source_before(self.doc.next_redo());
         let cmds = self.doc.redo();
         self.send(cmds);
+        self.sync_rack();
     }
 
     /// Sends queued commands to the audio thread. Without audio, commands
@@ -418,9 +432,13 @@ impl SidAcidApp {
         // UI edits are bounded and loaded songs validated, so a
         // refused song means the UI and engine disagree: a bug.
         debug_assert!(!status.song_rejected, "the engine refused a song");
+        // Likewise for a rack: the UI's idea of the engine's rack is wrong.
+        debug_assert!(!status.rack_rejected, "the engine refused a rack");
+        if status.rack_rejected {
+            self.reload_after_refused_rack(&status);
+        }
         self.view.perf.on_status(&status, now);
-        // Kept with its `rack_gen`; plan 10b checks it against the rack
-        // before reading the per-position arrays.
+        self.gate_status(&mut status);
         self.status = status;
         self.view.auto_retried = false;
     }
@@ -1658,7 +1676,10 @@ mod tests {
             app.doc.project.fm(FM).unwrap().bank.as_ref().map(Vec::len),
             Some(32)
         );
-        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Imported);
+        assert_eq!(
+            app.view.panel(FM).fm_browser,
+            fm_voices::FmBrowser::Imported
+        );
         app.doc.undo();
         assert_eq!(app.doc.project.fm(FM).unwrap().bank, None);
 
@@ -1678,9 +1699,9 @@ mod tests {
         let mut doc = Document::new(Project::default());
         doc.project.fm_mut(FM).unwrap().bank = Some(fm_voices::starter().to_vec());
         let mut app = SidAcidApp::headless(doc);
-        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.view.panel(FM).fm_browser = fm_voices::FmBrowser::Imported;
         for op in 0..6 {
-            app.view.fm_op = op;
+            app.view.panel(FM).fm_op = op;
             run_frames(&mut app, 1);
         }
         assert!(
@@ -1694,18 +1715,21 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         let bank = fm_voices::starter().to_vec();
         app.import_syx_bytes(FM, &acid_engine::fm::sysex::bank_sysex(&bank));
-        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Imported);
+        assert_eq!(
+            app.view.panel(FM).fm_browser,
+            fm_voices::FmBrowser::Imported
+        );
         app.doc.undo();
         run_frames(&mut app, 1);
-        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Starter);
+        assert_eq!(app.view.panel(FM).fm_browser, fm_voices::FmBrowser::Starter);
     }
 
     #[test]
     fn the_fm_panel_draws_with_imported_selected_and_no_bank() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.view.panel(FM).fm_browser = fm_voices::FmBrowser::Imported;
         run_frames(&mut app, 2);
-        assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Starter);
+        assert_eq!(app.view.panel(FM).fm_browser, fm_voices::FmBrowser::Starter);
     }
 
     #[test]
@@ -1728,14 +1752,22 @@ mod tests {
         bank[1].name = bank[0].name.clone();
         doc.project.fm_mut(FM).unwrap().bank = Some(bank.clone());
         let mut app = SidAcidApp::headless(doc);
-        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.view.panel(FM).fm_browser = fm_voices::FmBrowser::Imported;
         // A grid click left a source behind; a direct load must clear it.
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
         app.load_fm_voice(FM, &bank[1]);
-        assert_eq!(app.view.fm_voice_src, None, "a direct load has no source");
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 1));
+        assert_eq!(
+            app.view.panel(FM).fm_voice_src,
+            None,
+            "a direct load has no source"
+        );
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 1));
         app.load_document(Document::new(Project::default()));
-        assert_eq!(app.view.fm_voice_src, None, "a document load clears it");
+        assert_eq!(
+            app.view.panel(FM).fm_voice_src,
+            None,
+            "a document load clears it"
+        );
     }
 
     #[test]
@@ -1746,24 +1778,26 @@ mod tests {
         let mut doc = Document::new(Project::default());
         doc.project.fm_mut(FM).unwrap().bank = Some(bank.clone());
         let mut app = SidAcidApp::headless(doc);
-        app.view.fm_browser = fm_voices::FmBrowser::Imported;
+        app.view.panel(FM).fm_browser = fm_voices::FmBrowser::Imported;
         app.load_fm_voice(FM, &bank[0]);
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 0));
         app.load_fm_voice(FM, &bank[2]);
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
         app.undo();
         assert_eq!(
-            app.view.fm_voice_src, None,
+            app.view.panel(FM).fm_voice_src,
+            None,
             "row 0's voice is back, not row 2's"
         );
         app.redo();
         assert_eq!(
-            app.view.fm_voice_src, None,
+            app.view.panel(FM).fm_voice_src,
+            None,
             "a redo has no grid source either"
         );
 
         // A knob edit after a grid load keeps the source through its undo.
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
         let cmds = app.doc.apply(
             Edit::Param {
                 id: FM.param(acid_engine::params::FmParam::Volume),
@@ -1774,18 +1808,23 @@ mod tests {
         app.send(cmds);
         app.undo();
         assert_eq!(
-            app.view.fm_voice_src,
+            app.view.panel(FM).fm_voice_src,
             Some((fm_voices::FmBrowser::Imported, 2))
         );
 
         // Importing another bank: the stored index now points into new voices.
         let syx = acid_engine::fm::sysex::bank_sysex(&bank);
         app.import_syx_bytes(FM, &syx);
-        assert_eq!(app.view.fm_voice_src, None, "a bank import drops it");
-        app.view.fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
+        assert_eq!(
+            app.view.panel(FM).fm_voice_src,
+            None,
+            "a bank import drops it"
+        );
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Imported, 2));
         app.undo();
         assert_eq!(
-            app.view.fm_voice_src, None,
+            app.view.panel(FM).fm_voice_src,
+            None,
             "undoing a bank import drops it"
         );
     }
@@ -1979,7 +2018,7 @@ mod tests {
         app.load_sample_bytes(SAMPLER, 0, "Break", Some("wav"), &test_wav(2.0));
         app.load_sample_bytes(SAMPLER, 1, "Stab", Some("wav"), &test_wav(0.5));
         for slot in [0, 1, 7] {
-            app.view.sampler_slot = slot;
+            app.view.panel(SAMPLER).sampler_slot = slot;
             run_frames(&mut app, 2);
         }
         assert!(
@@ -1995,7 +2034,7 @@ mod tests {
     #[test]
     fn a_dropped_audio_file_loads_into_the_selected_slot() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        app.view.sampler_slot = 3;
+        app.view.panel(SAMPLER).sampler_slot = 3;
         let file = egui::DroppedFile {
             name: "x.wav".into(),
             bytes: Some(test_wav(0.5).into()),
@@ -2174,5 +2213,211 @@ mod tests {
             })
             .collect();
         assert_eq!(offs, vec![(MachineUid(6), 36), (MachineUid(5), 60)]);
+    }
+
+    #[test]
+    fn a_rack_edit_sends_one_set_rack_built_against_the_engine_order() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.pending.clear();
+        let before = app.engine_rack.clone();
+        app.add_machine(MachineType::Fm); // Task 5 adds the UI; this task adds the method (doc op + sync_rack)
+        let swaps: Vec<_> = app
+            .pending
+            .iter()
+            .filter(|c| matches!(c, Command::SetRack(_)))
+            .collect();
+        assert_eq!(swaps.len(), 1);
+        if let Command::SetRack(s) = swaps[0] {
+            assert_eq!(s.order, app.doc.project.rack_uids());
+            assert_eq!(s.fresh.iter().filter(|f| f.is_some()).count(), 1);
+        }
+        assert_ne!(app.engine_rack, before);
+        app.pending.clear();
+        app.undo();
+        assert!(
+            app.pending.iter().any(|c| matches!(c, Command::SetRack(_))),
+            "undo syncs too"
+        );
+        assert_eq!(app.engine_rack, before);
+    }
+
+    #[test]
+    fn statuses_from_an_older_rack_do_not_move_panels() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.add_machine(MachineType::Sampler);
+        let mut old = Status {
+            rack_gen: app.rack_expected.wrapping_sub(1),
+            ..Status::default()
+        };
+        old.playhead[0] = 9;
+        app.on_status(old, 1.0);
+        assert_ne!(app.status.playhead[0], 9);
+        let mut new = Status {
+            rack_gen: app.rack_expected,
+            ..Status::default()
+        };
+        new.playhead[0] = 9;
+        app.on_status(new, 2.0);
+        assert_eq!(app.status.playhead[0], 9);
+    }
+
+    #[test]
+    fn removed_machines_leave_no_ui_state_behind() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.panel(MachineUid(6)).sampler_slot = 3;
+        app.remove_machine(MachineUid(6));
+        assert!(!app.view.panels.contains_key(&MachineUid(6)));
+    }
+
+    #[test]
+    fn removing_prunes_every_uid_keyed_ui_state_and_says_how_to_undo() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.focus = Some(SAMPLER);
+        app.view.audition = Some((SAMPLER, 60));
+        app.view.pad_note = Some((SAMPLER, 61));
+        app.view
+            .wave_cache
+            .insert((SAMPLER, 0), (0, 0, 0, Vec::new()));
+        app.view.wave_drag = Some((SAMPLER, 0, sampler_ui::Marker::Start));
+        app.view.wave_cache.insert((FM, 0), (0, 0, 0, Vec::new()));
+        app.remove_machine(SAMPLER);
+        assert_eq!(app.view.focus, None);
+        assert_eq!(app.view.audition, None);
+        assert_eq!(app.view.pad_note, None);
+        assert!(app.view.wave_drag.is_none());
+        assert_eq!(app.view.wave_cache.len(), 1, "other machines keep theirs");
+        assert_eq!(
+            app.view.status_line.as_deref(),
+            Some("Removed 'Sampler' — Ctrl+Z to undo")
+        );
+        app.undo();
+        assert_eq!(app.engine_rack, app.doc.project.rack_uids());
+        run_frames(&mut app, 2);
+    }
+
+    #[test]
+    fn the_expected_rack_generation_follows_the_host_counter() {
+        // Headless: no host, but the count runs as if one took every rack.
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert_eq!(app.rack_expected, 0, "a new host starts at 0");
+        assert_eq!(app.engine_rack, app.doc.project.rack_uids());
+        app.add_machine(MachineType::Fm);
+        assert_eq!(app.rack_expected, 1, "a SetRack: +1");
+        let uid = app.doc.project.machines.last().unwrap().uid;
+        app.move_machine(uid, 0);
+        app.rename_machine(uid, "Lead");
+        assert_eq!(app.rack_expected, 2, "a rename sends no SetRack");
+        app.duplicate_machine(uid);
+        assert_eq!(app.rack_expected, 3);
+        app.load_document(Document::new(Project::default()));
+        assert_eq!(app.rack_expected, 4, "a ReplaceEngine on the same host: +1");
+        assert_eq!(app.engine_rack, app.doc.project.rack_uids());
+        app.add_machine(MachineType::Synth);
+        assert_eq!(app.rack_expected, 5);
+        let out = app.apply_audio(
+            crate::settings::AudioSettings {
+                driver: Some("JACK".into()),
+                ..Default::default()
+            },
+            &mut |_| Ok((None, vec![])),
+        );
+        assert_eq!(out, audio_settings::ApplyOutcome::Applied);
+        assert_eq!(app.rack_expected, 0, "a new stream is a new host");
+        assert_eq!(app.engine_rack, app.doc.project.rack_uids());
+    }
+
+    #[test]
+    fn a_stale_status_keeps_the_rack_arrays_but_takes_the_transport() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.status.patterns[1] = 4;
+        app.status.meters[1] = 0.5;
+        app.add_machine(MachineType::Fm);
+        let mut old = Status {
+            rack_gen: app.rack_expected.wrapping_sub(1),
+            playing: true,
+            song_bar: 7,
+            ..Status::default()
+        };
+        old.patterns[1] = 2;
+        old.meters[1] = 0.9;
+        old.meters[acid_engine::machine::MAX_MACHINES] = 0.25;
+        app.on_status(old, 1.0);
+        assert!(app.status.playing);
+        assert_eq!(app.status.song_bar, 7);
+        assert_eq!(app.status.patterns[1], 4, "per-machine arrays stay");
+        assert_eq!(app.status.meters[1], 0.5);
+        assert_eq!(
+            app.status.meters[acid_engine::machine::MAX_MACHINES],
+            0.25,
+            "the master meter is not per machine"
+        );
+        assert_eq!(app.status.rack_gen, app.rack_expected);
+    }
+
+    #[test]
+    fn a_rack_edit_moves_the_shown_status_with_the_machines() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.status.playing = true;
+        app.status.playhead[5] = 3; // the sampler, last in the rack
+        app.status.patterns[5] = 2;
+        app.move_machine(SAMPLER, 0);
+        assert_eq!(app.playhead(SAMPLER, 2), Some(3));
+        assert_eq!(app.status.playhead[0], 3);
+    }
+
+    #[test]
+    fn a_refused_rack_reloads_the_engine_from_the_project() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.add_machine(MachineType::Fm);
+        app.add_machine(MachineType::Fm);
+        let refused = Status {
+            rack_gen: 1, // the host took the first SetRack only
+            rack_rejected: true,
+            ..Status::default()
+        };
+        app.reload_after_refused_rack(&refused);
+        assert_eq!(app.rack_expected, 2, "the reload's ReplaceEngine: +1");
+        assert_eq!(app.engine_rack, app.doc.project.rack_uids());
+        assert!(app.pending.is_empty(), "queued swaps were for the old rack");
+        // More refusals from before the reload do not reload again.
+        app.reload_after_refused_rack(&refused);
+        assert_eq!(app.rack_expected, 2);
+    }
+
+    #[test]
+    fn each_fm_and_sampler_panel_keeps_its_own_view_state() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.add_machine(MachineType::Fm);
+        app.add_machine(MachineType::Sampler);
+        let (fm2, s2) = {
+            let m = &app.doc.project.machines;
+            (m[m.len() - 2].uid, m[m.len() - 1].uid)
+        };
+        app.view.panel(FM).fm_op = 3;
+        app.view.panel(FM).fm_voice_src = Some((fm_voices::FmBrowser::Starter, 1));
+        app.view.panel(SAMPLER).sampler_slot = 5;
+        run_frames(&mut app, 2);
+        assert_eq!(app.view.panel(fm2).fm_op, 0);
+        assert_eq!(app.view.panel(fm2).fm_voice_src, None);
+        assert_eq!(app.view.panel(s2).sampler_slot, 0);
+        assert_eq!(app.view.panel(FM).fm_op, 3);
+        // A voice load on one FM clears only that one's source.
+        let voice = fm_voices::starter()[2].clone();
+        app.view.panel(fm2).fm_voice_src = Some((fm_voices::FmBrowser::Starter, 4));
+        app.load_fm_voice(FM, &voice);
+        assert_eq!(app.view.panel(FM).fm_voice_src, None);
+        assert_eq!(
+            app.view.panel(fm2).fm_voice_src,
+            Some((fm_voices::FmBrowser::Starter, 4))
+        );
+    }
+
+    #[test]
+    fn recording_a_pattern_change_for_a_missing_machine_does_nothing() {
+        let mut app = recording_app();
+        app.remove_machine(SYNTH2);
+        let song = app.doc.project.song.clone();
+        app.record_pattern_change(SYNTH2, 3);
+        assert_eq!(app.doc.project.song, song);
     }
 }

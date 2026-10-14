@@ -221,23 +221,30 @@ impl SidAcidApp {
             panel.scroll_at = None;
             panel.poly_drag = None;
             panel.poly_scrolled = false;
+            panel.fm_op = 0;
+            panel.sampler_slot = 0;
+            panel.fm_browser = Default::default();
+            panel.fm_voice_src = None;
         }
         self.view.knob_scroll = None;
         self.view.audition = None;
-        self.view.fm_op = 0;
-        self.view.sampler_slot = 0;
         self.view.wave_cache.clear();
         self.view.wave_drag = None;
         self.view.pad_note = None;
-        self.view.fm_browser = Default::default();
-        self.view.fm_voice_src = None;
         self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
         for m in &self.doc.project.machines {
             self.view.panels.entry(m.uid).or_default().bank = m.selected / BANK_SIZE as u8;
         }
-        self.pending.clear();
+        self.discard_pending();
+        // The new engine goes to the running host (or, with none, the
+        // count runs as if it did; see `rack_sync`).
+        self.rack_for_replaced_engine();
+        // Panels of machines the new project lacks.
+        self.view
+            .panels
+            .retain(|&uid, _| self.doc.project.machine(uid).is_some());
         if let Some(audio) = self.audio.as_mut() {
             // Stale events (disposals, old status) belong to the old engine.
             while audio.poll().is_some() {}
@@ -252,7 +259,7 @@ impl SidAcidApp {
     /// The new engine could not be handed over: drop audio until Retry.
     /// A "Could not save" from the queued save run just before stays up
     /// with it.
-    fn engine_busy_at_load(&mut self) {
+    pub(crate) fn engine_busy_at_load(&mut self) {
         self.add_message("The audio engine is busy; the project will play after Retry audio.");
         self.audio = None;
         self.audio_error = Some("engine busy while loading".into());
@@ -994,7 +1001,7 @@ mod tests {
         let mut project = Project::default();
         project.fm_mut(FM).unwrap().bank = Some(vec![voice.clone()]);
         let mut app = SidAcidApp::headless(Document::new(project));
-        app.view.fm_browser = crate::ui::fm_voices::FmBrowser::Imported;
+        app.view.panel(FM).fm_browser = crate::ui::fm_voices::FmBrowser::Imported;
         run_frames(&mut app, 2);
         app.load_fm_voice(
             FM,

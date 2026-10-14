@@ -60,7 +60,7 @@ impl SidAcidApp {
                 self.sampler_pads(ui, uid);
                 self.sampler_slot_row(ui, uid);
                 self.sampler_waveform(ui, uid);
-                let s = self.view.sampler_slot.min(SLOTS - 1) as u8;
+                let s = self.view.panel(uid).sampler_slot.min(SLOTS - 1) as u8;
                 ui.horizontal_wrapped(|ui| {
                     for (p, label) in SLOT_KNOBS {
                         self.param_knob(ui, uid.param(MachineParam::SamplerSlot(s, p)), label);
@@ -84,10 +84,10 @@ impl SidAcidApp {
                     let r = ui.add_sized(
                         [64.0, 22.0],
                         egui::Button::new(format!("{} {}", i + 1, name))
-                            .selected(self.view.sampler_slot == i),
+                            .selected(self.view.panel(uid).sampler_slot == i),
                     );
                     if r.clicked() {
-                        self.view.sampler_slot = i;
+                        self.view.panel(uid).sampler_slot = i;
                     }
                     let shift = ui.input(|inp| inp.modifiers.shift);
                     if shift
@@ -124,7 +124,7 @@ impl SidAcidApp {
     }
 
     fn sampler_slot_row(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
-        let s = self.view.sampler_slot.min(SLOTS - 1);
+        let s = self.view.panel(uid).sampler_slot.min(SLOTS - 1);
         let info = self.sampler_of(uid).slots[s].as_ref().map(|d| {
             (
                 d.name.clone(),
@@ -258,7 +258,7 @@ impl SidAcidApp {
     }
 
     fn sampler_waveform(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
-        let s = self.view.sampler_slot.min(SLOTS - 1);
+        let s = self.view.panel(uid).sampler_slot.min(SLOTS - 1);
         let Some(d) = self.sampler_of(uid).slots[s].as_ref() else {
             // A drag whose slot emptied under it still closes its undo step.
             if self.take_wave_drag(uid) {
@@ -363,7 +363,7 @@ impl SidAcidApp {
 
     /// Loads a file dropped on the window into sampler `uid`'s selected slot.
     pub(crate) fn load_dropped_file(&mut self, uid: MachineUid, file: &egui::DroppedFile) {
-        let slot = self.view.sampler_slot.min(SLOTS - 1);
+        let slot = self.view.panel(uid).sampler_slot.min(SLOTS - 1);
         if let Some(path) = &file.path {
             self.load_sample_file(uid, slot, path);
         } else if let Some(bytes) = &file.bytes {

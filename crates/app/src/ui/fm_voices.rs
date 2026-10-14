@@ -26,7 +26,7 @@ impl SidAcidApp {
     /// Loads a voice that did not come from the browser grid (so none of
     /// its rows is highlighted); the grid sets `fm_voice_src` after this.
     pub(crate) fn load_fm_voice(&mut self, uid: MachineUid, voice: &Dx7Voice) {
-        self.view.fm_voice_src = None;
+        self.view.panel(uid).fm_voice_src = None;
         let values = voice
             .to_params()
             .into_iter()
@@ -67,16 +67,29 @@ impl SidAcidApp {
                     uid,
                     bank: Some(voices),
                 };
-                self.view.fm_voice_src = voice_source_after(self.view.fm_voice_src, Some(&edit));
+                let panel = self.view.panel(uid);
+                panel.fm_voice_src = voice_source_after(panel.fm_voice_src, Some(&edit));
                 let cmds = self.doc.apply(edit, false);
                 self.send(cmds);
-                self.view.fm_browser = FmBrowser::Imported;
+                self.view.panel(uid).fm_browser = FmBrowser::Imported;
             }
             Err(e) => {
                 self.view.message = Some(format!(
                     "Could not import the file: {e}. Use a DX7 .syx file."
                 ))
             }
+        }
+    }
+}
+
+impl super::ViewState {
+    /// Before `edit` is applied (an undo or redo): drops the voice source
+    /// of the FM machine it loads a voice or bank into, as
+    /// `voice_source_after` says.
+    pub(crate) fn voice_source_before(&mut self, edit: Option<&Edit>) {
+        if let Some(&(Edit::FmVoice { uid, .. } | Edit::FmBank { uid, .. })) = edit {
+            let panel = self.panel(uid);
+            panel.fm_voice_src = voice_source_after(panel.fm_voice_src, edit);
         }
     }
 }

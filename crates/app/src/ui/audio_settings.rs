@@ -81,6 +81,7 @@ impl SidAcidApp {
         self.view.perf.restart();
         // Release the old stream first: JACK and ASIO allow one per device.
         self.audio = None;
+        self.rack_for_new_host();
         match open(&new) {
             Ok((link, notes)) => {
                 self.audio = link;

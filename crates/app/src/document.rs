@@ -131,14 +131,12 @@ pub enum Edit {
         uid: MachineUid,
     },
     /// Moving a machine to rack position `to` (clamped).
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     MoveMachine {
         uid: MachineUid,
         to: usize,
     },
     /// Setting a machine's name exactly (`Document::rename_machine`
     /// resolves an empty name to the type's default).
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     RenameMachine {
         uid: MachineUid,
         name: String,
@@ -531,7 +529,6 @@ impl Document {
 
     /// Adds a fresh machine of `ty` at the end of the rack as one undo
     /// step. Returns its uid, or None when the rack is full.
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     pub fn add_machine(&mut self, ty: MachineType) -> Option<(MachineUid, Vec<Command>)> {
         if self.project.machines.len() >= MAX_MACHINES {
             return None;
@@ -543,7 +540,6 @@ impl Document {
 
     /// Adds a deep copy of `uid` directly below it as one undo step.
     /// Returns the copy's uid, or None when the rack is full or `uid` absent.
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<(MachineUid, Vec<Command>)> {
         if self.project.machines.len() >= MAX_MACHINES {
             return None;
@@ -567,21 +563,18 @@ impl Document {
 
     /// Removes `uid` with its song cells and lanes as one undo step.
     /// Returns its name, or None when it is not in the rack.
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     pub fn remove_machine(&mut self, uid: MachineUid) -> Option<(String, Vec<Command>)> {
         let name = self.project.machine(uid)?.name.clone();
         Some((name, self.apply(Edit::RemoveMachine { uid }, false)))
     }
 
     /// Moves `uid` (in the rack) to position `to` (clamped).
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     pub fn move_machine(&mut self, uid: MachineUid, to: usize) -> Vec<Command> {
         self.apply(Edit::MoveMachine { uid, to }, false)
     }
 
     /// Renames `uid` (in the rack); an empty or all-whitespace name becomes
     /// the type's default name.
-    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
     pub fn rename_machine(&mut self, uid: MachineUid, name: &str) -> Vec<Command> {
         let name = if name.trim().is_empty() {
             let ty = self.project.machine(uid).expect(NO_MACHINE).machine_type();
