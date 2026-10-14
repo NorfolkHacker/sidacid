@@ -16,6 +16,7 @@ pub mod mixer;
 pub mod params;
 pub mod project;
 pub mod rack;
+mod rack_edit;
 pub mod random;
 pub mod render;
 pub mod sampler;

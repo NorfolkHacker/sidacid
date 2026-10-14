@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
+pub use crate::rack_edit::RemovedMachine;
+
 pub const PROJECT_VERSION: u32 = 3;
 pub const STEPS: usize = 64;
 
