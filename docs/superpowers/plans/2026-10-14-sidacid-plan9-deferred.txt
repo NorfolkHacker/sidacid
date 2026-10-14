@@ -1,0 +1,40 @@
+Plan 9 (audio driver & device settings) — manual verification on the Deck, 2026-10-14,
+and items left open. Checks used a scratch XDG_CONFIG_HOME, never ~/.config/sidacid.
+
+VERIFIED
+- Saved driver JACK: app opens a JACK client (PipeWire node "cpal_client_out"), meter runs.
+- Saved device 'Scarlett 2i2' (absent) + 192000 Hz: status line shows
+  "Saved device 'Scarlett 2i2' not found — using 'default'", audio runs on ALSA default,
+  settings.ron byte-identical afterwards.
+- Audio Settings window renders: "Now:" line shows the opened stream
+  (ALSA / PipeWire · default · 44100 Hz · 1882 frames (42.7 ms)); background scan fills
+  the lists; rows Driver/Device(+Rescan, Show all devices)/Sample rate/Buffer; Cancel/Apply.
+  (Opened via a throwaway build that calls open_audio_window() at startup — xdotool
+  clicks land in the wrong place on this KDE desktop.)
+
+NOT VERIFIED BY HAND (covered by unit tests only)
+- Clicking Apply to switch drivers while playing, and the failed-Apply revert path
+  (audio_settings.rs tests cover the logic). Owed to the user: open File → Audio
+  Settings…, switch ALSA default → JACK → ALSA pipewire while playing, confirm sound.
+
+FINDING: JACK xruns under PipeWire are not reported
+- pw-top showed ERR 31 on cpal_client_out under a forced 32-frame quantum + CPU load,
+  but the app's ⚠ did not count them. A probe (cpal JACK stream burning 20 ms per
+  ~10.7 ms callback) printed no error-callback events at all: PipeWire's libjack does
+  not deliver xrun callbacks to cpal clients. The xrun path (is_xrun → counter) only
+  fires under a real jackd. Our own render-overrun counter (Status::overruns) still
+  catches overruns SidAcid causes. No code change; documented here.
+
+DEFERRED MINORS (from task reviews)
+- settings.rs: failed rename leaves settings.ron.tmp; duplicated notice prefix.
+- audio_select.rs: saved rate dropped silently when host default_device isn't listed;
+  some fallback combos lack isolated tests; 5 pub fns lack doc lines.
+- audio.rs: OpenedStream.buffer_frames trusts the request even where a host ignores it.
+- ui: an older fallback note stays in the status line when a later restart has none;
+  "Could not save settings" can be overwritten by fallback notes; window error stays
+  after editing; scan-worker panic would leave "Scanning devices…" forever;
+  apply_audio preamble duplicates start_audio.
+- README: user-set PKG_CONFIG_PATH without jack.pc loses the stub.
+
+OWED TO THE USER
+- Windows: build with --features asio per README, pick ASIO in Audio Settings, play demo.
