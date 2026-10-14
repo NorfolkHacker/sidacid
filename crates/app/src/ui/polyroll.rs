@@ -23,7 +23,7 @@ const SAMPLER_KEY_W: f32 = 64.0;
 const VEL_H: f32 = 32.0;
 const VIEW_H: f32 = 260.0;
 /// The FM roll matches the acid synth's piano roll: three octaves in view.
-const FM_ROW_H: f32 = 10.0;
+const FM_ROW_H: f32 = 12.0;
 const FM_VIEW_H: f32 = FM_ROW_H * super::roll_edit::ROLL_ROWS as f32;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
