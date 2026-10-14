@@ -1,6 +1,6 @@
 //! File → Audio Settings…: driver, device, sample rate and buffer.
 
-use super::{SidAcidApp, open_audio, theme};
+use super::{SidAcidApp, join_notices, open_audio, theme};
 use crate::audio::AudioLink;
 use crate::audio_select::{
     BUFFERS, HostInfo, JACK, buffer_options, driver_label, latency_ms, listed_devices, rate_options,
@@ -41,9 +41,19 @@ impl AudioWindow {
     }
 
     fn poll_scan(&mut self) {
-        if let Some(hosts) = self.scan_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.hosts = Some(hosts);
-            self.scan_rx = None;
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx) = &self.scan_rx else { return };
+        match rx.try_recv() {
+            Ok(hosts) => {
+                self.hosts = Some(hosts);
+                self.scan_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                // The worker died: stop waiting and show an empty list.
+                self.scan_rx = None;
+                self.hosts.get_or_insert_with(Vec::new);
+            }
         }
     }
 }
@@ -51,6 +61,9 @@ impl AudioWindow {
 impl SidAcidApp {
     pub(crate) fn open_audio_window(&mut self) {
         let w = &mut self.view.audio_window;
+        if w.open {
+            return;
+        }
         w.open = true;
         w.edit = self.settings.audio.clone();
         w.error = None;
@@ -73,13 +86,15 @@ impl SidAcidApp {
                 self.audio = link;
                 self.audio_error = None;
                 self.settings.audio = new;
-                if let Some(path) = &self.settings_path
-                    && let Err(e) = crate::settings::save(path, &self.settings)
-                {
-                    self.view.status_line = Some(format!("Could not save settings: {e}"));
-                }
-                if !notes.is_empty() {
-                    self.view.status_line = Some(notes.join("; "));
+                let save_error = match &self.settings_path {
+                    Some(path) => crate::settings::save(path, &self.settings)
+                        .err()
+                        .map(|e| format!("Could not save settings: {e}")),
+                    None => None,
+                };
+                let notes = (!notes.is_empty()).then(|| notes.join("; "));
+                if let Some(line) = join_notices(save_error, notes) {
+                    self.view.status_line = Some(line);
                 }
                 self.view.audio_window.open = false;
                 ApplyOutcome::Applied
@@ -123,6 +138,7 @@ impl SidAcidApp {
             }
             None => "no audio".into(),
         };
+        let edit_before = self.view.audio_window.edit.clone();
         let mut open = true;
         let mut apply = false;
         let mut cancel = false;
@@ -155,6 +171,9 @@ impl SidAcidApp {
                     }
                 });
             });
+        if self.view.audio_window.edit != edit_before {
+            self.view.audio_window.error = None;
+        }
         if !open || cancel {
             self.view.audio_window.open = false;
             return;
@@ -417,5 +436,40 @@ mod tests {
         assert_eq!(app.view.audio_window.edit, jack());
         assert!(app.view.audio_window.scan_rx.is_some());
         assert_eq!(app.view.audio_window.error, None);
+    }
+
+    #[test]
+    fn a_save_error_is_shown_together_with_fallback_notes() {
+        let mut app = app();
+        // A directory can't be written as a file, so the save fails.
+        app.settings_path = Some(std::env::temp_dir());
+        app.apply_audio(jack(), &mut |_| Ok((None, vec!["note".into()])));
+        let line = app.view.status_line.unwrap();
+        assert!(line.starts_with("Could not save settings: "), "{line}");
+        assert!(line.ends_with("; note"), "{line}");
+    }
+
+    #[test]
+    fn a_dead_scan_worker_ends_the_scanning_state() {
+        let mut w = AudioWindow::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        w.scan_rx = Some(rx);
+        drop(tx);
+        w.poll_scan();
+        assert!(w.scan_rx.is_none());
+        assert_eq!(w.hosts, Some(vec![]));
+    }
+
+    #[test]
+    fn reopening_an_open_window_keeps_edits_and_starts_no_scan() {
+        let mut app = app();
+        app.open_audio_window();
+        app.view.audio_window.scan_rx = None;
+        app.view.audio_window.edit = jack();
+        app.view.audio_window.error = Some("e".into());
+        app.open_audio_window();
+        assert_eq!(app.view.audio_window.edit, jack());
+        assert!(app.view.audio_window.scan_rx.is_none());
+        assert_eq!(app.view.audio_window.error.as_deref(), Some("e"));
     }
 }

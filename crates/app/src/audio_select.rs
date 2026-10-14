@@ -90,7 +90,10 @@ pub fn choose(
 ) -> Result<(Choice, Vec<String>), String> {
     let mut notes = Vec::new();
     let find = |id: &str| hosts.iter().find(|h| h.id == id);
-    let host = match saved.driver.as_deref().and_then(find) {
+    // A host with nothing to open (e.g. JACK with its server down) is as
+    // good as missing.
+    let usable = |h: &&HostInfo| !(h.devices.is_empty() && h.default_device.is_none());
+    let host = match saved.driver.as_deref().and_then(find).filter(usable) {
         Some(h) => h,
         None => {
             let h = find(default_host).ok_or("no audio driver available")?;
@@ -282,6 +285,23 @@ mod tests {
         h[0].devices[0].buffer = None;
         let s = saved(None, None, None, Some(128));
         assert_eq!(choose(&h, "ALSA", &s).unwrap().0.buffer_frames, Some(128));
+    }
+
+    #[test]
+    fn a_saved_host_with_nothing_to_open_falls_back_to_the_default_host() {
+        let mut hs = hosts();
+        hs.retain(|h| h.id != JACK);
+        hs.push(HostInfo {
+            id: JACK.into(),
+            default_device: None,
+            devices: vec![],
+        });
+        let (c, notes) = choose(&hs, ALSA, &saved(Some(JACK), None, None, None)).unwrap();
+        assert_eq!(c.driver, ALSA);
+        assert_eq!(
+            notes,
+            ["Driver 'JACK' is not available — using 'ALSA / PipeWire'"]
+        );
     }
 
     #[test]

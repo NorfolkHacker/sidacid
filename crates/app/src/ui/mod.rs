@@ -188,32 +188,61 @@ pub(crate) fn open_audio(
 ) -> Result<(AudioLink, Vec<String>), String> {
     use crate::{audio_scan, audio_select};
     let default = audio_scan::default_host_name();
+    let default_choice = audio_select::Choice {
+        driver: default.to_string(),
+        device: None,
+        sample_rate: None,
+        buffer_frames: None,
+    };
     if *saved == crate::settings::AudioSettings::default() {
         // Nothing saved: skip the device scan (ALSA's takes ~0.5 s) and
         // let the driver pick its defaults.
-        let choice = audio_select::Choice {
-            driver: default.to_string(),
-            device: None,
-            sample_rate: None,
-            buffer_frames: None,
-        };
-        return Ok((AudioLink::open(project, &choice)?, Vec::new()));
-    }
-    let mut wanted = vec![default];
-    if let Some(d) = saved.driver.as_deref()
-        && d != default
-    {
-        wanted.push(d);
+        return Ok((AudioLink::open(project, &default_choice)?, Vec::new()));
     }
     let available = cpal::available_hosts();
-    let hosts: Vec<_> = wanted
-        .into_iter()
-        .filter_map(audio_scan::host_id)
-        .filter(|id| available.contains(id))
-        .filter_map(audio_scan::scan_host)
-        .collect();
+    let scan = |name: &str| {
+        audio_scan::host_id(name)
+            .filter(|id| available.contains(id))
+            .and_then(audio_scan::scan_host)
+    };
+    // The saved driver's host first; the default host only if the saved
+    // one cannot be used.
+    let mut hosts: Vec<_> = saved.driver.as_deref().and_then(scan).into_iter().collect();
+    let saved_usable = hosts
+        .first()
+        .is_some_and(|h| !(h.devices.is_empty() && h.default_device.is_none()));
+    if !saved_usable && saved.driver.as_deref() != Some(default) {
+        hosts.extend(scan(default));
+    }
     let (choice, notes) = audio_select::choose(&hosts, default, saved)?;
-    Ok((AudioLink::open(project, &choice)?, notes))
+    open_with_default_fallback(&choice, &default_choice, notes, |c| {
+        AudioLink::open(project, c)
+    })
+}
+
+/// Opens `choice`; if that fails and it is not already the plain default,
+/// retries `default_choice` with a notice. If both fail, the first error.
+fn open_with_default_fallback<T>(
+    choice: &crate::audio_select::Choice,
+    default_choice: &crate::audio_select::Choice,
+    mut notes: Vec<String>,
+    mut open: impl FnMut(&crate::audio_select::Choice) -> Result<T, String>,
+) -> Result<(T, Vec<String>), String> {
+    match open(choice) {
+        Ok(v) => Ok((v, notes)),
+        Err(e) if choice != default_choice => {
+            let v = open(default_choice).map_err(|_| e.clone())?;
+            let what = choice
+                .device
+                .clone()
+                .unwrap_or_else(|| crate::audio_select::driver_label(&choice.driver).to_string());
+            notes.push(format!(
+                "Could not open '{what}' ({e}) — using the default device"
+            ));
+            Ok((v, notes))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Two status notes shown together, the earlier first.
@@ -522,6 +551,52 @@ pub(crate) fn run_frames_in(ctx: &egui::Context, app: &mut SidAcidApp, frames: u
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_open_retries_the_default_with_a_notice() {
+        use crate::audio_select::Choice;
+        let c = |dev: Option<&str>| Choice {
+            driver: "ALSA".into(),
+            device: dev.map(Into::into),
+            sample_rate: None,
+            buffer_frames: None,
+        };
+        let (default, busy) = (c(None), c(Some("hw:1")));
+        let mut tried = Vec::new();
+        let r = open_with_default_fallback(&busy, &default, vec![], |ch| {
+            tried.push(ch.clone());
+            if ch.device.is_some() {
+                Err("busy".to_string())
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(
+            r,
+            Ok((
+                7,
+                vec!["Could not open 'hw:1' (busy) — using the default device".to_string()]
+            ))
+        );
+        assert_eq!(tried, [busy.clone(), default.clone()]);
+        // Both fail: the original error.
+        let r: Result<(u8, _), _> = open_with_default_fallback(&busy, &default, vec![], |ch| {
+            Err(if ch.device.is_some() {
+                "first"
+            } else {
+                "second"
+            }
+            .to_string())
+        });
+        assert_eq!(r, Err("first".to_string()));
+        // The default itself failing is not retried.
+        let mut n = 0;
+        let r: Result<(u8, _), _> = open_with_default_fallback(&default, &default, vec![], |_| {
+            n += 1;
+            Err("x".to_string())
+        });
+        assert_eq!((r, n), (Err("x".to_string()), 1));
+    }
+
     #[test]
     fn notices_join_with_the_earlier_first() {
         use super::join_notices as j;
