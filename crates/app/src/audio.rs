@@ -2,6 +2,7 @@
 //! via `EngineHost`; the UI talks to it only through the command and
 //! event rings held by `AudioLink`.
 
+use crate::audio_select::Choice;
 use acid_engine::engine::Engine;
 use acid_engine::host::{Command, EngineHost, Event, channel};
 use acid_engine::project::Project;
@@ -22,29 +23,64 @@ pub struct AudioLink {
     failed: Arc<AtomicBool>,
     /// Frames in the device's latest callback (0 before the first).
     buffer_frames: Arc<AtomicU32>,
+    xruns: Arc<AtomicU32>,
     pub sample_rate: f32,
     pub device_name: String,
+    #[allow(dead_code)] // read via `opened()` (Task 5)
+    opened: OpenedStream,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenedStream {
+    pub driver: String,
+    pub device: String,
+    pub sample_rate: u32,
+    /// The buffer asked for; None = the driver's default (the meter shows
+    /// the size callbacks actually get).
+    pub buffer_frames: Option<u32>,
+}
+
+/// cpal's JACK host reports xruns through the error callback; they are
+/// dropouts, not a dead stream.
+pub fn is_xrun(err: &cpal::StreamError) -> bool {
+    matches!(err, cpal::StreamError::BackendSpecific { err } if err.description.contains("xrun"))
 }
 
 impl AudioLink {
-    /// Opens the default output device and starts the engine on it with
-    /// `project` loaded.
-    pub fn start(project: &Project) -> Result<AudioLink, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("no audio output device found")?;
+    /// Opens `choice` (from `audio_select::choose`) and starts the engine
+    /// on it with `project` loaded.
+    pub fn open(project: &Project, choice: &Choice) -> Result<AudioLink, String> {
+        let id = crate::audio_scan::host_id(&choice.driver)
+            .ok_or_else(|| format!("driver '{}' is not built in", choice.driver))?;
+        let host = cpal::host_from_id(id).map_err(|e| format!("{}: {e}", choice.driver))?;
+        let device = match &choice.device {
+            Some(name) => host
+                .output_devices()
+                .map_err(|e| format!("audio devices: {e}"))?
+                .find(|d| d.name().is_ok_and(|n| &n == name))
+                .ok_or_else(|| format!("device '{name}' not found"))?,
+            None => host
+                .default_output_device()
+                .ok_or("no audio output device found")?,
+        };
         let device_name = device.name().unwrap_or_else(|_| "audio device".into());
         let supported = device
             .default_output_config()
             .map_err(|e| format!("audio device: {e}"))?;
-        let sample_rate = supported.sample_rate().0 as f32;
         let format = supported.sample_format();
-        let config: cpal::StreamConfig = supported.into();
+        let mut config: cpal::StreamConfig = supported.into();
+        if let Some(rate) = choice.sample_rate {
+            config.sample_rate = cpal::SampleRate(rate);
+        }
+        if let Some(frames) = choice.buffer_frames {
+            config.buffer_size = cpal::BufferSize::Fixed(frames);
+        }
+        let sample_rate = config.sample_rate.0 as f32;
         let (engine_host, commands, events) = channel(Engine::from_project(sample_rate, project));
         let failed = Arc::new(AtomicBool::new(false));
         let buffer_frames = Arc::new(AtomicU32::new(0));
-        let shared = (failed.clone(), buffer_frames.clone());
+        let xruns = Arc::new(AtomicU32::new(0));
+        let shared = (failed.clone(), buffer_frames.clone(), xruns.clone());
         let stream = match format {
             cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine_host, shared),
             cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine_host, shared),
@@ -54,15 +90,34 @@ impl AudioLink {
         stream
             .play()
             .map_err(|e| format!("could not start audio: {e}"))?;
+        let opened = OpenedStream {
+            driver: choice.driver.clone(),
+            device: device_name.clone(),
+            sample_rate: config.sample_rate.0,
+            buffer_frames: choice.buffer_frames,
+        };
         Ok(AudioLink {
             _stream: stream,
             commands,
             events,
             failed,
             buffer_frames,
+            xruns,
             sample_rate,
             device_name,
+            opened,
         })
+    }
+
+    #[allow(dead_code)] // used by the settings UI (Task 5)
+    pub fn opened(&self) -> &OpenedStream {
+        &self.opened
+    }
+
+    /// Driver xruns since this stream opened.
+    #[allow(dead_code)] // shown by the meter (Task 5)
+    pub fn xruns(&self) -> u32 {
+        self.xruns.load(Ordering::Relaxed)
     }
 
     /// Queues a command; hands it back if the ring is full.
@@ -96,7 +151,7 @@ fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut host: EngineHost,
-    (failed, buffer_frames): (Arc<AtomicBool>, Arc<AtomicU32>),
+    (failed, buffer_frames, xruns): (Arc<AtomicBool>, Arc<AtomicU32>, Arc<AtomicU32>),
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -119,8 +174,12 @@ where
                     host.set_cpu_load(started.elapsed().as_secs_f32() / budget);
                 }
             },
-            move |_err| {
-                failed.store(true, Ordering::Relaxed);
+            move |err| {
+                if is_xrun(&err) {
+                    xruns.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    failed.store(true, Ordering::Relaxed);
+                }
             },
             None,
         )
@@ -232,6 +291,23 @@ mod tests {
         fill_interleaved(&mut constant, &mut l, &mut r, &mut data, 2);
         assert_eq!(data[19], -0.25);
         assert_eq!(data[20], 0.0);
+    }
+
+    #[test]
+    fn jack_xruns_are_counted_not_fatal() {
+        let xrun = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "xrun (buffer over or under run)".into(),
+            },
+        };
+        assert!(is_xrun(&xrun));
+        let other = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "server shut down".into(),
+            },
+        };
+        assert!(!is_xrun(&other));
+        assert!(!is_xrun(&cpal::StreamError::DeviceNotAvailable));
     }
 
     #[cfg(target_os = "linux")]

@@ -201,7 +201,14 @@ impl SidAcidApp {
         // Whatever happens, the next engine is a fresh one.
         self.reset_transport_view();
         self.view.perf.restart();
-        match AudioLink::start(&self.doc.project) {
+        let opened = crate::audio_scan::scan_host(cpal::default_host().id())
+            .ok_or_else(|| "no audio driver available".to_string())
+            .and_then(|h| {
+                let name = h.id.clone();
+                crate::audio_select::choose(&[h], &name, &Default::default())
+            })
+            .and_then(|(choice, _)| AudioLink::open(&self.doc.project, &choice));
+        match opened {
             Ok(link) => {
                 self.audio = Some(link);
                 self.audio_error = None;
