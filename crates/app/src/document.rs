@@ -4,10 +4,11 @@
 
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
-use acid_engine::machine::MachineUid;
+use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid, default_name};
 use acid_engine::params::ParamId;
 use acid_engine::project::{
-    DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
+    DrumHit, DrumPattern, MachineBody, MachineEntry, NotePattern, Project, RemovedMachine, STEPS,
+    SeqView, Song, SynthPattern, SynthStep,
 };
 use acid_engine::rack::CompiledSong;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
@@ -23,6 +24,7 @@ const NO_KIT: &str = "the edit names a drum kit in the rack";
 const NO_NOTES: &str = "the edit names a note machine in the rack";
 const NO_FM: &str = "the edit names an FM machine in the rack";
 const NO_SAMPLER: &str = "the edit names a sampler in the rack";
+const NO_ROOM: &str = "the rack has room for the machine and its uid is free";
 
 /// One change to the project. Each edit names its machine by `uid`, which
 /// must be a machine of the edit's type in the rack (a note edit's: FM or
@@ -118,6 +120,29 @@ pub enum Edit {
         slot: usize,
         meta: Box<SlotMeta>,
     },
+    /// Putting a machine into the rack with everything it took out when
+    /// removed: undo of a removal, and adding or duplicating (nothing else
+    /// to restore). The rack must have room and the uid must be free.
+    InsertMachine {
+        removed: Box<RemovedMachine>,
+    },
+    /// Taking a machine out with its song cells and automation lanes.
+    RemoveMachine {
+        uid: MachineUid,
+    },
+    /// Moving a machine to rack position `to` (clamped).
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    MoveMachine {
+        uid: MachineUid,
+        to: usize,
+    },
+    /// Setting a machine's name exactly (`Document::rename_machine`
+    /// resolves an empty name to the type's default).
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    RenameMachine {
+        uid: MachineUid,
+        name: String,
+    },
     /// Several edits as one undo step (a record pass), applied in order.
     Group(Vec<Edit>),
 }
@@ -144,6 +169,8 @@ enum MergeKey {
     SamplerSlot(MachineUid, usize),
     SlotMeta(MachineUid, usize),
     Group,
+    /// Rack edits: never merge, each is its own undo step.
+    Rack,
 }
 
 fn merge_key(edit: &Edit) -> MergeKey {
@@ -175,6 +202,10 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::SamplerSlot { uid, slot, .. } => MergeKey::SamplerSlot(*uid, *slot),
         Edit::SlotMeta { uid, slot, .. } => MergeKey::SlotMeta(*uid, *slot),
         Edit::Group(_) => MergeKey::Group,
+        Edit::InsertMachine { .. }
+        | Edit::RemoveMachine { .. }
+        | Edit::MoveMachine { .. }
+        | Edit::RenameMachine { .. } => MergeKey::Rack,
     }
 }
 
@@ -190,6 +221,15 @@ fn edit_bytes(edit: &Edit) -> usize {
     match edit {
         Edit::SamplerSlot { data: Some(d), .. } => d.pcm.len() * std::mem::size_of::<i16>(),
         Edit::Group(edits) => edits.iter().map(edit_bytes).sum(),
+        Edit::InsertMachine { removed } => match &removed.entry.body {
+            MachineBody::Sampler(s) => s
+                .slots
+                .iter()
+                .flatten()
+                .map(|d| d.pcm.len() * std::mem::size_of::<i16>())
+                .sum(),
+            _ => 0,
+        },
         _ => 0,
     }
 }
@@ -383,6 +423,8 @@ impl Document {
                 .note_patterns(*uid)
                 .is_some_and(|pats| pats[*slot as usize].length == *length),
             Edit::View { uid, view } => p.synth(*uid).expect(NO_SYNTH).view == *view,
+            Edit::MoveMachine { uid, to } => p.position(*uid).expect(NO_MACHINE) == *to,
+            Edit::RenameMachine { uid, name } => p.machine(*uid).expect(NO_MACHINE).name == *name,
             _ => false,
         }
     }
@@ -479,6 +521,82 @@ impl Document {
             self.unsaved_selection = true;
         }
         vec![Command::SelectPattern { uid, slot }]
+    }
+
+    /// Undo steps available.
+    #[cfg(test)]
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Adds a fresh machine of `ty` at the end of the rack as one undo
+    /// step. Returns its uid, or None when the rack is full.
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    pub fn add_machine(&mut self, ty: MachineType) -> Option<(MachineUid, Vec<Command>)> {
+        if self.project.machines.len() >= MAX_MACHINES {
+            return None;
+        }
+        let index = self.project.machines.len();
+        let entry = self.project.new_machine(ty);
+        Some(self.insert_new(index, entry))
+    }
+
+    /// Adds a deep copy of `uid` directly below it as one undo step.
+    /// Returns the copy's uid, or None when the rack is full or `uid` absent.
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<(MachineUid, Vec<Command>)> {
+        if self.project.machines.len() >= MAX_MACHINES {
+            return None;
+        }
+        let index = self.project.position(uid)? + 1;
+        let entry = self.project.duplicate_machine(uid)?;
+        Some(self.insert_new(index, entry))
+    }
+
+    fn insert_new(&mut self, index: usize, entry: MachineEntry) -> (MachineUid, Vec<Command>) {
+        let uid = entry.uid;
+        let removed = Box::new(RemovedMachine {
+            index,
+            entry,
+            cells: Vec::new(),
+            lanes: Vec::new(),
+            param_lanes: Vec::new(),
+        });
+        (uid, self.apply(Edit::InsertMachine { removed }, false))
+    }
+
+    /// Removes `uid` with its song cells and lanes as one undo step.
+    /// Returns its name, or None when it is not in the rack.
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    pub fn remove_machine(&mut self, uid: MachineUid) -> Option<(String, Vec<Command>)> {
+        let name = self.project.machine(uid)?.name.clone();
+        Some((name, self.apply(Edit::RemoveMachine { uid }, false)))
+    }
+
+    /// Moves `uid` (in the rack) to position `to` (clamped).
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    pub fn move_machine(&mut self, uid: MachineUid, to: usize) -> Vec<Command> {
+        self.apply(Edit::MoveMachine { uid, to }, false)
+    }
+
+    /// Renames `uid` (in the rack); an empty or all-whitespace name becomes
+    /// the type's default name.
+    #[allow(dead_code)] // used from the rack UI (Plan 11 Task 4)
+    pub fn rename_machine(&mut self, uid: MachineUid, name: &str) -> Vec<Command> {
+        let name = if name.trim().is_empty() {
+            let ty = self.project.machine(uid).expect(NO_MACHINE).machine_type();
+            let others: Vec<&str> = self
+                .project
+                .machines
+                .iter()
+                .filter(|m| m.uid != uid)
+                .map(|m| m.name.as_str())
+                .collect();
+            default_name(ty, &others)
+        } else {
+            name.to_string()
+        };
+        self.apply(Edit::RenameMachine { uid, name }, false)
     }
 
     /// Applies an edit and returns its inverse.
@@ -676,6 +794,26 @@ impl Document {
                 uid,
                 bank: std::mem::replace(&mut p.fm_mut(uid).expect(NO_FM).bank, bank),
             },
+            Edit::InsertMachine { removed } => {
+                let uid = removed.entry.uid;
+                assert!(
+                    p.machines.len() < MAX_MACHINES && p.machine(uid).is_none(),
+                    "{NO_ROOM}"
+                );
+                p.restore_machine(*removed);
+                Edit::RemoveMachine { uid }
+            }
+            Edit::RemoveMachine { uid } => Edit::InsertMachine {
+                removed: Box::new(p.remove_machine(uid).expect(NO_MACHINE)),
+            },
+            Edit::MoveMachine { uid, to } => Edit::MoveMachine {
+                uid,
+                to: p.move_machine(uid, to).expect(NO_MACHINE),
+            },
+            Edit::RenameMachine { uid, name } => Edit::RenameMachine {
+                uid,
+                name: std::mem::replace(&mut p.machine_mut(uid).expect(NO_MACHINE).name, name),
+            },
             Edit::Group(edits) => {
                 let mut inverses: Vec<Edit> =
                     edits.into_iter().map(|e| self.apply_raw(e)).collect();
@@ -766,6 +904,11 @@ impl Document {
                         .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
                 ),
             }],
+            // The app resends the whole rack after any rack edit.
+            Edit::InsertMachine { .. }
+            | Edit::RemoveMachine { .. }
+            | Edit::MoveMachine { .. }
+            | Edit::RenameMachine { .. } => Vec::new(),
             Edit::Group(edits) => edits.iter().flat_map(|e| self.commands_for(e)).collect(),
         }
     }
@@ -775,7 +918,7 @@ impl Document {
 mod tests {
     use super::*;
     use crate::test_rack::*;
-    use acid_engine::machine::MachineUid;
+    use acid_engine::machine::{MachineType, MachineUid};
     use acid_engine::params::MachineParam;
     use acid_engine::params::{ParamId, SynthParam};
     use acid_engine::project::{DrumHit, Gate, SeqView, SynthStep};
@@ -1683,5 +1826,82 @@ mod tests {
                 .len(),
             500
         );
+    }
+
+    #[test]
+    fn rack_edits_undo_and_redo() {
+        let mut d = Document::new(acid_engine::demo::demo_project());
+        let start = d.project.clone();
+        let (uid, _) = d.add_machine(MachineType::Sampler).unwrap();
+        d.rename_machine(uid, "Breaks");
+        d.move_machine(uid, 0);
+        let (copy, _) = d.duplicate_machine(MachineUid(1)).unwrap();
+        let (name, _) = d.remove_machine(MachineUid(4)).unwrap();
+        assert_eq!(name, "909");
+        let end = d.project.clone();
+        for _ in 0..5 {
+            d.undo();
+        }
+        assert_eq!(d.project.machines, start.machines);
+        assert_eq!(d.project.song, start.song);
+        for _ in 0..5 {
+            d.redo();
+        }
+        assert_eq!(d.project, end);
+        assert!(d.project.machine(copy).is_some());
+        assert_eq!(d.project.machines[0].name, "Breaks");
+    }
+
+    #[test]
+    fn edits_to_a_machine_survive_its_removal_and_return() {
+        let mut d = Document::new(acid_engine::demo::demo_project());
+        let id = ParamId::Machine(MachineUid(2), MachineParam::Synth(SynthParam::Cutoff));
+        d.apply(Edit::Param { id, value: 0.1 }, false);
+        d.remove_machine(MachineUid(2));
+        d.undo(); // machine back
+        d.undo(); // knob back — must not panic
+        assert_eq!(
+            d.project.param(id),
+            acid_engine::demo::demo_project().param(id)
+        );
+        d.redo();
+        d.redo();
+        assert!(d.project.machine(MachineUid(2)).is_none());
+        d.undo();
+        assert_eq!(d.project.param(id), 0.1);
+    }
+
+    #[test]
+    fn the_rack_cap_and_no_op_edits() {
+        let mut d = Document::new(acid_engine::project::Project::default());
+        while d.project.machines.len() < 16 {
+            d.add_machine(MachineType::Kit808).unwrap();
+        }
+        assert!(d.add_machine(MachineType::Fm).is_none());
+        assert!(d.duplicate_machine(MachineUid(1)).is_none());
+        let depth = d.undo_depth();
+        d.move_machine(MachineUid(1), 0);
+        d.rename_machine(MachineUid(1), "Synth 1");
+        assert_eq!(d.undo_depth(), depth, "no-ops leave no undo step");
+    }
+
+    #[test]
+    fn a_removed_samplers_audio_counts_against_the_undo_budget() {
+        let mut d = doc();
+        d.apply(slot_load(500), false);
+        d.apply(slot_load(500), false); // the undo step holds the first load's 1000 bytes
+        assert_eq!(d.undo_sample_bytes(), 1_000);
+        d.remove_machine(SAMPLER);
+        assert_eq!(
+            d.undo_sample_bytes(),
+            2_000,
+            "the removed sampler's audio is counted"
+        );
+        d.set_undo_byte_budget(1_500);
+        d.move_machine(SYNTH1, 1); // trims while over budget
+        assert!(d.undo_sample_bytes() <= 1_500);
+        d.undo();
+        d.undo();
+        assert!(d.project.sampler(SAMPLER).is_some());
     }
 }
