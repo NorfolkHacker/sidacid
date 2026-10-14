@@ -63,6 +63,23 @@ cargo run --release -p sidacid -- render-demo out.wav  # render the demo groove 
 cargo test --workspace                                 # run the tests
 ```
 
+### Audio drivers
+
+Linux builds include ALSA (which covers PipeWire and PulseAudio) and JACK.
+JACK is loaded at runtime: without `libjack` it just isn't offered. The
+build only needs pkg-config to report "jack"; `.cargo/config.toml` points
+it at a stub in `support/pkgconfig/` unless you set `PKG_CONFIG_PATH`
+yourself.
+
+Windows builds include WASAPI. For ASIO, build on Windows with MSVC:
+
+1. Download the Steinberg ASIO SDK and unzip it; set `CPAL_ASIO_DIR` to
+   that folder.
+2. Install LLVM and set `LIBCLANG_PATH` to its `bin` folder.
+3. `cargo build --release -p sidacid --features asio`
+
+Pick the driver and device under **File → Audio Settings…**.
+
 ## Keys
 
 | Key | Action |

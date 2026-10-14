@@ -1,0 +1,13 @@
+# Stub for jack-sys's build script, which insists on finding "jack" through
+# pkg-config. cpal's JACK support loads libjack at runtime (jack's
+# dynamic_loading feature), so nothing is linked from here. A real jack.pc
+# found through your own PKG_CONFIG_PATH works just as well.
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: jack
+Description: JACK Audio Connection Kit (stub; loaded at runtime)
+Version: 1.9.17
+Libs:
+Cflags:

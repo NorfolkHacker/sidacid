@@ -1,0 +1,5 @@
+# Lets the JACK backend build where libjack has no pkg-config file
+# (SteamOS, distros without JACK dev packages). Not forced: a
+# PKG_CONFIG_PATH you set yourself wins.
+[env]
+PKG_CONFIG_PATH = { value = "support/pkgconfig", relative = true }

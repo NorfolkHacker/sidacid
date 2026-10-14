@@ -233,4 +233,10 @@ mod tests {
         assert_eq!(data[19], -0.25);
         assert_eq!(data[20], 0.0);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn jack_is_compiled_in_on_linux() {
+        assert!(cpal::ALL_HOSTS.contains(&cpal::HostId::Jack));
+    }
 }
