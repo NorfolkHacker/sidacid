@@ -8,13 +8,16 @@ use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::project::{MAX_NOTES, PATTERNS, Project};
-use crate::rack::{CompiledSong, MachineDsp, RackMap, RackSwap, Slot, SlotPatterns};
+use crate::rack::{
+    CompiledSong, MachineDsp, RackMap, RackSwap, Slot, SlotPatterns, remap_positions,
+};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
 use crate::song::{Banks, MAX_BARS};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Upper bound on sequencer ticks fired without time advancing; guards
 /// against a sequencer that never moves forward.
@@ -98,6 +101,12 @@ pub struct Engine {
     /// The song ended by itself and no transport command came since: the
     /// next `stop` counts as the first one (it only releases).
     ended_by_song: bool,
+    /// Nanoseconds spent rendering and mixing each rack position since
+    /// the last `take_cpu_ns`.
+    slot_ns: [u64; MAX_MACHINES],
+    /// Nanoseconds of the rest of `process` (sequencing, sends, master)
+    /// since the last `take_cpu_ns`.
+    shared_ns: u64,
 }
 
 impl Engine {
@@ -126,6 +135,8 @@ impl Engine {
             guard_fired: false,
             song: CompiledSong::default(),
             ended_by_song: false,
+            slot_ns: [0; MAX_MACHINES],
+            shared_ns: 0,
         };
         e.load_project(p);
         e
@@ -137,6 +148,7 @@ impl Engine {
     /// non-audio thread before handing the engine to the audio thread.
     pub(crate) fn load_project(&mut self, p: &Project) {
         self.slots.clear();
+        self.take_cpu_ns();
         self.slots.extend(
             p.machines
                 .iter()
@@ -256,6 +268,7 @@ impl Engine {
             &swap.selected,
         );
         self.mixer.rearrange(&map);
+        remap_positions(&mut self.slot_ns, &map);
         self.seq.resync();
         Some(map)
     }
@@ -662,6 +675,16 @@ impl Engine {
         self.mixer.take_meters()
     }
 
+    /// Nanoseconds of work per rack position (its machine's render and
+    /// channel strip) and for shared work (sequencing, sends, master)
+    /// since the last call; resets them.
+    pub fn take_cpu_ns(&mut self) -> ([u64; MAX_MACHINES], u64) {
+        (
+            std::mem::take(&mut self.slot_ns),
+            std::mem::take(&mut self.shared_ns),
+        )
+    }
+
     /// True once if the mixer's NaN guard fired since the last call.
     pub fn take_guard_fired(&mut self) -> bool {
         std::mem::take(&mut self.guard_fired)
@@ -724,6 +747,9 @@ impl Engine {
     }
 
     fn process_block(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+        let block_start = Instant::now();
+        // Slot time in this block, to leave the shared remainder.
+        let mut slot_spent = 0u64;
         let n = out_l.len();
         for s in &mut self.slots {
             s.buf.l[..n].fill(0.0);
@@ -755,18 +781,34 @@ impl Engine {
             } else {
                 until.min(n - pos)
             };
-            for s in &mut self.slots {
+            for (s, ns) in self.slots.iter_mut().zip(self.slot_ns.iter_mut()) {
+                let start = Instant::now();
                 s.render(pos..pos + run);
+                let spent = start.elapsed().as_nanos() as u64;
+                *ns = ns.saturating_add(spent);
+                slot_spent = slot_spent.saturating_add(spent);
             }
             self.seq.advance(run);
             pos += run;
         }
-        if self.mixer.process(&mut self.slots, n, out_l, out_r) {
+        let mut strip_ns = [0u64; MAX_MACHINES];
+        let fired = self
+            .mixer
+            .process(&mut self.slots, n, out_l, out_r, &mut strip_ns);
+        for (ns, strip) in self.slot_ns.iter_mut().zip(strip_ns) {
+            *ns = ns.saturating_add(strip);
+            slot_spent = slot_spent.saturating_add(strip);
+        }
+        if fired {
             self.guard_fired = true;
             for s in &mut self.slots {
                 s.reset();
             }
         }
+        let block = block_start.elapsed().as_nanos() as u64;
+        self.shared_ns = self
+            .shared_ns
+            .saturating_add(block.saturating_sub(slot_spent));
     }
 }
 
@@ -1273,9 +1315,88 @@ mod tests {
         assert_eq!(meters[4], 0.0);
     }
 
+    /// Gives `uid`'s sampler slot 0 about two seconds of noise played
+    /// chromatically over keys 36..=96.
+    fn load_long_sample(p: &mut Project, uid: MachineUid) {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let frames = 96_000u32;
+        let mut x = 0x1234_5678u32;
+        let noise: Vec<f32> = (0..frames)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x as f32 / u32::MAX as f32 - 0.5) * 0.5
+            })
+            .collect();
+        let meta = SlotMeta::chromatic(36, 96, 60, frames);
+        p.sampler_mut(uid).unwrap().slots[0] =
+            Some(SlotData::new("Noise", 48_000, 1, &noise, meta));
+    }
+
+    #[test]
+    fn a_busy_sampler_costs_more_than_an_idle_synth() {
+        // Rack: Synth 1 (no notes playing) and a Sampler with a long sample and 16 held notes.
+        let mut p = Project::default();
+        p.machines
+            .retain(|m| m.uid == MachineUid(1) || m.machine_type() == MachineType::Sampler);
+        let sampler_uid = p
+            .machines
+            .iter()
+            .find(|m| m.machine_type() == MachineType::Sampler)
+            .unwrap()
+            .uid;
+        load_long_sample(&mut p, sampler_uid);
+        let mut eng = Engine::from_project(48000.0, &p);
+        for k in 0..16 {
+            eng.note_on(sampler_uid, 40 + k, 100);
+        }
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for _ in 0..200 {
+            eng.process(&mut l, &mut r);
+        }
+        let (ns, _) = eng.take_cpu_ns();
+        let pos_s = p.position(sampler_uid).unwrap();
+        let pos_y = 1 - pos_s;
+        assert!(
+            ns[pos_s] > ns[pos_y],
+            "sampler {} ns vs idle synth {} ns",
+            ns[pos_s],
+            ns[pos_y]
+        );
+        assert_eq!(eng.take_cpu_ns().0, [0; MAX_MACHINES], "taking resets");
+    }
+
+    #[test]
+    fn cpu_accumulators_follow_their_machine_through_a_reorder() {
+        let p = crate::demo::demo_project();
+        let mut eng = Engine::from_project(48000.0, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for _ in 0..50 {
+            eng.process(&mut l, &mut r);
+        }
+        let mut q = p.clone();
+        q.machines.reverse();
+        let before = eng.peek_cpu_ns();
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        eng.set_rack(&mut swap);
+        let after = eng.peek_cpu_ns();
+        for i in 0..6 {
+            assert_eq!(after.0[5 - i], before.0[i]);
+        }
+        assert!(before.0[..6].iter().all(|&ns| ns > 0), "{before:?}");
+        assert_eq!(after.1, before.1, "shared work stays put");
+    }
+
     const SR: f32 = 44_100.0;
 
     impl Engine {
+        /// The CPU accumulators, without resetting them.
+        fn peek_cpu_ns(&self) -> ([u64; MAX_MACHINES], u64) {
+            (self.slot_ns, self.shared_ns)
+        }
+
         fn fm(&self) -> &FmSynth {
             self.slots
                 .iter()

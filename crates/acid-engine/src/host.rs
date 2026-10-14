@@ -9,7 +9,7 @@ use crate::machine::{MAX_MACHINES, MachineUid};
 use crate::mixer::remap_meters;
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
-use crate::rack::{CompiledSong, RackSwap};
+use crate::rack::{CompiledSong, RackSwap, remap_positions};
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::Mode;
@@ -124,6 +124,12 @@ pub struct Status {
     /// taken, i.e. accepted `SetRack`s plus `ReplaceEngine`s (wrapping;
     /// never reset). Per-position arrays describe that rack.
     pub rack_gen: u32,
+    /// Share of the audio time since the previous status spent on each
+    /// rack position's machine (render and channel strip; 1.0 = all of
+    /// it). Empty positions read 0.
+    pub slot_cpu: [f32; MAX_MACHINES],
+    /// Share spent on everything else: sequencing, sends and master.
+    pub shared_cpu: f32,
 }
 
 // Events travel by value through a preallocated ring: boxing the Status
@@ -157,6 +163,12 @@ pub struct EngineHost {
     cpu_peak: f32,
     overruns: u32,
     stops: u32,
+    /// Engine work since the previous status, by rack position and shared.
+    slot_ns: [u64; MAX_MACHINES],
+    shared_ns: u64,
+    /// Frames rendered since the previous status (the audio time the
+    /// work above covers).
+    cpu_frames: usize,
 }
 
 /// Wires an engine to a fresh pair of rings. Call on the UI thread; move
@@ -185,6 +197,9 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         cpu_peak: 0.0,
         overruns: 0,
         stops: 0,
+        slot_ns: [0; MAX_MACHINES],
+        shared_ns: 0,
+        cpu_frames: 0,
     };
     (host, command_tx, event_rx)
 }
@@ -215,6 +230,12 @@ impl EngineHost {
             *acc = acc.max(*m);
         }
         self.guard_fired |= self.engine.take_guard_fired();
+        let (slot_ns, shared_ns) = self.engine.take_cpu_ns();
+        for (acc, ns) in self.slot_ns.iter_mut().zip(slot_ns) {
+            *acc = acc.saturating_add(ns);
+        }
+        self.shared_ns = self.shared_ns.saturating_add(shared_ns);
+        self.cpu_frames = self.cpu_frames.saturating_add(out_l.len());
         self.since_status += out_l.len();
         if self.since_status >= self.status_every {
             // Keep the remainder so the rate averages STATUS_RATE_HZ for
@@ -274,6 +295,9 @@ impl EngineHost {
                     self.rack_gen = self.rack_gen.wrapping_add(1);
                     self.since_status = 0;
                     self.stops = 0;
+                    self.slot_ns = [0; MAX_MACHINES];
+                    self.shared_ns = 0;
+                    self.cpu_frames = 0;
                 }
                 Command::SetMode(mode) => self.engine.set_mode(mode),
                 Command::Song(mut song) => {
@@ -287,6 +311,7 @@ impl EngineHost {
                     match self.engine.set_rack(&mut swap) {
                         Some(map) => {
                             remap_meters(&mut self.meters, &map);
+                            remap_positions(&mut self.slot_ns, &map);
                             self.rack_gen = self.rack_gen.wrapping_add(1);
                         }
                         None => self.rack_rejected = true,
@@ -308,6 +333,11 @@ impl EngineHost {
     }
 
     fn send_status(&mut self) {
+        let secs = self.cpu_frames as f32 / self.engine.sample_rate();
+        let share = |ns: u64| {
+            let s = ns as f32 / 1e9 / secs;
+            if secs > 0.0 && s.is_finite() { s } else { 0.0 }
+        };
         let status = Status {
             playing: self.engine.is_playing(),
             playhead: self.engine.playhead(),
@@ -325,6 +355,8 @@ impl EngineHost {
             rack_rejected: self.rack_rejected,
             stops: self.stops,
             rack_gen: self.rack_gen,
+            slot_cpu: self.slot_ns.map(share),
+            shared_cpu: share(self.shared_ns),
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
@@ -333,6 +365,9 @@ impl EngineHost {
             self.guard_fired = false;
             self.song_rejected = false;
             self.rack_rejected = false;
+            self.slot_ns = [0; MAX_MACHINES];
+            self.shared_ns = 0;
+            self.cpu_frames = 0;
         }
     }
 }
@@ -356,6 +391,32 @@ mod tests {
             host.process(&mut l, &mut r);
             done += 512;
         }
+    }
+
+    #[test]
+    fn statuses_carry_shares_that_fit_in_the_budget() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        tx.push(Command::Play).unwrap();
+        run(&mut host, 48000);
+        let s = std::iter::from_fn(|| rx.pop().ok())
+            .filter_map(|e| match e {
+                Event::Status(s) => Some(s),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        let sum: f32 = s.slot_cpu.iter().sum::<f32>() + s.shared_cpu;
+        assert!(s.slot_cpu.iter().all(|c| c.is_finite() && *c >= 0.0));
+        assert!(s.shared_cpu.is_finite() && s.shared_cpu >= 0.0);
+        assert!(sum > 0.0, "something was timed");
+        assert!(
+            sum < 1.0,
+            "a test render on this machine is far below real time: {sum}"
+        );
+        assert!(
+            s.slot_cpu[6..].iter().all(|c| *c == 0.0),
+            "empty positions read zero"
+        );
     }
 
     #[test]

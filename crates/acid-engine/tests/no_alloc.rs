@@ -353,6 +353,23 @@ fn toggling_fm_effects_does_not_allocate() {
 }
 
 #[test]
+fn cpu_timing_does_not_allocate() {
+    let mut e = Engine::from_project(SR, &busy_project());
+    let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+    e.play();
+    let mut total = 0u64;
+    let n = count_allocs(|| {
+        for _ in 0..200 {
+            e.process(&mut l, &mut r);
+            let (slots, shared) = e.take_cpu_ns();
+            total += slots.iter().sum::<u64>() + shared;
+        }
+    });
+    assert_eq!(n, 0);
+    assert!(total > 0, "the blocks were timed");
+}
+
+#[test]
 fn the_counter_sees_allocations() {
     let n = count_allocs(|| {
         drop(std::hint::black_box(Vec::<u8>::with_capacity(16)));

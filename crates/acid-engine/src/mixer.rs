@@ -7,6 +7,7 @@ use crate::machine::MAX_MACHINES;
 use crate::params::{ChannelParam, FxParam, GlobalParam, MasterParam, exp, on, step_index};
 use crate::rack::{RackMap, Slot};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
+use std::time::Instant;
 
 pub struct StereoBuf {
     pub l: Vec<f32>,
@@ -177,14 +178,16 @@ impl Mixer {
     /// Mixes `n` samples of the slots' buffers, through their strips in
     /// rack order, into `out_l`/`out_r`. Precondition: `n` is at most the
     /// `max_block` given to `Mixer::new` and no longer than any buffer
-    /// passed in; at most `MAX_MACHINES` slots. Returns true when the NaN
-    /// guard fired (output was silenced and effect state reset).
+    /// passed in; at most `MAX_MACHINES` slots. Adds each slot's strip
+    /// time (nanoseconds) to `strip_ns` at its position. Returns true when
+    /// the NaN guard fired (output was silenced and effect state reset).
     pub fn process(
         &mut self,
         slots: &mut [Slot],
         n: usize,
         out_l: &mut [f32],
         out_r: &mut [f32],
+        strip_ns: &mut [u64; MAX_MACHINES],
     ) -> bool {
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         out_l.fill(0.0);
@@ -196,26 +199,27 @@ impl Mixer {
         let count = slots.len().min(MAX_MACHINES);
         let slots = &mut slots[..count];
         let any_solo = slots.iter().any(|s| s.strip.solo);
-        for (c, slot) in slots.iter_mut().enumerate() {
+        for ((c, slot), spent) in slots.iter_mut().enumerate().zip(strip_ns.iter_mut()) {
+            let start = Instant::now();
             let (strip, buf) = (&mut slot.strip, &mut slot.buf);
             let (l, r) = (&mut buf.l[..n], &mut buf.r[..n]);
             strip.dist.process(l, r);
             strip.comp.process(l, r);
-            if strip.mute || (any_solo && !strip.solo) {
-                continue;
+            if !(strip.mute || (any_solo && !strip.solo)) {
+                let (gl, gr) = (strip.gain * strip.pan_l, strip.gain * strip.pan_r);
+                for i in 0..n {
+                    let sl = l[i] * gl;
+                    let sr = r[i] * gr;
+                    self.meters[c] = self.meters[c].max(sl.abs()).max(sr.abs());
+                    out_l[i] += sl;
+                    out_r[i] += sr;
+                    self.delay_send.l[i] += sl * strip.delay_send;
+                    self.delay_send.r[i] += sr * strip.delay_send;
+                    self.reverb_send.l[i] += sl * strip.reverb_send;
+                    self.reverb_send.r[i] += sr * strip.reverb_send;
+                }
             }
-            let (gl, gr) = (strip.gain * strip.pan_l, strip.gain * strip.pan_r);
-            for i in 0..n {
-                let sl = l[i] * gl;
-                let sr = r[i] * gr;
-                self.meters[c] = self.meters[c].max(sl.abs()).max(sr.abs());
-                out_l[i] += sl;
-                out_r[i] += sr;
-                self.delay_send.l[i] += sl * strip.delay_send;
-                self.delay_send.r[i] += sr * strip.delay_send;
-                self.reverb_send.l[i] += sl * strip.reverb_send;
-                self.reverb_send.r[i] += sr * strip.reverb_send;
-            }
+            *spent = spent.saturating_add(start.elapsed().as_nanos() as u64);
         }
         self.wet.l[..n].fill(0.0);
         self.wet.r[..n].fill(0.0);
@@ -303,14 +307,14 @@ mod tests {
     fn run(m: &mut Mixer, slots: &mut [Slot]) -> (Vec<f32>, Vec<f32>) {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(slots, N, &mut l, &mut r);
+        m.process(slots, N, &mut l, &mut r, &mut [0; MAX_MACHINES]);
         (l, r)
     }
 
     fn guard_fired(m: &mut Mixer, slots: &mut [Slot]) -> bool {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(slots, N, &mut l, &mut r)
+        m.process(slots, N, &mut l, &mut r, &mut [0; MAX_MACHINES])
     }
 
     fn quiet_mixer() -> Mixer {

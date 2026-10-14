@@ -209,6 +209,15 @@ impl CompiledSong {
 /// `None` for a fresh slot (and for positions past the rack).
 pub type RackMap = [Option<usize>; MAX_MACHINES];
 
+/// Moves per-position values to the new positions in `map`; fresh slots
+/// (and positions past the rack) read the default.
+pub fn remap_positions<T: Copy + Default>(values: &mut [T; MAX_MACHINES], map: &RackMap) {
+    let old = *values;
+    for (v, from) in values.iter_mut().zip(map) {
+        *v = from.and_then(|o| old.get(o)).copied().unwrap_or_default();
+    }
+}
+
 /// A rack edit for the audio thread (`Command::SetRack`): everything the
 /// new rack needs that the engine doesn't already hold, built on the UI
 /// thread. After `Engine::set_rack` it carries what left the engine (the
