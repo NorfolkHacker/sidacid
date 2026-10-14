@@ -3,6 +3,7 @@
 
 mod audio;
 mod document;
+mod settings;
 mod ui;
 
 use std::path::Path;
