@@ -877,6 +877,7 @@ mod tests {
     fn busiest_tick(p: &Project) -> usize {
         let mut eng = Engine::from_project(SR, p);
         assert_eq!(eng.slots.len(), MAX_MACHINES);
+        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
         assert_eq!(p.song.automation.len(), eng.param_count, "a lane per param");
         let reserve = eng.events.capacity();
         assert!(reserve >= event_reserve(eng.param_count));
@@ -904,6 +905,60 @@ mod tests {
             notes >= MAX_MACHINES * (128 + MAX_NOTES),
             "every note slot releases 128 and starts MAX_NOTES on a wrap: {notes}"
         );
+    }
+
+    #[test]
+    fn a_reordered_rack_plays_the_same_patterns() {
+        // Same machines, reversed order: every machine still plays its own pattern.
+        let p = crate::demo::demo_project();
+        let mut q = p.clone();
+        q.machines.reverse();
+        let a = crate::render::render_patterns(&p, 2);
+        let b = crate::render::render_patterns(&q, 2);
+        // Summation order differs, so compare energy, not bits.
+        let e = |x: &(Vec<f32>, Vec<f32>)| x.0.iter().map(|s| (s * s) as f64).sum::<f64>();
+        assert!((e(&a) - e(&b)).abs() / e(&a) < 1e-3);
+    }
+
+    #[test]
+    fn a_second_303_sequences_its_own_patterns() {
+        use crate::project::MachineBody;
+        let mut p = Project::default();
+        let mut e = MachineEntry::new(MachineUid(7), MachineType::Synth, "Synth 3".into());
+        if let MachineBody::Synth(s) = &mut e.body {
+            s.patterns[0] = p.synth(MachineUid(1)).unwrap().patterns[0].clone();
+        }
+        p.machines.push(e);
+        p.next_uid = 8;
+        let mut eng = Engine::from_project(48000.0, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 4096], vec![0.0; 4096]);
+        eng.process(&mut l, &mut r);
+        assert!(eng.playhead()[6] > 0, "slot 7 advanced");
+    }
+
+    #[test]
+    fn sixteen_machines_fit_without_reallocating() {
+        let mut p = Project::default();
+        for u in 7..=16u16 {
+            p.machines.push(MachineEntry::new(
+                MachineUid(u),
+                MachineType::Synth,
+                format!("Synth {u}"),
+            ));
+        }
+        p.next_uid = 17;
+        p.validate().unwrap();
+        let eng = Engine::from_project(48000.0, &p);
+        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
+        let mut too_many = p.clone();
+        too_many.machines.push(MachineEntry::new(
+            MachineUid(17),
+            MachineType::Fm,
+            "FM 2".into(),
+        ));
+        too_many.next_uid = 18;
+        assert!(too_many.validate().is_err());
     }
 
     const SR: f32 = 44_100.0;
