@@ -9,7 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use rtrb::{Consumer, Producer, PushError};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 /// Frames rendered per engine call inside the device callback.
@@ -20,6 +20,8 @@ pub struct AudioLink {
     commands: Producer<Command>,
     events: Consumer<Event>,
     failed: Arc<AtomicBool>,
+    /// Frames in the device's latest callback (0 before the first).
+    buffer_frames: Arc<AtomicU32>,
     pub sample_rate: f32,
     pub device_name: String,
 }
@@ -41,10 +43,12 @@ impl AudioLink {
         let config: cpal::StreamConfig = supported.into();
         let (engine_host, commands, events) = channel(Engine::from_project(sample_rate, project));
         let failed = Arc::new(AtomicBool::new(false));
+        let buffer_frames = Arc::new(AtomicU32::new(0));
+        let shared = (failed.clone(), buffer_frames.clone());
         let stream = match format {
-            cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine_host, failed.clone()),
-            cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine_host, failed.clone()),
-            cpal::SampleFormat::U16 => build::<u16>(&device, &config, engine_host, failed.clone()),
+            cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine_host, shared),
+            cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine_host, shared),
+            cpal::SampleFormat::U16 => build::<u16>(&device, &config, engine_host, shared),
             other => Err(format!("unsupported sample format {other:?}")),
         }?;
         stream
@@ -55,6 +59,7 @@ impl AudioLink {
             commands,
             events,
             failed,
+            buffer_frames,
             sample_rate,
             device_name,
         })
@@ -67,6 +72,10 @@ impl AudioLink {
 
     pub fn poll(&mut self) -> Option<Event> {
         self.events.pop().ok()
+    }
+
+    pub fn buffer_frames(&self) -> u32 {
+        self.buffer_frames.load(Ordering::Relaxed)
     }
 
     pub fn has_failed(&self) -> bool {
@@ -87,7 +96,7 @@ fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut host: EngineHost,
-    failed: Arc<AtomicBool>,
+    (failed, buffer_frames): (Arc<AtomicBool>, Arc<AtomicU32>),
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -104,6 +113,7 @@ where
                 let frames = data.len() / channels.max(1);
                 let mut render = |a: &mut [f32], b: &mut [f32]| host.process(a, b);
                 fill_interleaved(&mut render, &mut l, &mut r, data, channels);
+                buffer_frames.store(frames as u32, Ordering::Relaxed);
                 if frames > 0 {
                     let budget = frames as f32 / sample_rate;
                     host.set_cpu_load(started.elapsed().as_secs_f32() / budget);

@@ -1,4 +1,4 @@
-//! The transport bar: play/stop, tempo, swing, lo-fi, master, CPU.
+//! The transport bar: play/stop, tempo, swing, lo-fi, master, performance.
 
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -90,16 +90,7 @@ impl SidAcidApp {
             self.param_knob(ui, ParamId::Master(MasterParam::LoFi), "Lo-Fi");
             self.param_knob(ui, ParamId::Master(MasterParam::Level), "Master");
             ui.separator();
-            let cpu = self.status.cpu * 100.0;
-            let colour = if cpu > 80.0 {
-                theme::ACCENT
-            } else {
-                ui.visuals().text_color()
-            };
-            let cpu_label = ui.label(egui::RichText::new(format!("CPU {cpu:.0}%")).color(colour));
-            if let Some(audio) = &self.audio {
-                cpu_label.on_hover_text(audio.device_name.as_str());
-            }
+            self.perf_readout(ui);
             if let Some(line) = &self.view.status_line {
                 ui.separator();
                 ui.label(egui::RichText::new(line).small());

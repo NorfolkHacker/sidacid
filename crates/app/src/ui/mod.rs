@@ -13,6 +13,7 @@ mod mixer_panel;
 mod note_panel;
 mod pads;
 mod params_ui;
+mod perf;
 mod pianoroll;
 mod poly_edit;
 mod polyroll;
@@ -137,6 +138,7 @@ pub struct ViewState {
     pub sampler_sensitivity: Option<f32>,
     /// Key held by a shift-click on a slot pad.
     pub pad_note: Option<u8>,
+    pub perf: perf::PerfMeter,
 }
 
 pub struct SidAcidApp {
@@ -198,6 +200,7 @@ impl SidAcidApp {
         self.pending.clear();
         // Whatever happens, the next engine is a fresh one.
         self.reset_transport_view();
+        self.view.perf.restart();
         match AudioLink::start(&self.doc.project) {
             Ok(link) => {
                 self.audio = Some(link);
@@ -306,6 +309,7 @@ impl SidAcidApp {
         // UI edits are bounded and loaded songs validated, so a
         // refused song means the UI and engine disagree: a bug.
         debug_assert!(!status.song_rejected, "the engine refused a song");
+        self.view.perf.on_status(&status, now);
         self.status = status;
         self.view.auto_retried = false;
     }

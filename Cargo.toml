@@ -19,6 +19,7 @@ rand = "0.8"
 rand_pcg = "0.3"
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis"] }
 flate2 = "1"
+memory-stats = "1.2"
 base64 = "0.22"
 
 # Audio tests render seconds of sound; unoptimised builds are too slow.

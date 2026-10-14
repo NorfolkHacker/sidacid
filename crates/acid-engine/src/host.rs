@@ -87,6 +87,11 @@ pub struct Status {
     pub meters: [f32; CHANNELS + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
+    /// Worst single callback load since the previous status.
+    pub cpu_peak: f32,
+    /// Callbacks whose render took longer than their time budget, counted
+    /// for the life of the stream (wrapping); engine swaps do not reset it.
+    pub overruns: u32,
     pub guard_fired: bool,
     pub mode: Mode,
     pub song_bar: u16,
@@ -122,6 +127,8 @@ pub struct EngineHost {
     guard_fired: bool,
     song_rejected: bool,
     cpu: f32,
+    cpu_peak: f32,
+    overruns: u32,
     stops: u32,
 }
 
@@ -146,6 +153,8 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         guard_fired: false,
         song_rejected: false,
         cpu: 0.0,
+        cpu_peak: 0.0,
+        overruns: 0,
         stops: 0,
     };
     (host, command_tx, event_rx)
@@ -161,6 +170,10 @@ impl EngineHost {
     pub fn set_cpu_load(&mut self, load: f32) {
         if load.is_finite() {
             self.cpu += (load - self.cpu) * CPU_SMOOTHING;
+            self.cpu_peak = self.cpu_peak.max(load);
+            if load > 1.0 {
+                self.overruns = self.overruns.wrapping_add(1);
+            }
         }
     }
 
@@ -278,6 +291,8 @@ impl EngineHost {
             queued: self.engine.queued_patterns(),
             meters: self.meters,
             cpu: self.cpu,
+            cpu_peak: self.cpu_peak,
+            overruns: self.overruns,
             guard_fired: self.guard_fired,
             mode: self.engine.mode(),
             song_bar: self.engine.song_bar().min(u16::MAX as usize) as u16,
@@ -288,6 +303,7 @@ impl EngineHost {
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
             self.meters = [0.0; CHANNELS + 1];
+            self.cpu_peak = 0.0;
             self.guard_fired = false;
             self.song_rejected = false;
         }
@@ -679,5 +695,49 @@ mod tests {
         assert!(rejected.len() > 1, "{rejected:?}");
         assert!(rejected[0], "the next status reports the refusal");
         assert!(!rejected[1..].iter().any(|r| *r), "only once: {rejected:?}");
+    }
+
+    fn statuses(rx: &mut rtrb::Consumer<Event>) -> Vec<Status> {
+        std::iter::from_fn(|| rx.pop().ok())
+            .filter_map(|e| match e {
+                Event::Status(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cpu_peak_is_the_worst_load_since_the_previous_status() {
+        let (mut host, _tx, mut rx) = host_with_demo();
+        host.set_cpu_load(0.2);
+        host.set_cpu_load(0.7);
+        host.set_cpu_load(0.3);
+        run(&mut host, 1024);
+        let first = *statuses(&mut rx).last().unwrap();
+        assert_eq!(first.cpu_peak, 0.7);
+        host.set_cpu_load(0.4);
+        run(&mut host, 1024);
+        assert_eq!(statuses(&mut rx).last().unwrap().cpu_peak, 0.4);
+    }
+
+    #[test]
+    fn a_load_over_the_budget_counts_an_overrun_and_nan_is_ignored() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        host.set_cpu_load(0.9);
+        host.set_cpu_load(1.0);
+        host.set_cpu_load(1.5);
+        host.set_cpu_load(f32::NAN);
+        host.set_cpu_load(f32::INFINITY);
+        host.set_cpu_load(2.0);
+        run(&mut host, 1024);
+        let s = *statuses(&mut rx).last().unwrap();
+        assert_eq!(s.overruns, 2);
+        assert_eq!(s.cpu_peak, 2.0);
+        // The count runs across engine swaps; the UI keeps its own baseline.
+        tx.push(Command::ReplaceEngine(Box::new(Engine::new(SR))))
+            .unwrap();
+        host.set_cpu_load(1.2);
+        run(&mut host, 1024);
+        assert_eq!(statuses(&mut rx).last().unwrap().overruns, 3);
     }
 }
