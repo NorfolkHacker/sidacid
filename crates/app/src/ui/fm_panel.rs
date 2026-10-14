@@ -124,13 +124,6 @@ impl SidAcidApp {
                 });
             app.fm_voice_browser(ui, uid);
             app.note_pattern_row(ui, uid);
-            if ui
-                .button("Randomise")
-                .on_hover_text("Randomise the selected pattern (undoable)")
-                .clicked()
-            {
-                app.randomise_notes(uid);
-            }
             app.poly_roll(ui, uid);
         });
     }

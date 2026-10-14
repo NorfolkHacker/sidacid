@@ -253,32 +253,6 @@ impl SidAcidApp {
         self.view.focus = Some(uid);
     }
 
-    pub(crate) fn randomise_notes(&mut self, uid: MachineUid) {
-        let seed = self.next_seed();
-        self.randomise_notes_seeded(uid, seed);
-    }
-
-    /// A fresh line for the selected pattern of note machine `uid`, rooted
-    /// where its roll first scrolls to.
-    pub(crate) fn randomise_notes_seeded(&mut self, uid: MachineUid, seed: u64) {
-        let slot = self.selected(uid);
-        let root = self.roll_start_pitch(uid);
-        let Some(bank) = self.doc.project.note_patterns(uid) else {
-            return;
-        };
-        let pattern = acid_engine::random::randomise_notes(&bank[slot as usize], root, seed);
-        let cmds = self.doc.apply(
-            crate::document::Edit::NotePattern {
-                uid,
-                slot,
-                pattern: Box::new(pattern),
-            },
-            false,
-        );
-        self.send(cmds);
-        self.view.focus = Some(uid);
-    }
-
     pub(crate) fn drum_template(&mut self, uid: MachineUid) {
         let seed = self.next_seed();
         let slot = self.selected(uid);
@@ -328,21 +302,6 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_rack::*;
-
-    #[test]
-    fn randomising_an_fm_pattern_is_one_undo_step() {
-        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let slot = app.selected(FM);
-        let before = app.doc.project.note_patterns(FM).unwrap()[slot as usize].clone();
-        app.view.focus = Some(SYNTH1);
-        app.randomise_notes_seeded(FM, 5);
-        let after = &app.doc.project.note_patterns(FM).unwrap()[slot as usize];
-        assert_ne!(*after, before);
-        assert!(!after.notes.is_empty());
-        assert_eq!(app.view.focus, Some(FM));
-        app.doc.undo();
-        assert_eq!(app.doc.project.note_patterns(FM).unwrap()[slot as usize], before);
-    }
 
     #[test]
     fn length_and_transpose_edits_focus_the_synth() {

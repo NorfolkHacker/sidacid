@@ -2,10 +2,7 @@
 //! always gives the same pattern, so tests are deterministic.
 
 use crate::drums::{BD, CH, CP, OH, SD};
-use crate::project::{
-    DrumHit, DrumPattern, Gate, MAX_NOTES, Note, NotePattern, SynthPattern, TICKS_PER_STEP,
-    steps_of,
-};
+use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, steps_of};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 
@@ -161,66 +158,6 @@ pub fn randomise_synth(
                 out.steps[i].accent = false;
             }
         }
-    }
-    out
-}
-
-/// Note lengths in steps, and how often each is picked.
-const NOTE_STEPS: [u16; 5] = [1, 2, 3, 4, 8];
-const NOTE_STEP_WEIGHTS: [f32; 5] = [3.0, 3.0, 1.0, 2.0, 0.5];
-
-/// A fresh poly pattern for the FM synth: a scale-bound line around
-/// `root` (a MIDI pitch) with varied lengths, rests and the odd triad.
-/// Notes starting past the length are kept untouched.
-pub fn randomise_notes(p: &NotePattern, root: u8, seed: u64) -> NotePattern {
-    let mut rng = Pcg32::seed_from_u64(seed);
-    let len = steps_of(p.length) as u16;
-    let visible = len * TICKS_PER_STEP;
-    let mut out = NotePattern {
-        notes: p.notes.iter().copied().filter(|n| n.start >= visible).collect(),
-        length: p.length,
-    };
-    let scale = pick_scale(&mut rng);
-    let mut degree = 0i32;
-    let mut step = 0u16;
-    while step < len {
-        if step > 0 && rng.gen_bool(0.25) {
-            step += 1;
-            continue;
-        }
-        let dur = NOTE_STEPS[weighted(&mut rng, &NOTE_STEP_WEIGHTS)].min(len - step);
-        let r: f32 = rng.r#gen();
-        degree = if r < 0.3 {
-            0
-        } else if r < 0.5 {
-            degree + 1
-        } else if r < 0.7 {
-            degree - 1
-        } else if r < 0.85 {
-            degree + 2
-        } else {
-            rng.gen_range(-3..=7)
-        }
-        .clamp(-7, 10);
-        let vel = if step % 4 == 0 {
-            rng.gen_range(96..=120)
-        } else {
-            rng.gen_range(64..=100)
-        };
-        let chord: &[i32] = if rng.gen_bool(0.2) { &[0, 2, 4] } else { &[0] };
-        for &extra in chord {
-            if out.notes.len() >= MAX_NOTES {
-                break;
-            }
-            let pitch = (root as i32 + degree_to_semitone(scale, degree + extra)).clamp(0, 127);
-            out.notes.push(Note {
-                start: step * TICKS_PER_STEP,
-                len: dur * TICKS_PER_STEP,
-                pitch: pitch as u8,
-                vel,
-            });
-        }
-        step += dur;
     }
     out
 }
@@ -763,62 +700,5 @@ mod tests {
         };
         let r = randomise_synth(&base, Dice::ALL, &groove_four_on_floor(), 5);
         assert_eq!(&r.steps[8..], &base.steps[8..]);
-    }
-
-    #[test]
-    fn note_randomiser_is_deterministic_and_varies() {
-        let base = NotePattern::default();
-        let a = randomise_notes(&base, 48, 7);
-        assert_eq!(a, randomise_notes(&base, 48, 7));
-        assert_ne!(a, randomise_notes(&base, 48, 8));
-    }
-
-    #[test]
-    fn randomised_notes_are_well_formed_inside_the_length_and_never_overlap() {
-        for seed in 0..300 {
-            for length in [1u8, 7, 16, 64] {
-                let base = NotePattern {
-                    length,
-                    ..NotePattern::default()
-                };
-                let r = randomise_notes(&base, 48, seed);
-                assert!(r.is_well_formed(), "seed {seed} len {length}");
-                assert!(!r.notes.is_empty(), "seed {seed} len {length}");
-                let visible = length as u16 * TICKS_PER_STEP;
-                for (i, a) in r.notes.iter().enumerate() {
-                    assert!(a.start + a.len <= visible, "seed {seed}: {a:?}");
-                    assert!((36..=72).contains(&a.pitch), "seed {seed}: {a:?}");
-                    for b in &r.notes[i + 1..] {
-                        let overlap = a.start < b.start + b.len && b.start < a.start + a.len;
-                        assert!(!(a.pitch == b.pitch && overlap), "seed {seed}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn note_randomiser_keeps_notes_past_the_length() {
-        let hidden = Note {
-            start: 16 * TICKS_PER_STEP,
-            len: 4,
-            pitch: 60,
-            vel: 100,
-        };
-        let base = NotePattern {
-            notes: vec![
-                hidden,
-                Note {
-                    start: 0,
-                    len: 4,
-                    pitch: 99,
-                    vel: 100,
-                },
-            ],
-            length: 16,
-        };
-        let r = randomise_notes(&base, 48, 3);
-        assert!(r.notes.contains(&hidden));
-        assert!(r.notes.iter().all(|n| n.pitch != 99));
     }
 }
