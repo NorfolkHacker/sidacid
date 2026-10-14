@@ -20,3 +20,11 @@ DEFERRED MINORS (task reviews)
 - UI: shared_cpu's first reading smoothed from 0; header CPU label is selectable text.
 - Pool: parse-budget sharing across several samplers not tested directly; parse-limit test
   takes ~1.6 s (144 MB fixture).
+
+FROM THE FINAL REVIEW (all minor; merge approved)
+- Seed shared_cpu like machine readings (Option) and clear machine_cpu when an engine is
+  replaced or a new host starts (uids 1–6 repeat across projects, so a reading can carry over
+  for under a second).
+- A machine added mid-window reads low for ~0.5 s (partial window).
+- Spec's "slot shares sum ≤ total CPU" is tested as sum < 1.0, not against the measured load.
+- A two-sampler parse-budget fixture would cover "shared across samplers" directly (+~1.6 s).
