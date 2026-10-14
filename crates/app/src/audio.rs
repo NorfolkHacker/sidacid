@@ -25,8 +25,6 @@ pub struct AudioLink {
     buffer_frames: Arc<AtomicU32>,
     xruns: Arc<AtomicU32>,
     pub sample_rate: f32,
-    pub device_name: String,
-    #[allow(dead_code)] // read via `opened()` (Task 5)
     opened: OpenedStream,
 }
 
@@ -92,7 +90,7 @@ impl AudioLink {
             .map_err(|e| format!("could not start audio: {e}"))?;
         let opened = OpenedStream {
             driver: choice.driver.clone(),
-            device: device_name.clone(),
+            device: device_name,
             sample_rate: config.sample_rate.0,
             buffer_frames: choice.buffer_frames,
         };
@@ -104,18 +102,15 @@ impl AudioLink {
             buffer_frames,
             xruns,
             sample_rate,
-            device_name,
             opened,
         })
     }
 
-    #[allow(dead_code)] // used by the settings UI (Task 5)
     pub fn opened(&self) -> &OpenedStream {
         &self.opened
     }
 
     /// Driver xruns since this stream opened.
-    #[allow(dead_code)] // shown by the meter (Task 5)
     pub fn xruns(&self) -> u32 {
         self.xruns.load(Ordering::Relaxed)
     }

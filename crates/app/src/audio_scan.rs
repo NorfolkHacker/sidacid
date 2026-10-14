@@ -9,7 +9,6 @@ pub fn host_id(name: &str) -> Option<cpal::HostId> {
     cpal::ALL_HOSTS.iter().copied().find(|h| h.name() == name)
 }
 
-#[allow(dead_code)] // used by the settings UI (Task 6)
 pub fn default_host_name() -> &'static str {
     cpal::default_host().id().name()
 }

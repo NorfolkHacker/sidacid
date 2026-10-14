@@ -20,6 +20,9 @@ pub struct PerfMeter {
     /// when the user last cleared the warning.
     overruns_seen: u32,
     overrun_base: u32,
+    /// The stream's driver-reported xruns, likewise.
+    xruns_seen: u32,
+    xrun_base: u32,
     last_overrun_at: Option<f64>,
     memory: Option<u64>,
     memory_at: Option<f64>,
@@ -33,6 +36,14 @@ impl PerfMeter {
         }
         if status.overruns != self.overruns_seen {
             self.overruns_seen = status.overruns;
+            self.last_overrun_at = Some(now);
+        }
+    }
+
+    /// The stream's driver-reported xrun count (JACK); 0 elsewhere.
+    pub fn on_xruns(&mut self, count: u32, now: f64) {
+        if count != self.xruns_seen {
+            self.xruns_seen = count;
             self.last_overrun_at = Some(now);
         }
     }
@@ -55,8 +66,26 @@ impl PerfMeter {
         self.overruns_seen.wrapping_sub(self.overrun_base)
     }
 
+    pub fn xruns(&self) -> u32 {
+        self.xruns_seen.wrapping_sub(self.xrun_base)
+    }
+
+    /// Everything the warning counts: our overruns plus driver xruns.
+    pub fn dropouts(&self) -> u32 {
+        self.overruns().wrapping_add(self.xruns())
+    }
+
+    pub fn breakdown(&self) -> String {
+        format!(
+            "{} render overruns · {} driver xruns",
+            self.overruns(),
+            self.xruns()
+        )
+    }
+
     pub fn clear_overruns(&mut self) {
         self.overrun_base = self.overruns_seen;
+        self.xrun_base = self.xruns_seen;
         self.last_overrun_at = None;
     }
 
@@ -96,14 +125,20 @@ impl SidAcidApp {
     pub(crate) fn perf_readout(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
         self.view.perf.tick_memory(now, process_memory);
+        if let Some(audio) = &self.audio {
+            self.view.perf.on_xruns(audio.xruns(), now);
+        }
         let normal = ui.visuals().text_color();
         let perf = &self.view.perf;
         let cpu = self.status.cpu;
         let mut hover = String::new();
         if let Some(audio) = &self.audio {
+            let o = audio.opened();
             hover.push_str(&format!(
-                "{} · {:.0} Hz",
-                audio.device_name, audio.sample_rate
+                "{} · {} · {} Hz",
+                crate::audio_select::driver_label(&o.driver),
+                o.device,
+                o.sample_rate
             ));
             match audio.buffer_frames() {
                 0 => {}
@@ -137,8 +172,8 @@ impl SidAcidApp {
             .color(colour),
         )
         .on_hover_text("Decoded sampler audio, against its limit");
-        let overruns = perf.overruns();
-        if overruns > 0 {
+        let dropouts = perf.dropouts();
+        if dropouts > 0 {
             let ago = perf
                 .last_overrun_at
                 .map(|at| format!("\nLast one {:.0} s ago", (now - at).max(0.0)))
@@ -146,13 +181,13 @@ impl SidAcidApp {
             let clicked = ui
                 .add(
                     egui::Button::new(
-                        egui::RichText::new(format!("⚠ {overruns}")).color(theme::ACCENT),
+                        egui::RichText::new(format!("⚠ {dropouts}")).color(theme::ACCENT),
                     )
                     .frame(false),
                 )
                 .on_hover_text(format!(
-                    "{overruns} audio callback(s) took longer to render than their time budget \
-                     (audible dropouts).{ago}\nClick to clear."
+                    "Audible dropouts: {}.{ago}\nClick to clear.",
+                    perf.breakdown()
                 ))
                 .clicked();
             if clicked {
@@ -207,6 +242,24 @@ mod tests {
         p.restart();
         p.on_status(&status(0.0, 1), 5.0);
         assert_eq!(p.overruns(), 1);
+    }
+
+    #[test]
+    fn xruns_add_to_the_warning_and_clear_with_it() {
+        let mut p = PerfMeter::default();
+        p.on_status(&status(0.0, 2), 1.0);
+        p.on_xruns(5, 1.5);
+        assert_eq!((p.overruns(), p.xruns()), (2, 5));
+        assert_eq!(p.dropouts(), 7);
+        assert_eq!(p.last_overrun_at, Some(1.5));
+        assert_eq!(p.breakdown(), "2 render overruns · 5 driver xruns");
+        p.clear_overruns();
+        assert_eq!(p.dropouts(), 0);
+        p.on_xruns(6, 2.0);
+        assert_eq!(p.dropouts(), 1);
+        p.restart();
+        p.on_xruns(0, 3.0);
+        assert_eq!(p.dropouts(), 0);
     }
 
     #[test]

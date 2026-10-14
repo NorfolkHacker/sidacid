@@ -145,6 +145,10 @@ pub struct SidAcidApp {
     pub(crate) doc: Document,
     pub(crate) audio: Option<AudioLink>,
     pub(crate) audio_error: Option<String>,
+    /// This machine's settings, and the file they load from and save to
+    /// (None when headless or the environment gives no home for it).
+    pub(crate) settings: crate::settings::Settings,
+    pub(crate) settings_path: Option<std::path::PathBuf>,
     pub(crate) status: Status,
     pub(crate) pending: Vec<Command>,
     pub(crate) view: ViewState,
@@ -174,10 +178,52 @@ impl ViewState {
     }
 }
 
+/// Opens the stream `saved` asks for, falling back as `audio_select::choose`
+/// describes. Scans only the hosts the choice can need.
+pub(crate) fn open_audio(
+    project: &acid_engine::project::Project,
+    saved: &crate::settings::AudioSettings,
+) -> Result<(AudioLink, Vec<String>), String> {
+    use crate::{audio_scan, audio_select};
+    let default = audio_scan::default_host_name();
+    if *saved == crate::settings::AudioSettings::default() {
+        // Nothing saved: skip the device scan (ALSA's takes ~0.5 s) and
+        // let the driver pick its defaults.
+        let choice = audio_select::Choice {
+            driver: default.to_string(),
+            device: None,
+            sample_rate: None,
+            buffer_frames: None,
+        };
+        return Ok((AudioLink::open(project, &choice)?, Vec::new()));
+    }
+    let mut wanted = vec![default];
+    if let Some(d) = saved.driver.as_deref()
+        && d != default
+    {
+        wanted.push(d);
+    }
+    let available = cpal::available_hosts();
+    let hosts: Vec<_> = wanted
+        .into_iter()
+        .filter_map(audio_scan::host_id)
+        .filter(|id| available.contains(id))
+        .filter_map(audio_scan::scan_host)
+        .collect();
+    let (choice, notes) = audio_select::choose(&hosts, default, saved)?;
+    Ok((AudioLink::open(project, &choice)?, notes))
+}
+
 impl SidAcidApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut app = Self::headless(Document::new(acid_engine::demo::demo_project()));
+        app.settings_path = crate::settings::settings_path();
+        if let Some(path) = &app.settings_path {
+            let (settings, notice) = crate::settings::load(path);
+            app.settings = settings;
+            app.view.status_line = notice;
+        }
         app.start_audio();
         app
     }
@@ -188,6 +234,8 @@ impl SidAcidApp {
             doc,
             audio: None,
             audio_error: None,
+            settings: crate::settings::Settings::default(),
+            settings_path: None,
             status: Status::default(),
             pending: Vec::new(),
             view: ViewState::default(),
@@ -201,22 +249,18 @@ impl SidAcidApp {
         // Whatever happens, the next engine is a fresh one.
         self.reset_transport_view();
         self.view.perf.restart();
-        let opened = crate::audio_scan::scan_host(cpal::default_host().id())
-            .ok_or_else(|| "no audio driver available".to_string())
-            .and_then(|h| {
-                let name = h.id.clone();
-                crate::audio_select::choose(&[h], &name, &Default::default())
-            })
-            .and_then(|(choice, _)| AudioLink::open(&self.doc.project, &choice));
-        match opened {
-            Ok(link) => {
+        // Release the old stream before opening another: JACK and ASIO
+        // allow one client stream per device.
+        self.audio = None;
+        match open_audio(&self.doc.project, &self.settings.audio) {
+            Ok((link, notes)) => {
                 self.audio = Some(link);
                 self.audio_error = None;
+                if !notes.is_empty() {
+                    self.view.status_line = Some(notes.join("; "));
+                }
             }
-            Err(e) => {
-                self.audio = None;
-                self.audio_error = Some(e);
-            }
+            Err(e) => self.audio_error = Some(e),
         }
     }
 

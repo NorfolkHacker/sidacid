@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 pub const SETTINGS_VERSION: u32 = 1;
 
-#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Settings {
     pub version: u32,
@@ -26,7 +25,6 @@ impl Default for Settings {
 }
 
 /// `None` everywhere means "whatever the system picks".
-#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq, Debug)]
 pub struct AudioSettings {
     /// A cpal `HostId::name()`, e.g. "ALSA", "JACK", "WASAPI", "ASIO".
@@ -47,7 +45,6 @@ struct VersionOnly {
 
 /// Where this machine's settings live, or `None` when the environment
 /// gives no home for them.
-#[allow(dead_code)]
 pub fn settings_path() -> Option<PathBuf> {
     path_from(cfg!(windows), |k| std::env::var_os(k))
 }
@@ -63,7 +60,6 @@ fn path_from(windows: bool, var: impl Fn(&str) -> Option<OsString>) -> Option<Pa
 
 /// Reads the settings. A missing file is plain defaults; an unreadable,
 /// unparseable or newer file is defaults plus a notice for the user.
-#[allow(dead_code)]
 pub fn load(path: &Path) -> (Settings, Option<String>) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
