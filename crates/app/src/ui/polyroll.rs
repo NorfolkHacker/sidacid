@@ -16,15 +16,13 @@ use acid_engine::project::{NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 
 const TICK_W: f32 = 6.0;
-const ROW_H: f32 = 8.0;
+/// Rows sized like the acid synth's piano roll: three octaves in view.
+const ROW_H: f32 = 12.0;
 const KEY_W: f32 = 30.0;
 /// The sampler's key strip is wider to fit row labels like "Amen ·05".
 const SAMPLER_KEY_W: f32 = 64.0;
 const VEL_H: f32 = 32.0;
-const VIEW_H: f32 = 260.0;
-/// The FM roll matches the acid synth's piano roll: three octaves in view.
-const FM_ROW_H: f32 = 12.0;
-const FM_VIEW_H: f32 = FM_ROW_H * super::roll_edit::ROLL_ROWS as f32;
+const VIEW_H: f32 = ROW_H * super::roll_edit::ROLL_ROWS as f32;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
 const FM_START_PITCH: u8 = 48;
@@ -56,11 +54,7 @@ impl SidAcidApp {
 
     pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let is_sampler = self.doc.project.sampler(uid).is_some();
-        let (key_w, row_h, view_h) = if is_sampler {
-            (SAMPLER_KEY_W, ROW_H, VIEW_H)
-        } else {
-            (KEY_W, FM_ROW_H, FM_VIEW_H)
-        };
+        let key_w = if is_sampler { SAMPLER_KEY_W } else { KEY_W };
         let slot = self.selected(uid);
         let Some(bank) = self.doc.project.note_patterns(uid) else {
             return;
@@ -85,23 +79,23 @@ impl SidAcidApp {
             .show(ui, |ui| {
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt(("poly_v", uid))
-                    .max_height(view_h);
+                    .max_height(VIEW_H);
                 if !self.view.panel(uid).poly_scrolled {
                     let pitch = self.roll_start_pitch(uid) as usize;
-                    let y = (ROWS - 1 - pitch) as f32 * row_h - view_h / 2.0;
+                    let y = (ROWS - 1 - pitch) as f32 * ROW_H - VIEW_H / 2.0;
                     scroll = scroll.vertical_scroll_offset(y.max(0.0));
                     self.view.panel(uid).poly_scrolled = true;
                 }
                 scroll.show(ui, |ui| {
                     let (rect, resp) = ui.allocate_exact_size(
-                        vec2(width, row_h * ROWS as f32),
+                        vec2(width, ROW_H * ROWS as f32),
                         Sense::click_and_drag(),
                     );
                     let geom = PolyGeom {
                         left: rect.left() + key_w,
                         top: rect.top(),
                         tick_w: TICK_W,
-                        row_h,
+                        row_h: ROW_H,
                         ticks,
                     };
                     let painter = ui.painter_at(rect);
@@ -111,7 +105,7 @@ impl SidAcidApp {
                         let black = BLACK_KEYS[pitch as usize % 12];
                         let row = egui::Rect::from_min_max(
                             pos2(geom.left, y0),
-                            pos2(rect.right(), y0 + row_h),
+                            pos2(rect.right(), y0 + ROW_H),
                         );
                         painter.rect_filled(
                             row,
@@ -136,7 +130,7 @@ impl SidAcidApp {
                         }
                         let key = egui::Rect::from_min_max(
                             pos2(rect.left(), y0),
-                            pos2(geom.left - 1.0, y0 + row_h - 1.0),
+                            pos2(geom.left - 1.0, y0 + ROW_H - 1.0),
                         );
                         let key_colour = if held == Some(pitch) {
                             theme::ACID
@@ -148,7 +142,7 @@ impl SidAcidApp {
                         painter.rect_filled(key, 1.0, key_colour);
                         if let Some((_, text)) = &sampler_row {
                             painter.text(
-                                pos2(rect.left() + 1.0, y0 + row_h / 2.0),
+                                pos2(rect.left() + 1.0, y0 + ROW_H / 2.0),
                                 Align2::LEFT_CENTER,
                                 text,
                                 FontId::monospace(8.0),
@@ -160,7 +154,7 @@ impl SidAcidApp {
                             );
                         } else if pitch % 12 == 0 {
                             painter.text(
-                                pos2(rect.left() + 2.0, y0 + row_h / 2.0),
+                                pos2(rect.left() + 2.0, y0 + ROW_H / 2.0),
                                 Align2::LEFT_CENTER,
                                 format!("C{}", pitch as i32 / 12 - 1),
                                 FontId::monospace(8.0),
