@@ -3,25 +3,23 @@
 use super::SidAcidApp;
 use super::poly_edit::Snap;
 use crate::document::Edit;
-use crate::six::SixMachines;
-use acid_engine::machine::MachineId;
+use acid_engine::machine::MachineUid;
 use eframe::egui;
 
 impl SidAcidApp {
     /// Pattern pads, length and snap for a note machine (FM or Sampler).
-    pub(crate) fn note_pattern_row(&mut self, ui: &mut egui::Ui, m: usize) {
-        let n = m - MachineId::Fm.index();
-        let slot = self.doc.project.entry_at(m).selected;
+    pub(crate) fn note_pattern_row(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let slot = self.selected(uid);
         egui::ScrollArea::horizontal()
-            .id_salt(("note_pads", m))
+            .id_salt(("note_pads", uid))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    self.pattern_pads(ui, m);
+                    self.pattern_pads(ui, uid);
                     ui.separator();
                     let mut length = self
                         .doc
                         .project
-                        .notes_at(m)
+                        .note_patterns(uid)
                         .map_or(16, |p| p[slot as usize].length);
                     let r = ui.add(
                         egui::DragValue::new(&mut length)
@@ -30,17 +28,13 @@ impl SidAcidApp {
                     );
                     if r.changed() {
                         let cmds = self.doc.apply(
-                            Edit::NoteLength {
-                                machine: m,
-                                slot,
-                                length,
-                            },
+                            Edit::NoteLength { uid, slot, length },
                             // Only a drag merges into one undo step; an arrow key
                             // or typed value is its own step.
                             r.dragged(),
                         );
                         self.send(cmds);
-                        self.view.focus = m;
+                        self.view.focus = Some(uid);
                     }
                     if r.drag_stopped() || r.lost_focus() {
                         self.doc.end_gesture();
@@ -48,11 +42,9 @@ impl SidAcidApp {
                     ui.separator();
                     ui.label("Snap");
                     for s in Snap::ALL {
-                        if ui
-                            .selectable_label(self.view.poly_snap[n] == s, s.label())
-                            .clicked()
-                        {
-                            self.view.poly_snap[n] = s;
+                        let snap = &mut self.view.panel(uid).poly_snap;
+                        if ui.selectable_label(*snap == s, s.label()).clicked() {
+                            *snap = s;
                         }
                     }
                 });

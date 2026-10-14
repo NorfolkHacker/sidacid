@@ -710,7 +710,7 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{MachineId, standard_rack};
+    use crate::machine::{MachineUid, standard_rack};
     use crate::project::{DrumHit, DrumPattern, Gate, NotePattern, SynthPattern, SynthStep};
 
     const SR: f32 = 44_100.0;
@@ -1044,10 +1044,10 @@ mod tests {
 
     #[test]
     fn param_lane_emits_param_events() {
-        use crate::params::{SynthParam, synth_param};
+        use crate::params::SynthParam;
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = MachineUid(1).param(SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[0] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
@@ -1071,10 +1071,10 @@ mod tests {
 
     #[test]
     fn lane_override_is_restored_on_the_next_step_without_a_value() {
-        use crate::params::{SynthParam, synth_param};
+        use crate::params::SynthParam;
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = MachineUid(1).param(SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[0] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
@@ -1092,11 +1092,11 @@ mod tests {
 
     #[test]
     fn lane_param_change_restores_the_old_param() {
-        use crate::params::{SynthParam, synth_param};
+        use crate::params::SynthParam;
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let cutoff = synth_param(0, SynthParam::Cutoff);
-        let reso = synth_param(0, SynthParam::Resonance);
+        let cutoff = MachineUid(1).param(SynthParam::Cutoff);
+        let reso = MachineUid(1).param(SynthParam::Resonance);
         f.synths[0][0].param_lane = Some(ParamLane {
             param: cutoff,
             values: vec![Some(0.8); 64],
@@ -1197,7 +1197,7 @@ mod tests {
     fn song_bar(refs: [Option<u8>; 4]) -> crate::project::Bar {
         let mut bar = crate::project::Bar::default();
         for (m, r) in refs.into_iter().enumerate() {
-            bar.cell_mut(MachineId::ALL[m].uid()).pattern = r.map(crate::project::PatternRef);
+            bar.cell_mut(MachineUid(m as u16 + 1)).pattern = r.map(crate::project::PatternRef);
         }
         bar
     }
@@ -1258,9 +1258,9 @@ mod tests {
         f.synths[0][0].steps[0] = on(0);
         f.drums[0][0].steps[0][0] = DrumHit::On;
         let mut muted = song_bar([None, None, Some(0), None]);
-        muted.cell_mut(MachineId::Kit808.uid()).mute = true;
+        muted.cell_mut(MachineUid(3)).mute = true;
         let mut lifted = song_bar([Some(0), None, Some(0), None]);
-        lifted.cell_mut(MachineId::Synth1.uid()).transpose = 5;
+        lifted.cell_mut(MachineUid(1)).transpose = 5;
         f.song.bars = vec![muted, lifted];
         let mut s = song_seq();
         s.play();
@@ -1534,10 +1534,10 @@ mod tests {
 
     #[test]
     fn a_track_turning_silent_restores_its_lane_param() {
-        use crate::params::{SynthParam, synth_param};
+        use crate::params::SynthParam;
         use crate::project::ParamLane;
         let mut f = Fixture::new();
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = MachineUid(1).param(SynthParam::Cutoff);
         let mut values = vec![None; 64];
         values[15] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
@@ -1687,11 +1687,11 @@ mod tests {
         f.notes[0][0].notes.push(note(0, 4, 60));
         f.notes[1][0].notes.push(note(0, 4, 60));
         let mut bar = song_bar([None; 4]);
-        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(PatternRef(0));
-        let sampler = bar.cell_mut(MachineId::Sampler.uid());
+        bar.cell_mut(MachineUid(5)).pattern = Some(PatternRef(0));
+        let sampler = bar.cell_mut(MachineUid(6));
         sampler.pattern = Some(PatternRef(0));
         sampler.mute = true;
-        bar.cell_mut(MachineId::Fm.uid()).transpose = 3;
+        bar.cell_mut(MachineUid(5)).transpose = 3;
         f.song.bars = vec![bar];
         let mut s = new_seq();
         s.set_mode(Mode::Song);
@@ -1715,7 +1715,7 @@ mod tests {
         let mut f = Fixture::new();
         f.notes[0][0].notes.push(note(0, 64, 60));
         let mut bar = song_bar([None; 4]);
-        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(PatternRef(0));
+        bar.cell_mut(MachineUid(5)).pattern = Some(PatternRef(0));
         f.song.bars = vec![bar];
         let mut s = new_seq();
         s.set_mode(Mode::Song);

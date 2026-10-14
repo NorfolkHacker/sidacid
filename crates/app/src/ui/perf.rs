@@ -2,7 +2,6 @@
 //! peak, renders that overran their time budget, and memory in use.
 
 use super::{SidAcidApp, theme};
-use crate::six::SixMachines;
 use acid_engine::host::Status;
 use eframe::egui;
 
@@ -167,7 +166,7 @@ impl SidAcidApp {
             ui.label(format!("MEM {}", megabytes(bytes)))
                 .on_hover_text("Memory this app is using");
         }
-        let samples = self.doc.project.sampler_machine().memory_bytes() as u64;
+        let samples = super::sampler_load::sample_memory(&self.doc.project) as u64;
         let limit = acid_engine::sampler::MEMORY_LIMIT as u64;
         let colour = load_colour(samples as f32 / limit as f32, normal);
         ui.label(

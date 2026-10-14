@@ -778,10 +778,9 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::fm::FmSynth;
-    use crate::machine::{MAX_MACHINES, MachineId, MachineType, MachineUid};
+    use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
     use crate::params::{
         ChannelParam, DrumParam, FmParam, KitParam, MasterParam, OpParam, SynthParam,
-        channel_param, drum_param, fm_op_param, fm_param, kit_param, slot_param, synth_param,
     };
     use crate::project::MachineEntry;
     use crate::project::{DrumPattern, NotePattern, SynthPattern};
@@ -790,7 +789,7 @@ mod tests {
 
     /// Uid of the standard rack's machine at position `pos`.
     fn pos_uid(pos: usize) -> MachineUid {
-        MachineId::ALL[pos].uid()
+        MachineUid(pos as u16 + 1)
     }
 
     /// Stores `p` and returns the old pattern, or `p` itself if refused.
@@ -820,10 +819,16 @@ mod tests {
         for (n, &id) in ids.iter().enumerate() {
             assert_eq!(e.knob(id), Some((n % 97) as f32 / 97.0), "{id:?}");
         }
-        assert_eq!(e.knob(synth_param(2, SynthParam::Tune)), None);
-        assert_eq!(e.knob(drum_param(0, 8, DrumParam::Tune)), None);
-        assert_eq!(e.knob(fm_op_param(6, OpParam::On)), None);
-        assert_eq!(e.knob(channel_param(6, ChannelParam::Level)), None);
+        assert_eq!(e.knob(MachineUid(3).param(SynthParam::Tune)), None);
+        assert_eq!(
+            e.knob(MachineUid(3).param(MachineParam::Drum(8, DrumParam::Tune))),
+            None
+        );
+        assert_eq!(
+            e.knob(MachineUid(5).param(MachineParam::FmOp(6, OpParam::On))),
+            None
+        );
+        assert_eq!(e.knob(MachineUid(7).param(ChannelParam::Level)), None);
     }
 
     #[test]
@@ -1232,10 +1237,13 @@ mod tests {
         use crate::project::Note;
         use crate::sampler::slot::SlotMeta;
         let mut p = Project::default();
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(
-            SlotMeta::sliced(36, vec![0, 11_025, 22_050, 33_075], 120.0, 44_100),
-        ));
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+        p.sampler_mut(MachineUid(6)).unwrap().slots[0] = Some(tone_slot(SlotMeta::sliced(
+            36,
+            vec![0, 11_025, 22_050, 33_075],
+            120.0,
+            44_100,
+        )));
+        p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1290,8 +1298,14 @@ mod tests {
         meta.loop_on = true;
         meta.loop_start = 10_000;
         meta.loop_end = 30_000;
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(meta));
-        p.set_param(slot_param(0, crate::params::SlotParam::Release), 1.0);
+        p.sampler_mut(MachineUid(6)).unwrap().slots[0] = Some(tone_slot(meta));
+        p.set_param(
+            MachineUid(6).param(MachineParam::SamplerSlot(
+                0,
+                crate::params::SlotParam::Release,
+            )),
+            1.0,
+        );
         let mut e = Engine::from_project(SR, &p);
         e.note_on(pos_uid(5), 60, 100);
         render(&mut e, 0.1);
@@ -1304,7 +1318,7 @@ mod tests {
     /// A project whose sampler slot 0 holds a chromatic tone (keys 36..=96).
     fn tone_slot_project() -> Project {
         let mut p = Project::default();
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(
+        p.sampler_mut(MachineUid(6)).unwrap().slots[0] = Some(tone_slot(
             crate::sampler::slot::SlotMeta::chromatic(36, 96, 60, 44_100),
         ));
         p
@@ -1314,7 +1328,7 @@ mod tests {
     fn note_patterns_play_on_their_own_channels() {
         use crate::project::Note;
         let mut p = tone_slot_project();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1322,7 +1336,7 @@ mod tests {
                 pitch: 60,
                 vel: 120,
             });
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+        p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1359,7 +1373,7 @@ mod tests {
     fn stop_releases_note_machines() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1381,7 +1395,7 @@ mod tests {
         use crate::params::OpParam;
         let mut p = Project::default();
         // OP1's L4 at full: a released note keeps sounding.
-        p.set_param(fm_op_param(0, OpParam::L4), 1.0);
+        p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::L4)), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         e.note_on(pos_uid(4), 60, 100);
@@ -1403,7 +1417,7 @@ mod tests {
     fn restarting_play_releases_held_notes() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1426,8 +1440,8 @@ mod tests {
     fn deleting_a_sounding_note_while_playing_releases_it() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0].length = 64;
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0].length = 64;
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1456,7 +1470,7 @@ mod tests {
         use crate::params::FmParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -1464,7 +1478,7 @@ mod tests {
                 pitch: 60,
                 vel: 120,
             });
-        p.set_param(fm_param(FmParam::Volume), 0.0);
+        p.set_param(MachineUid(5).param(FmParam::Volume), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -1523,8 +1537,11 @@ mod tests {
     fn stop_closes_synth_gates_and_tails_die() {
         let mut e = demo_engine();
         for c in 0..4 {
-            e.set_param(channel_param(c, ChannelParam::DelaySend), 0.0);
-            e.set_param(channel_param(c, ChannelParam::ReverbSend), 0.0);
+            e.set_param(MachineUid(c as u16 + 1).param(ChannelParam::DelaySend), 0.0);
+            e.set_param(
+                MachineUid(c as u16 + 1).param(ChannelParam::ReverbSend),
+                0.0,
+            );
         }
         e.play();
         render(&mut e, 1.0);
@@ -1593,10 +1610,13 @@ mod tests {
         e.play();
         e.select_pattern(pos_uid(0), 200);
         e.select_pattern(MachineUid(99), 0);
-        e.set_param(drum_param(0, 9, DrumParam::Tune), 0.5);
-        e.set_param(synth_param(7, SynthParam::Cutoff), 0.5);
-        e.set_param(channel_param(6, ChannelParam::Level), 0.5);
-        e.set_param(kit_param(2, KitParam::Volume), 0.5);
+        e.set_param(
+            MachineUid(3).param(MachineParam::Drum(9, DrumParam::Tune)),
+            0.5,
+        );
+        e.set_param(MachineUid(8).param(SynthParam::Cutoff), 0.5);
+        e.set_param(MachineUid(7).param(ChannelParam::Level), 0.5);
+        e.set_param(MachineUid(5).param(KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
         assert_eq!(e.current_patterns(), [0; MAX_MACHINES]);
@@ -1645,12 +1665,12 @@ mod tests {
     #[test]
     fn non_finite_param_is_dropped_and_values_clamped() {
         let mut e = demo_engine();
-        e.set_param(synth_param(0, SynthParam::Cutoff), f32::NAN);
-        e.set_param(channel_param(0, ChannelParam::Level), 50.0);
+        e.set_param(MachineUid(1).param(SynthParam::Cutoff), f32::NAN);
+        e.set_param(MachineUid(1).param(ChannelParam::Level), 50.0);
         e.play();
         let (l, _) = render(&mut e, 0.1);
         assert!(all_finite(&l));
-        e.set_param(synth_param(0, SynthParam::Cutoff), 0.5);
+        e.set_param(MachineUid(1).param(SynthParam::Cutoff), 0.5);
         let (l, _) = render(&mut e, 3.0);
         assert!(all_finite(&l) && peak(&l) > 0.01);
         assert!(peak(&l) <= 1.0);
@@ -1670,7 +1690,7 @@ mod tests {
         use crate::project::ParamLane;
         let mut e = demo_engine();
         let mut p = crate::demo::demo_project()
-            .synth(MachineId::Synth1.uid())
+            .synth(MachineUid(1))
             .unwrap()
             .patterns[0]
             .clone();
@@ -1786,7 +1806,7 @@ mod tests {
         use crate::project::ParamLane;
         let mut e = demo_engine();
         let mut p = crate::demo::demo_project()
-            .synth(MachineId::Synth1.uid())
+            .synth(MachineUid(1))
             .unwrap()
             .patterns[0]
             .clone();
@@ -1804,7 +1824,7 @@ mod tests {
             0,
             PatternData::Synth(
                 crate::demo::demo_project()
-                    .synth(MachineId::Synth1.uid())
+                    .synth(MachineUid(1))
                     .unwrap()
                     .patterns[0]
                     .clone(),
@@ -1818,12 +1838,12 @@ mod tests {
     fn two_bar_demo() -> Project {
         let mut p = crate::demo::demo_project();
         let bar = crate::project::Bar {
-            cells: crate::machine::MachineId::ALL
+            cells: crate::machine::standard_rack()
                 .iter()
                 .map(|m| {
                     let pattern = Some(crate::project::PatternRef(0));
                     (
-                        m.uid(),
+                        m.0,
                         crate::project::Cell {
                             pattern,
                             ..Default::default()
@@ -1941,7 +1961,7 @@ mod tests {
     fn swapping_the_song_mid_bar_resyncs_the_position() {
         let mut e = Engine::from_project(SR, &two_bar_demo());
         let mut long = crate::demo::demo_project()
-            .synth(MachineId::Synth1.uid())
+            .synth(MachineUid(1))
             .unwrap()
             .patterns[0]
             .clone();
@@ -1959,8 +1979,7 @@ mod tests {
         }
         assert_eq!((e.song_bar(), e.song_step()), (1, 19));
         let mut song = two_bar_demo().song;
-        song.bars[0].cell_mut(MachineId::Synth1.uid()).pattern =
-            Some(crate::project::PatternRef(7));
+        song.bars[0].cell_mut(MachineUid(1)).pattern = Some(crate::project::PatternRef(7));
         assert!(e.swap_song(&mut compiled(&song)));
         for _ in 0..10_000 {
             if e.song_step() > 20 {
@@ -2017,7 +2036,7 @@ mod tests {
     fn audition_survives_a_pattern_release_of_the_same_pitch() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -2044,7 +2063,7 @@ mod tests {
         use crate::params::OpParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -2052,7 +2071,10 @@ mod tests {
                 pitch: 60,
                 vel: 120,
             });
-        p.set_param(fm_op_param(0, OpParam::Level), 0.0);
+        p.set_param(
+            MachineUid(5).param(MachineParam::FmOp(0, OpParam::Level)),
+            0.0,
+        );
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -2067,7 +2089,7 @@ mod tests {
         use crate::params::{FmParam, OpParam};
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -2075,9 +2097,12 @@ mod tests {
                 pitch: 57,
                 vel: 120,
             });
-        p.set_param(fm_op_param(1, OpParam::Level), 0.9);
+        p.set_param(
+            MachineUid(5).param(MachineParam::FmOp(1, OpParam::Level)),
+            0.9,
+        );
         let mut a = Engine::from_project(SR, &p);
-        p.set_param(fm_param(FmParam::Algorithm), 1.0);
+        p.set_param(MachineUid(5).param(FmParam::Algorithm), 1.0);
         let mut b = Engine::from_project(SR, &p);
         a.play();
         b.play();
@@ -2141,7 +2166,7 @@ mod tests {
     #[test]
     fn fm_mono_play_keeps_the_audition_and_forgets_pattern_keys() {
         let mut p = tone_slot_project();
-        p.set_param(fm_param(crate::params::FmParam::Mono), 1.0);
+        p.set_param(MachineUid(5).param(crate::params::FmParam::Mono), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.poly_on(4, 48, 100, false);
         e.note_on(pos_uid(4), 72, 100);
@@ -2160,8 +2185,8 @@ mod tests {
         use crate::params::OpParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.set_param(fm_op_param(0, OpParam::L4), 1.0);
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::L4)), 1.0);
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: 0,
@@ -2170,7 +2195,7 @@ mod tests {
                 vel: 120,
             });
         let mut bar = crate::project::Bar::default();
-        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(crate::project::PatternRef(0));
+        bar.cell_mut(MachineUid(5)).pattern = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];
         p
     }

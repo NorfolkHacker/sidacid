@@ -313,7 +313,7 @@ mod tests {
     use super::*;
     use crate::drums::BD;
     use crate::drums::{CH, CP, OH};
-    use crate::machine::MachineId;
+    use crate::machine::MachineUid;
     use crate::project::SynthStep;
 
     fn hits(p: &DrumPattern) -> usize {
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn no_dice_changes_nothing() {
         let base = crate::demo::demo_project()
-            .synth(MachineId::Synth1.uid())
+            .synth(MachineUid(1))
             .unwrap()
             .patterns[0]
             .clone();
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn each_die_touches_only_its_field() {
         let base = crate::demo::demo_project()
-            .synth(MachineId::Synth1.uid())
+            .synth(MachineUid(1))
             .unwrap()
             .patterns[0]
             .clone();

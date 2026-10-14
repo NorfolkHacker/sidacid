@@ -5,6 +5,7 @@
 use super::SidAcidApp;
 use crate::document::Edit;
 use acid_engine::host::Command;
+use acid_engine::machine::MachineUid;
 use acid_engine::params::ParamId;
 use acid_engine::sequencer::Mode;
 use acid_engine::song;
@@ -135,7 +136,7 @@ impl SidAcidApp {
     }
 
     /// While recording, a pad click also writes the pattern into the song.
-    pub(crate) fn record_pattern_change(&mut self, machine: usize, slot: u8) {
+    pub(crate) fn record_pattern_change(&mut self, uid: MachineUid, slot: u8) {
         if !self.recording() {
             return;
         }
@@ -144,7 +145,7 @@ impl SidAcidApp {
             return;
         }
         let mut new_song = self.doc.project.song.clone();
-        song::write_pattern_ref(&mut new_song, bar, machine, slot);
+        song::write_pattern_ref(&mut new_song, bar, uid, slot);
         let cmds = self.doc.record(Edit::Song {
             song: Box::new(new_song),
         });

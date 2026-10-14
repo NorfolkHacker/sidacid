@@ -2,9 +2,9 @@
 //! applying one returns the engine `Command`s that bring the audio
 //! thread in line. Undo stores the inverse edit.
 
-use crate::six::{SixMachines, kit_uid, machine_uid, synth_uid};
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
+use acid_engine::machine::MachineUid;
 use acid_engine::params::ParamId;
 use acid_engine::project::{
     DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
@@ -16,10 +16,19 @@ use std::sync::Arc;
 
 pub const UNDO_LIMIT: usize = 200;
 
-/// One change to the project. Indices must be in range, or `Document::apply`
-/// panics: `synth` and `kit` < 2, `slot` < `PATTERNS` (a sampler `slot` <
-/// `SLOTS`), `step` < `STEPS`, `inst` < `DRUM_INSTRUMENTS`, and `machine` a
-/// note machine (FM or Sampler). Values are clamped: params to 0..=1,
+// Panic messages for an edit whose uid is not a machine of its type.
+const NO_MACHINE: &str = "the machine is in the rack";
+const NO_SYNTH: &str = "the edit names a synth in the rack";
+const NO_KIT: &str = "the edit names a drum kit in the rack";
+const NO_NOTES: &str = "the edit names a note machine in the rack";
+const NO_FM: &str = "the edit names an FM machine in the rack";
+const NO_SAMPLER: &str = "the edit names a sampler in the rack";
+
+/// One change to the project. Each edit names its machine by `uid`, which
+/// must be a machine of the edit's type in the rack (a note edit's: FM or
+/// Sampler), and indices must be in range, or `Document::apply` panics:
+/// `slot` < `PATTERNS` (a sampler `slot` < `SLOTS`), `step` < `STEPS`,
+/// `inst` < `DRUM_INSTRUMENTS`. Values are clamped: params to 0..=1,
 /// lengths to 1..=`STEPS`, transpose to -12..=12, BPM and swing to their
 /// ranges.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,57 +38,57 @@ pub enum Edit {
         value: f32,
     },
     SynthStep {
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         step: usize,
         value: SynthStep,
     },
     SynthLength {
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         length: u8,
     },
     SynthTranspose {
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         transpose: i8,
     },
     SynthPattern {
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         pattern: Box<SynthPattern>,
     },
     DrumHit {
-        kit: usize,
+        uid: MachineUid,
         slot: u8,
         step: usize,
         inst: usize,
         hit: DrumHit,
     },
     DrumLength {
-        kit: usize,
+        uid: MachineUid,
         slot: u8,
         length: u8,
     },
     DrumPattern {
-        kit: usize,
+        uid: MachineUid,
         slot: u8,
         pattern: Box<DrumPattern>,
     },
     NotePattern {
-        machine: usize,
+        uid: MachineUid,
         slot: u8,
         pattern: Box<NotePattern>,
     },
     NoteLength {
-        machine: usize,
+        uid: MachineUid,
         slot: u8,
         length: u8,
     },
     Bpm(f32),
     Swing(f32),
     View {
-        synth: usize,
+        uid: MachineUid,
         view: SeqView,
     },
     Song {
@@ -88,20 +97,24 @@ pub enum Edit {
     /// Loading an FM voice: many params and the voice name, one undo step.
     /// Values apply in order; a repeated id ends on its last value.
     FmVoice {
+        uid: MachineUid,
         name: String,
         values: Vec<(ParamId, f32)>,
     },
     FmBank {
+        uid: MachineUid,
         bank: Option<Vec<Dx7Voice>>,
     },
     /// Loading or clearing a sampler slot, with its knob values: one undo step.
     SamplerSlot {
+        uid: MachineUid,
         slot: usize,
         data: Option<Box<SlotData>>,
         values: Vec<(ParamId, f32)>,
     },
     /// Changing a loaded slot's zone, slices, mode or markers.
     SlotMeta {
+        uid: MachineUid,
         slot: usize,
         meta: Box<SlotMeta>,
     },
@@ -113,23 +126,23 @@ pub enum Edit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MergeKey {
     Param(ParamId),
-    SynthStep(usize, u8, usize),
-    SynthLength(usize, u8),
-    SynthTranspose(usize, u8),
-    SynthPattern(usize, u8),
-    DrumHit(usize, u8, usize, usize),
-    DrumLength(usize, u8),
-    DrumPattern(usize, u8),
-    NotePattern(usize, u8),
-    NoteLength(usize, u8),
+    SynthStep(MachineUid, u8, usize),
+    SynthLength(MachineUid, u8),
+    SynthTranspose(MachineUid, u8),
+    SynthPattern(MachineUid, u8),
+    DrumHit(MachineUid, u8, usize, usize),
+    DrumLength(MachineUid, u8),
+    DrumPattern(MachineUid, u8),
+    NotePattern(MachineUid, u8),
+    NoteLength(MachineUid, u8),
     Bpm,
     Swing,
-    View(usize),
+    View(MachineUid),
     Song,
-    FmVoice,
-    FmBank,
-    SamplerSlot(usize),
-    SlotMeta(usize),
+    FmVoice(MachineUid),
+    FmBank(MachineUid),
+    SamplerSlot(MachineUid, usize),
+    SlotMeta(MachineUid, usize),
     Group,
 }
 
@@ -137,30 +150,30 @@ fn merge_key(edit: &Edit) -> MergeKey {
     match edit {
         Edit::Param { id, .. } => MergeKey::Param(*id),
         Edit::SynthStep {
-            synth, slot, step, ..
-        } => MergeKey::SynthStep(*synth, *slot, *step),
-        Edit::SynthLength { synth, slot, .. } => MergeKey::SynthLength(*synth, *slot),
-        Edit::SynthTranspose { synth, slot, .. } => MergeKey::SynthTranspose(*synth, *slot),
-        Edit::SynthPattern { synth, slot, .. } => MergeKey::SynthPattern(*synth, *slot),
+            uid, slot, step, ..
+        } => MergeKey::SynthStep(*uid, *slot, *step),
+        Edit::SynthLength { uid, slot, .. } => MergeKey::SynthLength(*uid, *slot),
+        Edit::SynthTranspose { uid, slot, .. } => MergeKey::SynthTranspose(*uid, *slot),
+        Edit::SynthPattern { uid, slot, .. } => MergeKey::SynthPattern(*uid, *slot),
         Edit::DrumHit {
-            kit,
+            uid,
             slot,
             step,
             inst,
             ..
-        } => MergeKey::DrumHit(*kit, *slot, *step, *inst),
-        Edit::DrumLength { kit, slot, .. } => MergeKey::DrumLength(*kit, *slot),
-        Edit::DrumPattern { kit, slot, .. } => MergeKey::DrumPattern(*kit, *slot),
-        Edit::NotePattern { machine, slot, .. } => MergeKey::NotePattern(*machine, *slot),
-        Edit::NoteLength { machine, slot, .. } => MergeKey::NoteLength(*machine, *slot),
+        } => MergeKey::DrumHit(*uid, *slot, *step, *inst),
+        Edit::DrumLength { uid, slot, .. } => MergeKey::DrumLength(*uid, *slot),
+        Edit::DrumPattern { uid, slot, .. } => MergeKey::DrumPattern(*uid, *slot),
+        Edit::NotePattern { uid, slot, .. } => MergeKey::NotePattern(*uid, *slot),
+        Edit::NoteLength { uid, slot, .. } => MergeKey::NoteLength(*uid, *slot),
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
-        Edit::View { synth, .. } => MergeKey::View(*synth),
+        Edit::View { uid, .. } => MergeKey::View(*uid),
         Edit::Song { .. } => MergeKey::Song,
-        Edit::FmVoice { .. } => MergeKey::FmVoice,
-        Edit::FmBank { .. } => MergeKey::FmBank,
-        Edit::SamplerSlot { slot, .. } => MergeKey::SamplerSlot(*slot),
-        Edit::SlotMeta { slot, .. } => MergeKey::SlotMeta(*slot),
+        Edit::FmVoice { uid, .. } => MergeKey::FmVoice(*uid),
+        Edit::FmBank { uid, .. } => MergeKey::FmBank(*uid),
+        Edit::SamplerSlot { uid, slot, .. } => MergeKey::SamplerSlot(*uid, *slot),
+        Edit::SlotMeta { uid, slot, .. } => MergeKey::SlotMeta(*uid, *slot),
         Edit::Group(_) => MergeKey::Group,
     }
 }
@@ -229,10 +242,7 @@ impl Document {
     /// until `end_gesture`. An edit that changes nothing adds no step and
     /// leaves the dirty state and any open gesture alone.
     ///
-    /// Indices must be in range: `synth`/`kit` < 2, `slot` < `PATTERNS`
-    /// (sampler `slot` < `SLOTS`), `step` < `STEPS`, `inst` <
-    /// `DRUM_INSTRUMENTS`, and `machine` must be a note machine. Out of
-    /// range indices panic. Values are clamped to their valid ranges.
+    /// Uids and indices must be valid (see `Edit`), or this panics. Values are clamped to their valid ranges.
     pub fn apply(&mut self, edit: Edit, merge: bool) -> Vec<Command> {
         let key = merge_key(&edit);
         let continuing = merge && self.gesture == Some(key) && !self.undo.is_empty();
@@ -346,39 +356,33 @@ impl Document {
             Edit::Bpm(bpm) => p.bpm == *bpm,
             Edit::Swing(swing) => p.swing == *swing,
             Edit::SynthStep {
-                synth,
+                uid,
                 slot,
                 step,
                 value,
-            } => p.synth_at(*synth).patterns[*slot as usize].steps[*step] == *value,
-            Edit::SynthLength {
-                synth,
-                slot,
-                length,
-            } => p.synth_at(*synth).patterns[*slot as usize].length == *length,
+            } => p.synth(*uid).expect(NO_SYNTH).patterns[*slot as usize].steps[*step] == *value,
+            Edit::SynthLength { uid, slot, length } => {
+                p.synth(*uid).expect(NO_SYNTH).patterns[*slot as usize].length == *length
+            }
             Edit::SynthTranspose {
-                synth,
+                uid,
                 slot,
                 transpose,
-            } => p.synth_at(*synth).patterns[*slot as usize].transpose == *transpose,
+            } => p.synth(*uid).expect(NO_SYNTH).patterns[*slot as usize].transpose == *transpose,
             Edit::DrumHit {
-                kit,
+                uid,
                 slot,
                 step,
                 inst,
                 hit,
-            } => p.kit_at(*kit).patterns[*slot as usize].steps[*step][*inst] == *hit,
-            Edit::DrumLength { kit, slot, length } => {
-                p.kit_at(*kit).patterns[*slot as usize].length == *length
+            } => p.kit(*uid).expect(NO_KIT).patterns[*slot as usize].steps[*step][*inst] == *hit,
+            Edit::DrumLength { uid, slot, length } => {
+                p.kit(*uid).expect(NO_KIT).patterns[*slot as usize].length == *length
             }
-            Edit::NoteLength {
-                machine,
-                slot,
-                length,
-            } => p
-                .notes_at(*machine)
+            Edit::NoteLength { uid, slot, length } => p
+                .note_patterns(*uid)
                 .is_some_and(|pats| pats[*slot as usize].length == *length),
-            Edit::View { synth, view } => p.synth_at(*synth).view == *view,
+            Edit::View { uid, view } => p.synth(*uid).expect(NO_SYNTH).view == *view,
             _ => false,
         }
     }
@@ -467,15 +471,14 @@ impl Document {
     }
 
     /// Selecting a pattern is a transport action: saved, not undoable.
-    pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
-        if self.project.entry_at(machine).selected != slot {
-            self.project.entry_at_mut(machine).selected = slot;
+    /// `uid` must be in the rack.
+    pub fn select_pattern(&mut self, uid: MachineUid, slot: u8) -> Vec<Command> {
+        let entry = self.project.machine_mut(uid).expect(NO_MACHINE);
+        if entry.selected != slot {
+            entry.selected = slot;
             self.unsaved_selection = true;
         }
-        vec![Command::SelectPattern {
-            uid: machine_uid(machine),
-            slot,
-        }]
+        vec![Command::SelectPattern { uid, slot }]
     }
 
     /// Applies an edit and returns its inverse.
@@ -488,130 +491,118 @@ impl Document {
                 Edit::Param { id, value: old }
             }
             Edit::SynthStep {
-                synth,
+                uid,
                 slot,
                 step,
                 value,
             } => {
                 let old = std::mem::replace(
-                    &mut p.synth_at_mut(synth).patterns[slot as usize].steps[step],
+                    &mut p.synth_mut(uid).expect(NO_SYNTH).patterns[slot as usize].steps[step],
                     value,
                 );
                 Edit::SynthStep {
-                    synth,
+                    uid,
                     slot,
                     step,
                     value: old,
                 }
             }
-            Edit::SynthLength {
-                synth,
-                slot,
-                length,
-            } => {
-                let pat = &mut p.synth_at_mut(synth).patterns[slot as usize];
+            Edit::SynthLength { uid, slot, length } => {
+                let pat = &mut p.synth_mut(uid).expect(NO_SYNTH).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::SynthLength {
-                    synth,
+                    uid,
                     slot,
                     length: old,
                 }
             }
             Edit::SynthTranspose {
-                synth,
+                uid,
                 slot,
                 transpose,
             } => {
-                let pat = &mut p.synth_at_mut(synth).patterns[slot as usize];
+                let pat = &mut p.synth_mut(uid).expect(NO_SYNTH).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.transpose, transpose.clamp(-12, 12));
                 Edit::SynthTranspose {
-                    synth,
+                    uid,
                     slot,
                     transpose: old,
                 }
             }
-            Edit::SynthPattern {
-                synth,
-                slot,
-                pattern,
-            } => {
+            Edit::SynthPattern { uid, slot, pattern } => {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 pattern.transpose = pattern.transpose.clamp(-12, 12);
                 debug_assert!(pattern.is_well_formed(), "malformed synth pattern");
-                let old =
-                    std::mem::replace(&mut p.synth_at_mut(synth).patterns[slot as usize], pattern);
+                let old = std::mem::replace(
+                    &mut p.synth_mut(uid).expect(NO_SYNTH).patterns[slot as usize],
+                    pattern,
+                );
                 Edit::SynthPattern {
-                    synth,
+                    uid,
                     slot,
                     pattern: Box::new(old),
                 }
             }
             Edit::DrumHit {
-                kit,
+                uid,
                 slot,
                 step,
                 inst,
                 hit,
             } => {
                 let old = std::mem::replace(
-                    &mut p.kit_at_mut(kit).patterns[slot as usize].steps[step][inst],
+                    &mut p.kit_mut(uid).expect(NO_KIT).patterns[slot as usize].steps[step][inst],
                     hit,
                 );
                 Edit::DrumHit {
-                    kit,
+                    uid,
                     slot,
                     step,
                     inst,
                     hit: old,
                 }
             }
-            Edit::DrumLength { kit, slot, length } => {
-                let pat = &mut p.kit_at_mut(kit).patterns[slot as usize];
+            Edit::DrumLength { uid, slot, length } => {
+                let pat = &mut p.kit_mut(uid).expect(NO_KIT).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::DrumLength {
-                    kit,
+                    uid,
                     slot,
                     length: old,
                 }
             }
-            Edit::DrumPattern { kit, slot, pattern } => {
+            Edit::DrumPattern { uid, slot, pattern } => {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 debug_assert!(pattern.is_well_formed(), "malformed drum pattern");
-                let old =
-                    std::mem::replace(&mut p.kit_at_mut(kit).patterns[slot as usize], pattern);
+                let old = std::mem::replace(
+                    &mut p.kit_mut(uid).expect(NO_KIT).patterns[slot as usize],
+                    pattern,
+                );
                 Edit::DrumPattern {
-                    kit,
+                    uid,
                     slot,
                     pattern: Box::new(old),
                 }
             }
-            Edit::NotePattern {
-                machine,
-                slot,
-                pattern,
-            } => {
+            Edit::NotePattern { uid, slot, pattern } => {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 debug_assert!(pattern.is_well_formed(), "malformed note pattern");
-                let pats = p.notes_at_mut(machine).expect("note machine");
+                let pats = p.note_patterns_mut(uid).expect(NO_NOTES);
                 let old = std::mem::replace(&mut pats[slot as usize], pattern);
                 Edit::NotePattern {
-                    machine,
+                    uid,
                     slot,
                     pattern: Box::new(old),
                 }
             }
-            Edit::NoteLength {
-                machine,
-                slot,
-                length,
-            } => {
-                let pat = &mut p.notes_at_mut(machine).expect("note machine")[slot as usize];
+            Edit::NoteLength { uid, slot, length } => {
+                let pat = &mut p.note_patterns_mut(uid).expect(NO_NOTES)[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::NoteLength {
-                    machine,
+                    uid,
                     slot,
                     length: old,
                 }
@@ -620,15 +611,15 @@ impl Document {
             Edit::Swing(swing) => {
                 Edit::Swing(std::mem::replace(&mut p.swing, swing.clamp(0.0, 0.75)))
             }
-            Edit::View { synth, view } => Edit::View {
-                synth,
-                view: std::mem::replace(&mut p.synth_at_mut(synth).view, view),
+            Edit::View { uid, view } => Edit::View {
+                uid,
+                view: std::mem::replace(&mut p.synth_mut(uid).expect(NO_SYNTH).view, view),
             },
             Edit::Song { song } => Edit::Song {
                 song: Box::new(std::mem::replace(&mut p.song, *song)),
             },
-            Edit::FmVoice { name, values } => {
-                let old_name = std::mem::replace(&mut p.fm_machine_mut().voice_name, name);
+            Edit::FmVoice { uid, name, values } => {
+                let old_name = std::mem::replace(&mut p.fm_mut(uid).expect(NO_FM).voice_name, name);
                 let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
@@ -640,13 +631,21 @@ impl Document {
                 // Undo in reverse order, so a repeated id ends on its first old value.
                 old_values.reverse();
                 Edit::FmVoice {
+                    uid,
                     name: old_name,
                     values: old_values,
                 }
             }
-            Edit::SamplerSlot { slot, data, values } => {
-                let old =
-                    std::mem::replace(&mut p.sampler_machine_mut().slots[slot], data.map(|d| *d));
+            Edit::SamplerSlot {
+                uid,
+                slot,
+                data,
+                values,
+            } => {
+                let old = std::mem::replace(
+                    &mut p.sampler_mut(uid).expect(NO_SAMPLER).slots[slot],
+                    data.map(|d| *d),
+                );
                 let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
@@ -657,20 +656,25 @@ impl Document {
                     .collect();
                 old_values.reverse();
                 Edit::SamplerSlot {
+                    uid,
                     slot,
                     data: old.map(Box::new),
                     values: old_values,
                 }
             }
-            Edit::SlotMeta { slot, meta } => match p.sampler_machine_mut().slots[slot].as_mut() {
-                Some(d) => Edit::SlotMeta {
-                    slot,
-                    meta: Box::new(std::mem::replace(&mut d.meta, *meta)),
-                },
-                None => Edit::SlotMeta { slot, meta },
-            },
-            Edit::FmBank { bank } => Edit::FmBank {
-                bank: std::mem::replace(&mut p.fm_machine_mut().bank, bank),
+            Edit::SlotMeta { uid, slot, meta } => {
+                match p.sampler_mut(uid).expect(NO_SAMPLER).slots[slot].as_mut() {
+                    Some(d) => Edit::SlotMeta {
+                        uid,
+                        slot,
+                        meta: Box::new(std::mem::replace(&mut d.meta, *meta)),
+                    },
+                    None => Edit::SlotMeta { uid, slot, meta },
+                }
+            }
+            Edit::FmBank { uid, bank } => Edit::FmBank {
+                uid,
+                bank: std::mem::replace(&mut p.fm_mut(uid).expect(NO_FM).bank, bank),
             },
             Edit::Group(edits) => {
                 let mut inverses: Vec<Edit> =
@@ -686,33 +690,33 @@ impl Document {
         let p = &self.project;
         match edit {
             Edit::Param { id, .. } => vec![Command::SetParam(*id, p.param(*id))],
-            Edit::SynthStep { synth, slot, .. }
-            | Edit::SynthLength { synth, slot, .. }
-            | Edit::SynthTranspose { synth, slot, .. }
-            | Edit::SynthPattern { synth, slot, .. } => vec![Command::Pattern {
-                uid: synth_uid(*synth),
+            Edit::SynthStep { uid, slot, .. }
+            | Edit::SynthLength { uid, slot, .. }
+            | Edit::SynthTranspose { uid, slot, .. }
+            | Edit::SynthPattern { uid, slot, .. } => vec![Command::Pattern {
+                uid: *uid,
                 index: *slot,
                 pattern: Box::new(PatternData::Synth(
-                    p.synth_at(*synth).patterns[*slot as usize].clone(),
+                    p.synth(*uid).expect(NO_SYNTH).patterns[*slot as usize].clone(),
                 )),
             }],
-            Edit::DrumHit { kit, slot, .. }
-            | Edit::DrumLength { kit, slot, .. }
-            | Edit::DrumPattern { kit, slot, .. } => {
+            Edit::DrumHit { uid, slot, .. }
+            | Edit::DrumLength { uid, slot, .. }
+            | Edit::DrumPattern { uid, slot, .. } => {
                 vec![Command::Pattern {
-                    uid: kit_uid(*kit),
+                    uid: *uid,
                     index: *slot,
                     pattern: Box::new(PatternData::Drum(
-                        p.kit_at(*kit).patterns[*slot as usize].clone(),
+                        p.kit(*uid).expect(NO_KIT).patterns[*slot as usize].clone(),
                     )),
                 }]
             }
-            Edit::NotePattern { machine, slot, .. } | Edit::NoteLength { machine, slot, .. } => {
+            Edit::NotePattern { uid, slot, .. } | Edit::NoteLength { uid, slot, .. } => {
                 vec![Command::Pattern {
-                    uid: machine_uid(*machine),
+                    uid: *uid,
                     index: *slot,
                     pattern: Box::new(PatternData::Notes(
-                        p.notes_at(*machine).expect("note machine")[*slot as usize].clone(),
+                        p.note_patterns(*uid).expect(NO_NOTES)[*slot as usize].clone(),
                     )),
                 }]
             }
@@ -728,16 +732,18 @@ impl Document {
                 .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
                 .collect(),
             Edit::FmBank { .. } => Vec::new(),
-            Edit::SamplerSlot { slot, values, .. } => {
-                let data = p.sampler_machine().slots[*slot].as_ref();
+            Edit::SamplerSlot {
+                uid, slot, values, ..
+            } => {
+                let data = p.sampler(*uid).expect(NO_SAMPLER).slots[*slot].as_ref();
                 let mut cmds = vec![
                     Command::SamplerSample {
-                        uid: acid_engine::machine::MachineId::Sampler.uid(),
+                        uid: *uid,
                         slot: *slot as u8,
                         sample: data.map(|d| Arc::new(d.to_sample())),
                     },
                     Command::SamplerPlay {
-                        uid: acid_engine::machine::MachineId::Sampler.uid(),
+                        uid: *uid,
                         slot: *slot as u8,
                         play: Box::new(
                             data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
@@ -751,11 +757,11 @@ impl Document {
                 );
                 cmds
             }
-            Edit::SlotMeta { slot, .. } => vec![Command::SamplerPlay {
-                uid: acid_engine::machine::MachineId::Sampler.uid(),
+            Edit::SlotMeta { uid, slot, .. } => vec![Command::SamplerPlay {
+                uid: *uid,
                 slot: *slot as u8,
                 play: Box::new(
-                    p.sampler_machine().slots[*slot]
+                    p.sampler(*uid).expect(NO_SAMPLER).slots[*slot]
                         .as_ref()
                         .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
                 ),
@@ -768,35 +774,38 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rack::*;
     use acid_engine::machine::MachineUid;
-    use acid_engine::params::{ParamId, SynthParam, synth_param};
+    use acid_engine::params::MachineParam;
+    use acid_engine::params::{ParamId, SynthParam};
     use acid_engine::project::{DrumHit, Gate, SeqView, SynthStep};
 
     fn doc() -> Document {
         Document::new(Project::default())
     }
 
-    const CUTOFF: ParamId = synth_param(0, SynthParam::Cutoff);
+    const CUTOFF: ParamId = ParamId::Machine(SYNTH1, MachineParam::Synth(SynthParam::Cutoff));
 
     #[test]
     fn loading_an_fm_voice_is_one_undo_step() {
-        use acid_engine::params::{FmParam, OpParam, fm_op_param, fm_param};
+        use acid_engine::params::{FmParam, OpParam};
         let mut d = doc();
-        let alg = fm_param(FmParam::Algorithm);
-        let lvl = fm_op_param(2, OpParam::Level);
+        let alg = FM.param(FmParam::Algorithm);
+        let lvl = FM.param(MachineParam::FmOp(2, OpParam::Level));
         let cmds = d.apply(
             Edit::FmVoice {
+                uid: FM,
                 name: "BRASS".into(),
                 values: vec![(alg, 1.0), (lvl, 0.5)],
             },
             false,
         );
-        assert_eq!(d.project.fm_machine().voice_name, "BRASS");
+        assert_eq!(d.project.fm(FM).unwrap().voice_name, "BRASS");
         assert_eq!(d.project.param(alg), 1.0);
         assert_eq!(cmds.len(), 2);
         assert!(cmds.iter().all(|c| matches!(c, Command::SetParam(..))));
         d.undo();
-        assert_eq!(d.project.fm_machine().voice_name, "INIT VOICE");
+        assert_eq!(d.project.fm(FM).unwrap().voice_name, "INIT VOICE");
         assert_eq!(d.project.param(alg), alg.info().default);
         assert_eq!(d.project.param(lvl), lvl.info().default);
     }
@@ -831,7 +840,7 @@ mod tests {
         };
         d.apply(
             Edit::SynthStep {
-                synth: 1,
+                uid: SYNTH2,
                 slot: 5,
                 step: 2,
                 value: step,
@@ -840,7 +849,7 @@ mod tests {
         );
         d.apply(
             Edit::DrumHit {
-                kit: 0,
+                uid: KIT808,
                 slot: 0,
                 step: 4,
                 inst: 1,
@@ -868,7 +877,7 @@ mod tests {
         }
     }
 
-    const WAVE: ParamId = synth_param(0, SynthParam::Wave);
+    const WAVE: ParamId = ParamId::Machine(SYNTH1, MachineParam::Synth(SynthParam::Wave));
 
     #[test]
     fn a_record_pass_is_one_undo_step_across_switch_and_bpm_edits() {
@@ -937,7 +946,7 @@ mod tests {
         let mid = d.project.song.clone();
         d.apply(
             Edit::SynthLength {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 length: 3,
             },
@@ -995,7 +1004,7 @@ mod tests {
         );
         d.apply(
             Edit::Param {
-                id: synth_param(0, SynthParam::Resonance),
+                id: SYNTH1.param(SynthParam::Resonance),
                 value: 0.9,
             },
             true,
@@ -1018,7 +1027,7 @@ mod tests {
         };
         d.apply(
             Edit::SynthStep {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 step: 2,
                 value: on,
@@ -1027,7 +1036,7 @@ mod tests {
         );
         d.apply(
             Edit::SynthStep {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 step: 5,
                 value: on,
@@ -1036,7 +1045,7 @@ mod tests {
         );
         d.apply(
             Edit::SynthLength {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 length: 8,
             },
@@ -1052,14 +1061,14 @@ mod tests {
     #[test]
     fn consecutive_merged_pattern_edits_undo_in_one_step() {
         let mut d = doc();
-        let before = d.project.synth_at(0).patterns[0].clone();
+        let before = d.project.synth(SYNTH1).unwrap().patterns[0].clone();
         let mut a = before.clone();
         a.length = 3;
         let mut b = a.clone();
         b.transpose = 5;
         d.apply(
             Edit::SynthPattern {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 pattern: Box::new(a),
             },
@@ -1067,7 +1076,7 @@ mod tests {
         );
         d.apply(
             Edit::SynthPattern {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 pattern: Box::new(b),
             },
@@ -1075,7 +1084,7 @@ mod tests {
         );
         d.end_gesture();
         d.undo();
-        assert_eq!(d.project.synth_at(0).patterns[0], before);
+        assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0], before);
         assert!(!d.can_undo());
     }
 
@@ -1094,7 +1103,7 @@ mod tests {
         let mut d = doc();
         let cmds = d.apply(
             Edit::SynthLength {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 3,
                 length: 7,
             },
@@ -1112,7 +1121,7 @@ mod tests {
         }
         let cmds = d.apply(
             Edit::DrumLength {
-                kit: 1,
+                uid: KIT909,
                 slot: 2,
                 length: 12,
             },
@@ -1141,13 +1150,13 @@ mod tests {
         });
         let cmds = d.apply(
             Edit::NotePattern {
-                machine: 5,
+                uid: SAMPLER,
                 slot: 7,
                 pattern: Box::new(p.clone()),
             },
             false,
         );
-        assert_eq!(d.project.sampler_machine().patterns[7], p);
+        assert_eq!(d.project.sampler(SAMPLER).unwrap().patterns[7], p);
         assert!(matches!(
             cmds.as_slice(),
             [Command::Pattern { uid: MachineUid(6), index: 7, pattern }]
@@ -1155,22 +1164,26 @@ mod tests {
         ));
         d.apply(
             Edit::NoteLength {
-                machine: 5,
+                uid: SAMPLER,
                 slot: 7,
                 length: 99,
             },
             false,
         );
         assert_eq!(
-            d.project.sampler_machine().patterns[7].length,
+            d.project.sampler(SAMPLER).unwrap().patterns[7].length,
             64,
             "clamped"
         );
         d.undo();
-        assert_eq!(d.project.sampler_machine().patterns[7].length, 16);
+        assert_eq!(d.project.sampler(SAMPLER).unwrap().patterns[7].length, 16);
         d.undo();
-        assert!(d.project.sampler_machine().patterns[7].notes.is_empty());
-        assert!(d.project.fm_machine().patterns[7].notes.is_empty());
+        assert!(
+            d.project.sampler(SAMPLER).unwrap().patterns[7]
+                .notes
+                .is_empty()
+        );
+        assert!(d.project.fm(FM).unwrap().patterns[7].notes.is_empty());
     }
 
     #[test]
@@ -1182,13 +1195,13 @@ mod tests {
         assert_eq!(d.project.swing, 0.0);
         d.apply(
             Edit::SynthLength {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 length: 0,
             },
             false,
         );
-        assert_eq!(d.project.synth_at(0).patterns[0].length, 1);
+        assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0].length, 1);
         d.apply(
             Edit::Param {
                 id: CUTOFF,
@@ -1204,15 +1217,15 @@ mod tests {
         let mut d = doc();
         let cmds = d.apply(
             Edit::View {
-                synth: 1,
+                uid: SYNTH2,
                 view: SeqView::PianoRoll,
             },
             false,
         );
         assert!(cmds.is_empty());
-        assert_eq!(d.project.synth_at(1).view, SeqView::PianoRoll);
+        assert_eq!(d.project.synth(SYNTH2).unwrap().view, SeqView::PianoRoll);
         d.undo();
-        assert_eq!(d.project.synth_at(1).view, SeqView::Step303);
+        assert_eq!(d.project.synth(SYNTH2).unwrap().view, SeqView::Step303);
     }
 
     #[test]
@@ -1257,8 +1270,8 @@ mod tests {
     #[test]
     fn select_pattern_marks_dirty_and_commands_engine() {
         let mut d = doc();
-        let cmds = d.select_pattern(2, 17);
-        assert_eq!(d.project.entry_at(2).selected, 17);
+        let cmds = d.select_pattern(KIT808, 17);
+        assert_eq!(d.project.machine(KIT808).unwrap().selected, 17);
         assert!(matches!(
             cmds.as_slice(),
             [Command::SelectPattern {
@@ -1271,7 +1284,7 @@ mod tests {
 
     #[test]
     fn sampler_slot_edits_undo_and_sync_the_engine() {
-        use acid_engine::params::{SlotParam, slot_param};
+        use acid_engine::params::SlotParam;
         use acid_engine::sampler::slot::{SlotData, SlotMeta};
         let mut d = doc();
         let tone: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
@@ -1282,16 +1295,17 @@ mod tests {
             &tone,
             SlotMeta::sliced(24, vec![0, 500], 120.0, 1000),
         );
-        let choke = slot_param(2, SlotParam::Choke);
+        let choke = SAMPLER.param(MachineParam::SamplerSlot(2, SlotParam::Choke));
         let cmds = d.apply(
             Edit::SamplerSlot {
+                uid: SAMPLER,
                 slot: 2,
                 data: Some(Box::new(data.clone())),
                 values: vec![(choke, 1.0)],
             },
             false,
         );
-        assert_eq!(d.project.sampler_machine().slots[2], Some(data));
+        assert_eq!(d.project.sampler(SAMPLER).unwrap().slots[2], Some(data));
         assert!(matches!(
             cmds[0],
             Command::SamplerSample {
@@ -1309,7 +1323,7 @@ mod tests {
             }
         ));
         assert!(matches!(cmds[2], Command::SetParam(id, v) if id == choke && v == 1.0));
-        let mut meta = d.project.sampler_machine().slots[2]
+        let mut meta = d.project.sampler(SAMPLER).unwrap().slots[2]
             .as_ref()
             .unwrap()
             .meta
@@ -1317,6 +1331,7 @@ mod tests {
         meta.slices = vec![0, 300];
         let cmds = d.apply(
             Edit::SlotMeta {
+                uid: SAMPLER,
                 slot: 2,
                 meta: Box::new(meta),
             },
@@ -1326,7 +1341,7 @@ mod tests {
         assert!(matches!(cmds[0], Command::SamplerPlay { slot: 2, .. }));
         d.undo();
         assert_eq!(
-            d.project.sampler_machine().slots[2]
+            d.project.sampler(SAMPLER).unwrap().slots[2]
                 .as_ref()
                 .unwrap()
                 .meta
@@ -1334,7 +1349,7 @@ mod tests {
             vec![0, 500]
         );
         d.undo();
-        assert_eq!(d.project.sampler_machine().slots[2], None);
+        assert_eq!(d.project.sampler(SAMPLER).unwrap().slots[2], None);
         assert_eq!(d.project.param(choke), 0.0);
     }
 
@@ -1355,10 +1370,10 @@ mod tests {
         d.apply(Edit::Bpm(1000.0), false);
         d.undo();
         assert!(!d.can_undo(), "the clamped repeat added no step");
-        let step = d.project.synth_at(0).patterns[0].steps[3];
+        let step = d.project.synth(SYNTH1).unwrap().patterns[0].steps[3];
         d.apply(
             Edit::SynthStep {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 step: 3,
                 value: step,
@@ -1367,8 +1382,8 @@ mod tests {
         );
         d.apply(
             Edit::View {
-                synth: 0,
-                view: d.project.synth_at(0).view,
+                uid: SYNTH1,
+                view: d.project.synth(SYNTH1).unwrap().view,
             },
             false,
         );
@@ -1492,7 +1507,7 @@ mod tests {
         let mut d = doc();
         d.apply(Edit::Bpm(150.0), false);
         d.mark_saved();
-        d.select_pattern(0, 3);
+        d.select_pattern(SYNTH1, 3);
         assert!(d.is_dirty());
         d.apply(Edit::Bpm(160.0), false);
         d.undo();
@@ -1525,61 +1540,65 @@ mod tests {
         };
         d.apply(
             Edit::SynthPattern {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 pattern: Box::new(p.clone()),
             },
             false,
         );
-        assert_eq!(d.project.synth_at(0).patterns[0].length, 1);
-        assert_eq!(d.project.synth_at(0).patterns[0].transpose, 12);
+        assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0].length, 1);
+        assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0].transpose, 12);
         p.length = 200;
         p.transpose = -40;
         d.apply(
             Edit::SynthPattern {
-                synth: 0,
+                uid: SYNTH1,
                 slot: 0,
                 pattern: Box::new(p),
             },
             false,
         );
-        assert_eq!(d.project.synth_at(0).patterns[0].length, STEPS as u8);
-        assert_eq!(d.project.synth_at(0).patterns[0].transpose, -12);
+        assert_eq!(
+            d.project.synth(SYNTH1).unwrap().patterns[0].length,
+            STEPS as u8
+        );
+        assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0].transpose, -12);
         let drums = DrumPattern {
             length: 0,
             ..Default::default()
         };
         d.apply(
             Edit::DrumPattern {
-                kit: 1,
+                uid: KIT909,
                 slot: 2,
                 pattern: Box::new(drums),
             },
             false,
         );
-        assert_eq!(d.project.kit_at(1).patterns[2].length, 1);
+        assert_eq!(d.project.kit(KIT909).unwrap().patterns[2].length, 1);
         let notes = NotePattern {
             length: 99,
             ..Default::default()
         };
         d.apply(
             Edit::NotePattern {
-                machine: 4,
+                uid: FM,
                 slot: 0,
                 pattern: Box::new(notes),
             },
             false,
         );
-        assert_eq!(d.project.fm_machine().patterns[0].length, STEPS as u8);
+        assert_eq!(d.project.fm(FM).unwrap().patterns[0].length, STEPS as u8);
     }
 
     #[test]
     fn repeated_ids_in_a_voice_load_undo_to_the_original_value() {
-        use acid_engine::params::{FmParam, fm_param};
+        use acid_engine::params::FmParam;
         let mut d = doc();
-        let alg = fm_param(FmParam::Algorithm);
+        let alg = FM.param(FmParam::Algorithm);
         d.apply(
             Edit::FmVoice {
+                uid: FM,
                 name: "TWICE".into(),
                 values: vec![(alg, 0.2), (alg, 0.9)],
             },
@@ -1594,11 +1613,12 @@ mod tests {
 
     #[test]
     fn repeated_ids_in_a_slot_load_undo_to_the_original_value() {
-        use acid_engine::params::{SlotParam, slot_param};
+        use acid_engine::params::SlotParam;
         let mut d = doc();
-        let choke = slot_param(0, SlotParam::Choke);
+        let choke = SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Choke));
         d.apply(
             Edit::SamplerSlot {
+                uid: SAMPLER,
                 slot: 0,
                 data: None,
                 values: vec![(choke, 0.5), (choke, 1.0)],
@@ -1619,6 +1639,7 @@ mod tests {
             pcm: vec![1; samples],
         };
         Edit::SamplerSlot {
+            uid: SAMPLER,
             slot: 0,
             data: Some(Box::new(data)),
             values: Vec::new(),
@@ -1641,7 +1662,7 @@ mod tests {
         }
         assert_eq!(n, 3, "only the newest three loads fit");
         assert!(
-            d.project.sampler_machine().slots[0].is_some(),
+            d.project.sampler(SAMPLER).unwrap().slots[0].is_some(),
             "oldest loads dropped"
         );
     }
@@ -1655,7 +1676,7 @@ mod tests {
         assert!(d.can_undo());
         d.undo();
         assert_eq!(
-            d.project.sampler_machine().slots[0]
+            d.project.sampler(SAMPLER).unwrap().slots[0]
                 .as_ref()
                 .unwrap()
                 .pcm

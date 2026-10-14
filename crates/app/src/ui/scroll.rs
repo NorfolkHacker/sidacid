@@ -31,17 +31,21 @@ impl SidAcidApp {
     pub(crate) fn tick_scroll_gestures(&mut self, now: f64) -> Option<f64> {
         let mut next: Option<f64> = None;
         let mut wait = |left: f64| next = Some(next.map_or(left, |n: f64| n.min(left)));
-        for synth in 0..2 {
-            let Some(g) = self.view.scroll_at[synth] else {
+        let mut ended = Vec::new();
+        for panel in self.view.panels.values_mut() {
+            let Some(g) = panel.scroll_at else {
                 continue;
             };
             if let Some(left) = g.remaining(now) {
                 wait(left);
             } else {
-                self.view.scroll_at[synth] = None;
-                self.view.scroll_accum[synth] = 0.0;
-                self.close_scroll_step(g);
+                panel.scroll_at = None;
+                panel.scroll_accum = 0.0;
+                ended.push(g);
             }
+        }
+        for g in ended {
+            self.close_scroll_step(g);
         }
         if let Some((_, g)) = self.view.knob_scroll {
             if let Some(left) = g.remaining(now) {
@@ -66,7 +70,7 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::document::Document;
-    use crate::six::SixMachines;
+    use crate::test_rack::*;
     use crate::ui::step_edit::nudge_note;
     use crate::ui::step303::StepOp;
 
@@ -95,11 +99,11 @@ mod tests {
     #[test]
     fn pitch_scrolls_close_together_are_one_undo_step() {
         let mut app = app();
-        let slot = app.doc.project.entry_at(0).selected;
-        let start = app.doc.project.synth_at(0).patterns[slot as usize].steps[0];
+        let slot = app.doc.project.machine(SYNTH1).unwrap().selected;
+        let start = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0];
         let frame = |app: &mut SidAcidApp, op: Option<StepOp>, now: f64| {
             if let Some(op) = op {
-                app.apply_step_ops(0, slot, vec![(0, op)], now);
+                app.apply_step_ops(SYNTH1, slot, vec![(0, op)], now);
             }
             app.tick_scroll_gestures(now);
         };
@@ -108,17 +112,17 @@ mod tests {
             frame(&mut app, None, t + 0.05);
         }
         frame(&mut app, None, 0.4);
-        assert!(app.view.scroll_at[0].is_some(), "still open");
+        assert!(app.view.panel(SYNTH1).scroll_at.is_some(), "still open");
         frame(&mut app, None, 0.6);
-        assert!(app.view.scroll_at[0].is_none());
+        assert!(app.view.panel(SYNTH1).scroll_at.is_none());
         frame(&mut app, Some(StepOp::Nudge(1)), 1.6);
         frame(&mut app, None, 2.0);
         app.doc.undo();
-        let mid = app.doc.project.synth_at(0).patterns[slot as usize].steps[0];
+        let mid = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0];
         assert_eq!(mid, nudge_note(start, 3), "three notches, one step");
         app.doc.undo();
         assert_eq!(
-            app.doc.project.synth_at(0).patterns[slot as usize].steps[0],
+            app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0],
             start
         );
         assert!(!app.doc.can_undo());

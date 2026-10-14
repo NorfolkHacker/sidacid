@@ -4,8 +4,8 @@
 
 use acid_engine::engine::Engine;
 use acid_engine::host::{self, Command, Event, PatternData};
-use acid_engine::machine::{MachineId, MachineUid};
-use acid_engine::params::{MasterParam, ParamId, fm_param, sampler_param, slot_param};
+use acid_engine::machine::MachineUid;
+use acid_engine::params::{MachineParam, MasterParam, ParamId};
 use acid_engine::project::{
     Bar, DrumPattern, Note, NotePattern, PatternRef, Project, SynthPattern,
 };
@@ -66,7 +66,7 @@ fn busy_project() -> Project {
     let mut p = acid_engine::demo::demo_project();
     for (i, root) in [48u8, 53, 55, 50].into_iter().enumerate() {
         for third in [0, 4, 7] {
-            p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            p.fm_mut(MachineUid(5)).unwrap().patterns[0]
                 .notes
                 .push(Note {
                     start: i as u16 * 16,
@@ -77,7 +77,7 @@ fn busy_project() -> Project {
         }
     }
     for k in 0..32u16 {
-        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+        p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
             .push(Note {
                 start: k * 2,
@@ -88,7 +88,7 @@ fn busy_project() -> Project {
     }
     let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
     let slices: Vec<u32> = (0..12).map(|i| i * 3675).collect();
-    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+    p.sampler_mut(MachineUid(6)).unwrap().slots[0] =
         Some(acid_engine::sampler::slot::SlotData::new(
             "Busy",
             44_100,
@@ -96,15 +96,25 @@ fn busy_project() -> Project {
             &tone,
             acid_engine::sampler::slot::SlotMeta::sliced(36, slices, 120.0, 44_100),
         ));
-    p.set_param(slot_param(0, acid_engine::params::SlotParam::Choke), 1.0);
-    p.set_param(sampler_param(acid_engine::params::SamplerParam::Grit), 1.0);
+    p.set_param(
+        MachineUid(6).param(MachineParam::SamplerSlot(
+            0,
+            acid_engine::params::SlotParam::Choke,
+        )),
+        1.0,
+    );
+    p.set_param(
+        MachineUid(6).param(acid_engine::params::SamplerParam::Grit),
+        1.0,
+    );
     let bar = Bar {
-        cells: MachineId::ALL
+        cells: p
+            .machines
             .iter()
             .map(|m| {
                 let pattern = Some(PatternRef(0));
                 (
-                    m.uid(),
+                    m.uid,
                     acid_engine::project::Cell {
                         pattern,
                         ..Default::default()
@@ -276,7 +286,7 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
     meta.loop_on = true;
     meta.loop_start = 10_000;
     meta.loop_end = 30_000;
-    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+    p.sampler_mut(MachineUid(6)).unwrap().slots[0] =
         Some(SlotData::new("Pad", 44_100, 1, &tone, meta.clone()));
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
@@ -304,11 +314,11 @@ fn a_steal_by_a_note_shorter_than_its_fade_does_not_allocate() {
     let mut p = Project::default();
     let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
     let pad = SlotMeta::chromatic(36, 59, 48, 44_100);
-    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+    p.sampler_mut(MachineUid(6)).unwrap().slots[0] =
         Some(SlotData::new("Pad", 44_100, 1, &tone, pad));
     // Key 60 plays a 20-frame slice, well inside the 2 ms steal fade.
     let tick = SlotMeta::sliced(60, vec![0, 20], 120.0, 44_100);
-    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[1] =
+    p.sampler_mut(MachineUid(6)).unwrap().slots[1] =
         Some(SlotData::new("Tick", 44_100, 1, &tone, tick));
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
@@ -334,8 +344,8 @@ fn toggling_fm_effects_does_not_allocate() {
     e.play();
     let n = count_allocs(|| {
         for on in [1.0, 0.0, 1.0, 0.0, 1.0] {
-            e.set_param(fm_param(FmParam::FilterOn), on);
-            e.set_param(fm_param(FmParam::PhaserMix), on);
+            e.set_param(MachineUid(5).param(FmParam::FilterOn), on);
+            e.set_param(MachineUid(5).param(FmParam::PhaserMix), on);
             render_seconds(&mut e, &mut l, &mut r, 0.2);
         }
     });

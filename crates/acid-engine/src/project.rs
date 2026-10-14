@@ -804,8 +804,8 @@ impl Project {
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default project
 mod tests {
     use super::*;
-    use crate::machine::MachineId;
-    use crate::params::{FmParam, KitParam, MasterParam, SynthParam, synth_param};
+    use crate::machine::MachineUid;
+    use crate::params::{FmParam, KitParam, MasterParam, SynthParam};
 
     const SAMPLER: MachineUid = MachineUid(6);
     const FM: MachineUid = MachineUid(5);
@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn param_lookup_falls_back_to_default() {
         let mut p = Project::default();
-        let id = synth_param(1, SynthParam::Cutoff);
+        let id = MachineUid(2).param(SynthParam::Cutoff);
         p.machines[1]
             .params
             .remove(&MachineParam::Synth(SynthParam::Cutoff));
@@ -1220,7 +1220,7 @@ mod tests {
             slide: true,
         };
         kit_mut(&mut p, 0).patterns[2].steps[4][0] = DrumHit::Accent;
-        p.set_param(synth_param(0, SynthParam::Resonance), 0.95);
+        p.set_param(MachineUid(1).param(SynthParam::Resonance), 0.95);
         let mut bar = Bar::default();
         bar.cell_mut(MachineUid(1)).pattern = Some(PatternRef(5));
         bar.cell_mut(MachineUid(3)).pattern = Some(PatternRef(2));
@@ -1289,12 +1289,12 @@ mod tests {
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
         let mut p = Project::default();
         let mut lane = ParamLane {
-            param: crate::params::drum_param(0, 9, crate::params::DrumParam::Tune),
+            param: MachineUid(3).param(MachineParam::Drum(9, crate::params::DrumParam::Tune)),
             values: vec![None; STEPS],
         };
         synth_mut(&mut p, 0).patterns[0].param_lane = Some(lane.clone());
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
-        lane.param = synth_param(0, SynthParam::Cutoff);
+        lane.param = MachineUid(1).param(SynthParam::Cutoff);
         lane.values[3] = Some(f32::NAN);
         synth_mut(&mut p, 0).patterns[0].param_lane = Some(lane);
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
@@ -1337,7 +1337,7 @@ mod tests {
         p.song.loop_range = Some((1, 2));
         p.validate().unwrap();
 
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = MachineUid(1).param(SynthParam::Cutoff);
         let mut p = Project::default();
         let lane = AutoLane {
             param: id,
@@ -1349,7 +1349,7 @@ mod tests {
             "duplicate lane"
         );
         p.song.automation = vec![AutoLane {
-            param: synth_param(7, SynthParam::Cutoff),
+            param: MachineUid(8).param(SynthParam::Cutoff),
             ..lane.clone()
         }];
         assert!(
@@ -1491,14 +1491,11 @@ mod tests {
         assert_eq!(p.synth(MachineUid(2)).unwrap().patterns[2].length, 7);
         let selected: Vec<_> = p.machines.iter().map(|m| m.selected).collect();
         assert_eq!(selected, [1, 2, 3, 4, 0, 0]);
-        assert_eq!(p.param(synth_param(0, SynthParam::Cutoff)), 0.9);
+        assert_eq!(p.param(MachineUid(1).param(SynthParam::Cutoff)), 0.9);
         let ch = MachineParam::Channel(crate::params::ChannelParam::Level);
         assert_eq!(p.machines[5].params.get(&ch), Some(&ch.info().default));
         let bar = &p.song.bars[0];
-        let patterns: Vec<_> = MachineId::ALL
-            .iter()
-            .map(|m| bar.cell(m.uid()).pattern)
-            .collect();
+        let patterns: Vec<_> = (1..=6).map(|u| bar.cell(MachineUid(u)).pattern).collect();
         assert_eq!(
             patterns,
             [
@@ -1510,15 +1507,9 @@ mod tests {
                 None
             ]
         );
-        let mutes: Vec<_> = MachineId::ALL
-            .iter()
-            .map(|m| bar.cell(m.uid()).mute)
-            .collect();
+        let mutes: Vec<_> = (1..=6).map(|u| bar.cell(MachineUid(u)).mute).collect();
         assert_eq!(mutes, [true, false, false, true, false, false]);
-        let transposes: Vec<_> = [MachineId::Synth1, MachineId::Synth2, MachineId::Fm]
-            .iter()
-            .map(|m| bar.cell(m.uid()).transpose)
-            .collect();
+        let transposes = [1, 2, 5].map(|u| bar.cell(MachineUid(u)).transpose);
         assert_eq!(transposes, [2, -3, 0]);
         assert_eq!(p.song.loop_range, Some((0, 0)));
         assert_eq!(p.fm(FM).unwrap().patterns.len(), PATTERNS);

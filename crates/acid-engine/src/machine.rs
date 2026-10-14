@@ -1,23 +1,11 @@
-//! The six machines in the rack. Every per-machine array (selected
-//! pattern, playhead, song bar slots, mixer channel) is indexed by
-//! `MachineId::index`.
+//! Machine identity and types. A project's rack is an ordered list of
+//! machines, each named by a stable `MachineUid` and built from a
+//! `MachineType`.
 
 use serde::{Deserialize, Serialize};
 
 /// Largest number of machines a rack may hold.
 pub const MAX_MACHINES: usize = 16;
-
-pub const MACHINES: usize = 6;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MachineId {
-    Synth1,
-    Synth2,
-    Kit808,
-    Kit909,
-    Fm,
-    Sampler,
-}
 
 /// Stable identity of a machine within a project. Allocated from
 /// `Project::next_uid`, never reused, independent of rack position.
@@ -104,122 +92,9 @@ pub fn standard_rack() -> [(MachineUid, MachineType, &'static str); 6] {
     ]
 }
 
-/// What a machine plays, with its index among machines of that kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MachineKind {
-    Synth(usize),
-    Drum(usize),
-    Notes(usize),
-}
-
-impl MachineId {
-    pub const ALL: [MachineId; MACHINES] = [
-        MachineId::Synth1,
-        MachineId::Synth2,
-        MachineId::Kit808,
-        MachineId::Kit909,
-        MachineId::Fm,
-        MachineId::Sampler,
-    ];
-
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    pub fn from_index(i: usize) -> Option<MachineId> {
-        Self::ALL.get(i).copied()
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            MachineId::Synth1 => "Synth 1",
-            MachineId::Synth2 => "Synth 2",
-            MachineId::Kit808 => "808",
-            MachineId::Kit909 => "909",
-            MachineId::Fm => "FM",
-            MachineId::Sampler => "Sampler",
-        }
-    }
-
-    pub fn kind(self) -> MachineKind {
-        match self {
-            MachineId::Synth1 => MachineKind::Synth(0),
-            MachineId::Synth2 => MachineKind::Synth(1),
-            MachineId::Kit808 => MachineKind::Drum(0),
-            MachineId::Kit909 => MachineKind::Drum(1),
-            MachineId::Fm => MachineKind::Notes(0),
-            MachineId::Sampler => MachineKind::Notes(1),
-        }
-    }
-
-    /// Temporary bridge to the fixed-enum rack; removed when `MachineId`
-    /// is replaced by uids. Synth1 → 1 … Sampler → 6.
-    pub fn uid(self) -> MachineUid {
-        MachineUid(self.index() as u16 + 1)
-    }
-
-    /// Inverse of `uid`; `None` for uids outside the six fixed machines.
-    pub fn from_uid(uid: MachineUid) -> Option<MachineId> {
-        let i = usize::from(uid.0).checked_sub(1)?;
-        Self::from_index(i)
-    }
-
-    /// The sound-engine type of this fixed machine.
-    pub fn machine_type(self) -> MachineType {
-        match self {
-            MachineId::Synth1 | MachineId::Synth2 => MachineType::Synth,
-            MachineId::Kit808 => MachineType::Kit808,
-            MachineId::Kit909 => MachineType::Kit909,
-            MachineId::Fm => MachineType::Fm,
-            MachineId::Sampler => MachineType::Sampler,
-        }
-    }
-
-    /// Index into `Bar::transpose`; `None` for machines that never transpose.
-    pub fn transpose_index(self) -> Option<usize> {
-        match self {
-            MachineId::Synth1 => Some(0),
-            MachineId::Synth2 => Some(1),
-            MachineId::Fm => Some(2),
-            _ => None,
-        }
-    }
-}
-
-pub fn kind_of(machine: usize) -> Option<MachineKind> {
-    MachineId::from_index(machine).map(MachineId::kind)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transpose_index_covers_the_pitched_pattern_machines() {
-        assert_eq!(MachineId::Synth1.transpose_index(), Some(0));
-        assert_eq!(MachineId::Synth2.transpose_index(), Some(1));
-        assert_eq!(MachineId::Fm.transpose_index(), Some(2));
-        for m in [MachineId::Kit808, MachineId::Kit909, MachineId::Sampler] {
-            assert_eq!(m.transpose_index(), None, "{m:?}");
-        }
-    }
-
-    #[test]
-    fn indices_round_trip_and_kinds_are_dense() {
-        for (i, m) in MachineId::ALL.iter().enumerate() {
-            assert_eq!(m.index(), i);
-            assert_eq!(MachineId::from_index(i), Some(*m));
-        }
-        assert_eq!(MachineId::from_index(MACHINES), None);
-        assert_eq!(kind_of(4), Some(MachineKind::Notes(0)));
-        assert_eq!(kind_of(5), Some(MachineKind::Notes(1)));
-        assert_eq!(kind_of(3), Some(MachineKind::Drum(1)));
-        let transposed: Vec<_> = MachineId::ALL
-            .iter()
-            .filter_map(|m| m.transpose_index())
-            .collect();
-        assert_eq!(transposed, [0, 1, 2]);
-    }
 
     #[test]
     fn default_names_number_from_two_except_synths() {
@@ -248,12 +123,12 @@ mod tests {
         assert_eq!(names, ["Synth 1", "Synth 2", "808", "909", "FM", "Sampler"]);
         let uids: Vec<_> = r.iter().map(|m| m.0.0).collect();
         assert_eq!(uids, [1, 2, 3, 4, 5, 6]);
-        for (m, (uid, ty, _)) in MachineId::ALL.iter().zip(r) {
-            assert_eq!(m.uid(), uid);
-            assert_eq!(m.machine_type(), ty);
-            assert_eq!(MachineId::from_uid(uid), Some(*m));
-        }
-        assert_eq!(MachineId::from_uid(MachineUid(7)), None);
+        let types: Vec<_> = r.iter().map(|m| m.1).collect();
+        use MachineType as T;
+        assert_eq!(
+            types,
+            [T::Synth, T::Synth, T::Kit808, T::Kit909, T::Fm, T::Sampler]
+        );
     }
 
     #[test]

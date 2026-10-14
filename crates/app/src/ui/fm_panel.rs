@@ -5,11 +5,10 @@
 use super::alg_diagram::{env_points, layout};
 use super::fm_voices::{FmBrowser, starter};
 use super::{SidAcidApp, theme};
-use crate::six::SixMachines;
 use acid_engine::fm::algorithms::ALGORITHMS;
-use acid_engine::machine::MachineId;
-use acid_engine::params::{FmParam, OpParam, ParamId, fm_op_param, fm_param, fm_steps, step_index};
-use acid_engine::project::PatternRef;
+use acid_engine::machine::MachineUid;
+use acid_engine::params::{FmParam, MachineParam, OpParam, ParamId, fm_steps, step_index};
+use acid_engine::project::{FmMachine, PatternRef};
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
 const TOP: [(FmParam, &str); 8] = [
@@ -84,47 +83,52 @@ const CELL: f32 = 28.0;
 const BOX: egui::Vec2 = vec2(22.0, 16.0);
 
 impl SidAcidApp {
-    pub(crate) fn fm_panel(&mut self, ui: &mut egui::Ui) {
-        let m = MachineId::Fm.index();
-        let slot = self.doc.project.entry_at(m).selected;
+    /// FM machine `uid`; it must be an FM machine in the rack.
+    fn fm_of(&self, uid: MachineUid) -> &FmMachine {
+        self.doc.project.fm(uid).expect("an FM machine in the rack")
+    }
+
+    pub(crate) fn fm_panel(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let slot = self.selected(uid);
         let title = format!(
-            "FM   {}   {}",
+            "{}   {}   {}",
+            self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label(),
-            self.doc.project.fm_machine().voice_name
+            self.fm_of(uid).voice_name
         );
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-            .id_salt("fm")
+            .id_salt(("fm", uid))
             .default_open(true)
             .open(self.view.forced_open("fm"))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    self.alg_diagram(ui);
+                    self.alg_diagram(ui, uid);
                     ui.horizontal_wrapped(|ui| {
                         for (p, label) in TOP {
-                            self.param_knob(ui, fm_param(p), label);
+                            self.param_knob(ui, uid.param(p), label);
                         }
                     });
                 });
-                self.fm_operator_editor(ui);
+                self.fm_operator_editor(ui, uid);
                 egui::CollapsingHeader::new("LFO · Pitch EG · Effects")
-                    .id_salt("fm_more")
+                    .id_salt(("fm_more", uid))
                     .default_open(false)
                     .open(self.view.forced_open("fm_more"))
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
-                                self.param_knob(ui, fm_param(*p), label);
+                                self.param_knob(ui, uid.param(*p), label);
                             }
                         });
                         ui.horizontal_wrapped(|ui| {
                             for (p, label) in FX {
-                                self.param_knob(ui, fm_param(p), label);
+                                self.param_knob(ui, uid.param(p), label);
                             }
                         });
                     });
-                self.fm_voice_browser(ui);
-                self.note_pattern_row(ui, m);
-                self.poly_roll(ui, m);
+                self.fm_voice_browser(ui, uid);
+                self.note_pattern_row(ui, uid);
+                self.poly_roll(ui, uid);
             });
     }
 
@@ -133,8 +137,8 @@ impl SidAcidApp {
     }
 
     /// "×1.00" for a ratio operator, "100Hz" for a fixed one.
-    fn op_freq_text(&self, op: usize) -> String {
-        let id = |p| fm_op_param(op as u8, p);
+    fn op_freq_text(&self, uid: MachineUid, op: usize) -> String {
+        let id = |p| uid.param(MachineParam::FmOp(op as u8, p));
         let coarse = step_index(self.fm_value(id(OpParam::Coarse)), fm_steps::COARSE as u8) as f32;
         let fine = self.fm_value(id(OpParam::Fine)) * 99.0;
         if self.fm_value(id(OpParam::FixedFreq)) >= 0.5 {
@@ -146,9 +150,9 @@ impl SidAcidApp {
         }
     }
 
-    fn alg_diagram(&mut self, ui: &mut egui::Ui) {
+    fn alg_diagram(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let index = step_index(
-            self.fm_value(fm_param(FmParam::Algorithm)),
+            self.fm_value(uid.param(FmParam::Algorithm)),
             fm_steps::ALGORITHM as u8,
         );
         let alg = ALGORITHMS[index];
@@ -239,10 +243,11 @@ impl SidAcidApp {
         }
     }
 
-    fn fm_operator_editor(&mut self, ui: &mut egui::Ui) {
+    fn fm_operator_editor(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let id = |op, p| uid.param(MachineParam::FmOp(op, p));
         ui.horizontal(|ui| {
             for op in 0..6 {
-                let text = format!("OP{} {}", op + 1, self.op_freq_text(op));
+                let text = format!("OP{} {}", op + 1, self.op_freq_text(uid, op));
                 if ui.selectable_label(self.view.fm_op == op, text).clicked() {
                     self.view.fm_op = op;
                 }
@@ -251,11 +256,11 @@ impl SidAcidApp {
         let op = self.view.fm_op.min(5) as u8;
         ui.horizontal_wrapped(|ui| {
             for (p, label) in OP_KNOBS {
-                self.param_knob(ui, fm_op_param(op, p), label);
+                self.param_knob(ui, id(op, p), label);
             }
         });
         ui.horizontal_wrapped(|ui| {
-            let v = |p| self.fm_value(fm_op_param(op, p)) * 99.0;
+            let v = |p| self.fm_value(id(op, p)) * 99.0;
             let rates = [
                 v(OpParam::R1),
                 v(OpParam::R2),
@@ -270,13 +275,13 @@ impl SidAcidApp {
             ];
             env_sketch(ui, rates, levels);
             for (p, label) in OP_ENV {
-                self.param_knob(ui, fm_op_param(op, p), label);
+                self.param_knob(ui, id(op, p), label);
             }
         });
     }
 
-    fn fm_voice_browser(&mut self, ui: &mut egui::Ui) {
-        let has_bank = self.doc.project.fm_machine().bank.is_some();
+    fn fm_voice_browser(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let has_bank = self.fm_of(uid).bank.is_some();
         // Undoing an import leaves no bank: show the starter list, so the
         // tab buttons and the grid agree.
         if !has_bank {
@@ -305,10 +310,10 @@ impl SidAcidApp {
                 .on_hover_text("Load a DX7 32-voice bank or single voice")
                 .clicked()
             {
-                self.import_syx();
+                self.import_syx(uid);
             }
         });
-        let names: Vec<String> = match (self.view.fm_browser, &self.doc.project.fm_machine().bank) {
+        let names: Vec<String> = match (self.view.fm_browser, &self.fm_of(uid).bank) {
             (FmBrowser::Imported, Some(bank)) => bank.iter().map(|v| v.name.clone()).collect(),
             _ => starter().iter().map(|v| v.name.clone()).collect(),
         };
@@ -324,10 +329,10 @@ impl SidAcidApp {
             self.view.fm_voice_src,
             self.view.fm_browser,
             &names,
-            &self.doc.project.fm_machine().voice_name,
+            &self.fm_of(uid).voice_name,
         );
         let mut picked = None;
-        egui::Grid::new("fm_voices")
+        egui::Grid::new(("fm_voices", uid))
             .spacing([4.0, 2.0])
             .show(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
@@ -341,11 +346,11 @@ impl SidAcidApp {
                 }
             });
         if let Some(i) = picked {
-            let voice = match (self.view.fm_browser, &self.doc.project.fm_machine().bank) {
+            let voice = match (self.view.fm_browser, &self.fm_of(uid).bank) {
                 (FmBrowser::Imported, Some(bank)) => bank[i].clone(),
                 _ => starter()[i].clone(),
             };
-            self.load_fm_voice(&voice);
+            self.load_fm_voice(uid, &voice);
             self.view.fm_voice_src = Some((self.view.fm_browser, i));
         }
     }

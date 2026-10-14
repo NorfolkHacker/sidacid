@@ -2,7 +2,7 @@
 //! 128-byte voices) and the single-voice dump (163 bytes, one unpacked
 //! 155-byte voice), plus conversion to and from FM params.
 
-use crate::params::{FmParam, OpParam, ParamId, fm_op_param, fm_param, fm_steps, step_index};
+use crate::params::{FmParam, MachineParam, OpParam, fm_steps, step_index};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -173,7 +173,7 @@ impl Dx7Voice {
 
     /// The voice as FM params (0..1 values). Loading a voice also turns
     /// every operator on.
-    pub fn to_params(&self) -> Vec<(ParamId, f32)> {
+    pub fn to_params(&self) -> Vec<(MachineParam, f32)> {
         use FmParam as F;
         use OpParam as O;
         let n99 = |x: u8| x as f32 / 99.0;
@@ -181,42 +181,42 @@ impl Dx7Voice {
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         let mut out = vec![
             (
-                fm_param(F::Algorithm),
+                MachineParam::Fm(F::Algorithm),
                 step(self.algorithm, fm_steps::ALGORITHM),
             ),
             (
-                fm_param(F::Feedback),
+                MachineParam::Fm(F::Feedback),
                 step(self.feedback, fm_steps::FEEDBACK),
             ),
-            (fm_param(F::OscSync), flag(self.osc_sync)),
-            (fm_param(F::PitchR1), n99(self.pitch_rates[0])),
-            (fm_param(F::PitchR2), n99(self.pitch_rates[1])),
-            (fm_param(F::PitchR3), n99(self.pitch_rates[2])),
-            (fm_param(F::PitchR4), n99(self.pitch_rates[3])),
-            (fm_param(F::PitchL1), n99(self.pitch_levels[0])),
-            (fm_param(F::PitchL2), n99(self.pitch_levels[1])),
-            (fm_param(F::PitchL3), n99(self.pitch_levels[2])),
-            (fm_param(F::PitchL4), n99(self.pitch_levels[3])),
-            (fm_param(F::LfoSpeed), n99(self.lfo_speed)),
-            (fm_param(F::LfoDelay), n99(self.lfo_delay)),
-            (fm_param(F::LfoPmd), n99(self.lfo_pmd)),
-            (fm_param(F::LfoAmd), n99(self.lfo_amd)),
-            (fm_param(F::LfoSync), flag(self.lfo_sync)),
+            (MachineParam::Fm(F::OscSync), flag(self.osc_sync)),
+            (MachineParam::Fm(F::PitchR1), n99(self.pitch_rates[0])),
+            (MachineParam::Fm(F::PitchR2), n99(self.pitch_rates[1])),
+            (MachineParam::Fm(F::PitchR3), n99(self.pitch_rates[2])),
+            (MachineParam::Fm(F::PitchR4), n99(self.pitch_rates[3])),
+            (MachineParam::Fm(F::PitchL1), n99(self.pitch_levels[0])),
+            (MachineParam::Fm(F::PitchL2), n99(self.pitch_levels[1])),
+            (MachineParam::Fm(F::PitchL3), n99(self.pitch_levels[2])),
+            (MachineParam::Fm(F::PitchL4), n99(self.pitch_levels[3])),
+            (MachineParam::Fm(F::LfoSpeed), n99(self.lfo_speed)),
+            (MachineParam::Fm(F::LfoDelay), n99(self.lfo_delay)),
+            (MachineParam::Fm(F::LfoPmd), n99(self.lfo_pmd)),
+            (MachineParam::Fm(F::LfoAmd), n99(self.lfo_amd)),
+            (MachineParam::Fm(F::LfoSync), flag(self.lfo_sync)),
             (
-                fm_param(F::LfoWave),
+                MachineParam::Fm(F::LfoWave),
                 step(self.lfo_wave, fm_steps::LFO_WAVES),
             ),
             (
-                fm_param(F::PitchModSens),
+                MachineParam::Fm(F::PitchModSens),
                 step(self.pms, fm_steps::PITCH_MOD_SENS),
             ),
             (
-                fm_param(F::Transpose),
+                MachineParam::Fm(F::Transpose),
                 step(self.transpose, fm_steps::TRANSPOSE),
             ),
         ];
         for (op, o) in self.ops.iter().enumerate() {
-            let id = |p| fm_op_param(op as u8, p);
+            let id = |p| MachineParam::FmOp(op as u8, p);
             out.extend([
                 (id(O::R1), n99(o.rates[0])),
                 (id(O::R2), n99(o.rates[1])),
@@ -252,13 +252,13 @@ impl Dx7Voice {
     }
 
     /// The voice the current FM params describe.
-    pub fn from_params(name: &str, value: impl Fn(ParamId) -> f32) -> Self {
+    pub fn from_params(name: &str, value: impl Fn(MachineParam) -> f32) -> Self {
         use FmParam as F;
         use OpParam as O;
         let d = |id| (value(id).clamp(0.0, 1.0) * 99.0).round() as u8;
         let s = |id, n: usize| step_index(value(id), n as u8) as u8;
         let b = |id| value(id) >= 0.5;
-        let g = |p| fm_param(p);
+        let g = MachineParam::Fm;
         let mut v = Dx7Voice::init();
         v.name = name.to_string();
         v.algorithm = s(g(F::Algorithm), fm_steps::ALGORITHM);
@@ -285,7 +285,7 @@ impl Dx7Voice {
         v.pms = s(g(F::PitchModSens), fm_steps::PITCH_MOD_SENS);
         v.transpose = s(g(F::Transpose), fm_steps::TRANSPOSE);
         for (op, o) in v.ops.iter_mut().enumerate() {
-            let id = |p| fm_op_param(op as u8, p);
+            let id = |p| MachineParam::FmOp(op as u8, p);
             o.rates = [d(id(O::R1)), d(id(O::R2)), d(id(O::R3)), d(id(O::R4))];
             o.levels = [d(id(O::L1)), d(id(O::L2)), d(id(O::L3)), d(id(O::L4))];
             o.break_point = d(id(O::BreakPoint));
@@ -624,8 +624,8 @@ mod tests {
         let v = odd_voice(11);
         let params = v.to_params();
         assert_eq!(params.len(), 19 + 6 * 22);
-        let map: std::collections::HashMap<ParamId, f32> = params.into_iter().collect();
-        assert_eq!(map[&fm_op_param(3, crate::params::OpParam::On)], 1.0);
+        let map: std::collections::HashMap<MachineParam, f32> = params.into_iter().collect();
+        assert_eq!(map[&MachineParam::FmOp(3, crate::params::OpParam::On)], 1.0);
         let back = Dx7Voice::from_params(&v.name, |id| map[&id]);
         assert_eq!(back, v);
     }
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn a_name_from_params_is_clamped() {
-        let init: std::collections::HashMap<ParamId, f32> =
+        let init: std::collections::HashMap<MachineParam, f32> =
             Dx7Voice::init().to_params().into_iter().collect();
         let v = Dx7Voice::from_params("ÄBCDEFGHIJKLMNOP  ", |id| init[&id]);
         assert_eq!(v.name, "BCDEFGHIJK");

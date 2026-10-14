@@ -155,7 +155,7 @@ pub fn render_patterns_wav(project: &Project, bars: u32, path: &Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::MachineId;
+    use crate::machine::MachineUid;
     use crate::testutil::rms;
 
     #[test]
@@ -173,12 +173,12 @@ mod tests {
         let mut p = crate::demo::demo_project();
         p.bpm = 120.0;
         let bar = crate::project::Bar {
-            cells: crate::machine::MachineId::ALL
+            cells: crate::machine::standard_rack()
                 .iter()
                 .map(|m| {
                     let pattern = Some(crate::project::PatternRef(0));
                     (
-                        m.uid(),
+                        m.0,
                         crate::project::Cell {
                             pattern,
                             ..Default::default()
@@ -209,12 +209,12 @@ mod tests {
 
     #[test]
     fn song_export_keeps_the_fm_release_tail() {
-        use crate::params::{OpParam, fm_op_param};
+        use crate::params::{MachineParam, OpParam};
         let mut p = Project {
             bpm: 120.0, // 1 bar = 2 s
             ..Project::default()
         };
-        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+        p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(crate::project::Note {
                 start: 0,
@@ -223,9 +223,9 @@ mod tests {
                 vel: 120,
             });
         // OP1 releases slowly: the note rings past the song's end.
-        p.set_param(fm_op_param(0, OpParam::R4), 0.3);
+        p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::R4)), 0.3);
         let mut bar = crate::project::Bar::default();
-        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(crate::project::PatternRef(0));
+        bar.cell_mut(MachineUid(5)).pattern = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];
         let (l, _) = render_song(&p, |_| {});
         let sr = EXPORT_SAMPLE_RATE as usize;

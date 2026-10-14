@@ -2,10 +2,9 @@
 
 use super::{SidAcidApp, theme};
 use acid_engine::machine::MAX_MACHINES;
-use acid_engine::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId, channel_param};
+use acid_engine::params::{ChannelParam, FxParam, MasterParam, ParamId};
 use eframe::egui::{self, Sense, vec2};
 
-pub const CHANNEL_NAMES: [&str; CHANNELS] = ["Synth 1", "Synth 2", "808", "909", "FM", "Sampler"];
 const METER_FLOOR_DB: f32 = -48.0;
 
 const STRIP: [(ChannelParam, &str); 16] = [
@@ -87,21 +86,26 @@ impl SidAcidApp {
                     .id_salt("mixer_row")
                     .show(ui, |ui| {
                         ui.horizontal_top(|ui| {
-                            for ch in 0..CHANNELS as u8 {
+                            // One strip per machine in rack order; `Status`
+                            // meters are by rack position.
+                            let strips: Vec<_> = self
+                                .doc
+                                .project
+                                .machines
+                                .iter()
+                                .map(|m| (m.uid, m.name.clone()))
+                                .collect();
+                            for (pos, (uid, name)) in strips.into_iter().enumerate() {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.strong(CHANNEL_NAMES[ch as usize]);
-                                        meter(ui, self.status.meters[ch as usize]);
+                                        ui.strong(name);
+                                        meter(ui, self.status.meters[pos]);
                                     });
-                                    egui::Grid::new(("strip", ch)).spacing([0.0, 0.0]).show(
+                                    egui::Grid::new(("strip", uid)).spacing([0.0, 0.0]).show(
                                         ui,
                                         |ui| {
                                             for (i, (p, label)) in STRIP.iter().enumerate() {
-                                                self.param_knob(
-                                                    ui,
-                                                    channel_param(ch as usize, *p),
-                                                    label,
-                                                );
+                                                self.param_knob(ui, uid.param(*p), label);
                                                 if i % 4 == 3 {
                                                     ui.end_row();
                                                 }

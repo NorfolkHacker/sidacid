@@ -6,7 +6,8 @@ mod audio_scan;
 mod audio_select;
 mod document;
 mod settings;
-mod six;
+#[cfg(test)]
+mod test_rack;
 mod ui;
 
 use std::path::Path;

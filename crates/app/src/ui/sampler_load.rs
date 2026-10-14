@@ -4,8 +4,8 @@
 
 use super::SidAcidApp;
 use crate::document::Edit;
-use crate::six::SixMachines;
-use acid_engine::params::{SlotParam, slot_param};
+use acid_engine::machine::MachineUid;
+use acid_engine::params::{MachineParam, SlotParam};
 use acid_engine::sampler::decode::decode;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
 use acid_engine::sampler::slot::{SlotData, SlotMeta};
@@ -16,8 +16,18 @@ const SLICE_MIN_SECONDS: f32 = 1.0;
 /// Keys a new chromatic zone covers.
 const CHROMATIC_SPAN: u8 = 24;
 
+/// Sample memory in use across every sampler in the rack: the project's
+/// `MEMORY_LIMIT` covers them all.
+pub(crate) fn sample_memory(project: &acid_engine::project::Project) -> usize {
+    let samplers = project
+        .machines
+        .iter()
+        .filter_map(|m| project.sampler(m.uid));
+    samplers.map(|s| s.memory_bytes()).sum()
+}
+
 impl SidAcidApp {
-    pub(crate) fn load_sample_dialog(&mut self, slot: usize) {
+    pub(crate) fn load_sample_dialog(&mut self, uid: MachineUid, slot: usize) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "Audio",
@@ -25,11 +35,16 @@ impl SidAcidApp {
             )
             .pick_file()
         {
-            self.load_sample_file(slot, &path);
+            self.load_sample_file(uid, slot, &path);
         }
     }
 
-    pub(crate) fn load_sample_file(&mut self, slot: usize, path: &std::path::Path) {
+    pub(crate) fn load_sample_file(
+        &mut self,
+        uid: MachineUid,
+        slot: usize,
+        path: &std::path::Path,
+    ) {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let name = path
@@ -40,14 +55,16 @@ impl SidAcidApp {
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(str::to_lowercase);
-                self.load_sample_bytes(slot, &name, ext.as_deref(), &bytes);
+                self.load_sample_bytes(uid, slot, &name, ext.as_deref(), &bytes);
             }
             Err(e) => self.view.message = Some(format!("Could not read {}:\n{e}", path.display())),
         }
     }
 
+    /// Loads a decoded file into slot `slot` of sampler `uid`.
     pub(crate) fn load_sample_bytes(
         &mut self,
+        uid: MachineUid,
         slot: usize,
         name: &str,
         extension: Option<&str>,
@@ -72,9 +89,12 @@ impl SidAcidApp {
                 return;
             }
         };
-        let sampler = &self.doc.project.sampler_machine();
+        let Some(sampler) = self.doc.project.sampler(uid) else {
+            return;
+        };
         let old = sampler.slots[slot].as_ref().map_or(0, |d| d.memory_bytes());
-        if sampler.memory_bytes() - old + decoded.samples.len() * 4 > MEMORY_LIMIT {
+        let in_use = sample_memory(&self.doc.project);
+        if in_use - old + decoded.samples.len() * 4 > MEMORY_LIMIT {
             self.view.message =
                 Some("Not enough sample memory left (64 MB in all). Clear a slot first.".into());
             return;
@@ -124,7 +144,7 @@ impl SidAcidApp {
         let values = SlotParam::ALL
             .iter()
             .map(|&p| {
-                let id = slot_param(slot as u8, p);
+                let id = uid.param(MachineParam::SamplerSlot(slot as u8, p));
                 let v = match p {
                     SlotParam::Choke | SlotParam::TempoLock if slice_mode => 1.0,
                     _ => id.info().default,
@@ -134,6 +154,7 @@ impl SidAcidApp {
             .collect();
         let cmds = self.doc.apply(
             Edit::SamplerSlot {
+                uid,
                 slot,
                 data: Some(Box::new(data)),
                 values,
@@ -149,17 +170,17 @@ impl SidAcidApp {
         }
     }
 
-    pub(crate) fn clear_slot(&mut self, slot: usize) {
+    pub(crate) fn clear_slot(&mut self, uid: MachineUid, slot: usize) {
         if self
             .doc
             .project
-            .sampler_machine()
-            .slots
-            .get(slot)
+            .sampler(uid)
+            .and_then(|s| s.slots.get(slot))
             .is_some_and(Option::is_some)
         {
             let cmds = self.doc.apply(
                 Edit::SamplerSlot {
+                    uid,
                     slot,
                     data: None,
                     values: Vec::new(),
@@ -172,13 +193,18 @@ impl SidAcidApp {
 
     /// Moves a slot's zone to start at `base`, keeping its span; refuses
     /// (with a message) a move that would push the top past key 127.
-    pub(crate) fn move_zone(&mut self, slot: usize, base: u8, merge: bool) -> bool {
+    pub(crate) fn move_zone(
+        &mut self,
+        uid: MachineUid,
+        slot: usize,
+        base: u8,
+        merge: bool,
+    ) -> bool {
         let Some(meta) = self
             .doc
             .project
-            .sampler_machine()
-            .slots
-            .get(slot)
+            .sampler(uid)
+            .and_then(|s| s.slots.get(slot))
             .and_then(Option::as_ref)
             .map(|d| &d.meta)
         else {
@@ -190,7 +216,7 @@ impl SidAcidApp {
                 Some("The zone can't move that high: its top key would pass G9.".into());
             return false;
         }
-        self.edit_slot_meta(slot, merge, |m| {
+        self.edit_slot_meta(uid, slot, merge, |m| {
             m.base_key = base;
             // In slice mode high_key is unused; keep it at or above the base.
             m.high_key = (m.high_key as i16 + shift).clamp(base as i16, 127) as u8;
@@ -203,11 +229,14 @@ impl SidAcidApp {
     /// `merge`, is refused silently so the message doesn't flicker).
     pub(crate) fn edit_slot_meta(
         &mut self,
+        uid: MachineUid,
         slot: usize,
         merge: bool,
         change: impl FnOnce(&mut SlotMeta),
     ) -> bool {
-        let sampler = &self.doc.project.sampler_machine();
+        let Some(sampler) = self.doc.project.sampler(uid) else {
+            return false;
+        };
         let Some(data) = sampler.slots.get(slot).and_then(Option::as_ref) else {
             return false;
         };
@@ -228,6 +257,7 @@ impl SidAcidApp {
         }
         let cmds = self.doc.apply(
             Edit::SlotMeta {
+                uid,
                 slot,
                 meta: Box::new(meta),
             },

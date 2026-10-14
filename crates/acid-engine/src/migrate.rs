@@ -3,7 +3,7 @@
 //! position (`LegacyParamId`); v3 names them by machine uid.
 
 use crate::drums::KitKind;
-use crate::machine::{MachineId, MachineUid};
+use crate::machine::{MachineUid, standard_rack};
 use crate::params::{
     ChannelParam, DrumParam, FmParam, FxParam, KitParam, MachineParam, MasterParam, OpParam,
     ParamId, SamplerParam, SlotParam, SynthParam,
@@ -139,12 +139,12 @@ impl Default for DrumMachineV2 {
     }
 }
 
-/// The v2 bar: one slot per fixed machine, by `MachineId::index`.
+/// The v2 bar: one slot per fixed machine, by standard-rack position.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct BarV2 {
     pub patterns: [Option<PatternRef>; 6],
     pub mutes: [bool; 6],
-    /// Song transpose for Synth 1, Synth 2, FM (`MachineId::transpose_index`).
+    /// Song transpose for Synth 1, Synth 2, FM.
     pub transpose: [i8; 3],
 }
 
@@ -152,16 +152,22 @@ impl BarV2 {
     /// One cell per fixed machine, on the standard rack's uids.
     fn upgrade(self) -> Bar {
         Bar {
-            cells: MachineId::ALL
+            cells: standard_rack()
                 .iter()
-                .map(|&m| {
-                    let i = m.index();
+                .enumerate()
+                .map(|(i, &(uid, _, _))| {
+                    // Synth 1, Synth 2 and FM (positions 0, 1, 4) transpose.
+                    let transpose = match i {
+                        0 | 1 => self.transpose[i],
+                        4 => self.transpose[2],
+                        _ => 0,
+                    };
                     let cell = Cell {
                         pattern: self.patterns[i],
                         mute: self.mutes[i],
-                        transpose: m.transpose_index().map_or(0, |t| self.transpose[t]),
+                        transpose,
                     };
-                    (m.uid(), cell)
+                    (uid, cell)
                 })
                 .collect(),
         }
@@ -388,7 +394,10 @@ mod tests {
         let text = ron::ser::to_string_pretty(&v2, ron::ser::PrettyConfig::default()).unwrap();
         let p = Project::from_ron(&text).unwrap();
         assert_eq!(p.version, crate::project::PROJECT_VERSION);
-        assert_eq!(p.param(drum_param(1, 2, DrumParam::Decay)), 0.1);
+        assert_eq!(
+            p.param(MachineUid(4).param(MachineParam::Drum(2, DrumParam::Decay))),
+            0.1
+        );
         assert_eq!(p.param(ParamId::Master(MasterParam::Level)), 0.6);
         let params: usize = p.machines.iter().map(|m| m.params.len()).sum();
         assert_eq!(
@@ -400,8 +409,11 @@ mod tests {
             .param_lane
             .as_ref()
             .unwrap();
-        assert_eq!(lane.param, synth_param(1, SynthParam::Resonance));
-        assert_eq!(p.song.automation[0].param, fm_op_param(4, OpParam::R2));
+        assert_eq!(lane.param, MachineUid(2).param(SynthParam::Resonance));
+        assert_eq!(
+            p.song.automation[0].param,
+            MachineUid(5).param(MachineParam::FmOp(4, OpParam::R2))
+        );
         let selected: Vec<_> = p.machines.iter().map(|m| m.selected).collect();
         assert_eq!(selected, [0, 1, 2, 3, 4, 5]);
         // Saved again, it is a v3 file that loads as itself.

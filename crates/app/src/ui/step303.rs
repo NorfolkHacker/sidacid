@@ -8,8 +8,8 @@ use super::step_edit::{
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
-use crate::six::SixMachines;
-use acid_engine::project::Gate;
+use acid_engine::machine::{MachineType, MachineUid};
+use acid_engine::project::{Gate, SeqView, SynthPattern};
 use eframe::egui;
 
 const CELL: [f32; 2] = [28.0, 18.0];
@@ -38,20 +38,22 @@ impl SidAcidApp {
     /// one undo step open until the wheel rests (see `tick_scroll_gestures`).
     pub(crate) fn apply_step_ops(
         &mut self,
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         ops: Vec<(usize, StepOp)>,
         now: f64,
     ) {
         for (step, op) in ops {
-            let current = self.doc.project.synth_at(synth).patterns[slot as usize].steps[step];
+            let Some(current) = self.synth_pattern(uid, slot).map(|p| p.steps[step]) else {
+                return;
+            };
             let (value, scroll) = match op {
                 StepOp::Toggle(row) => (toggle_row(row, current), false),
                 StepOp::Nudge(n) => (nudge_note(current, n), true),
             };
             let cmds = self.doc.apply(
                 Edit::SynthStep {
-                    synth,
+                    uid,
                     slot,
                     step,
                     value,
@@ -59,9 +61,9 @@ impl SidAcidApp {
                 scroll,
             );
             self.send(cmds);
-            self.view.focus = synth;
+            self.view.focus = Some(uid);
             if scroll {
-                self.view.scroll_at[synth] = Some(ScrollGesture {
+                self.view.panel(uid).scroll_at = Some(ScrollGesture {
                     last: now,
                     serial: Some(self.doc.edit_serial()),
                 });
@@ -70,26 +72,33 @@ impl SidAcidApp {
     }
 
     /// The wheel moved over a note cell at `now` without a whole notch.
-    fn note_scroll_without_edit(&mut self, synth: usize, now: f64) {
-        let serial = self.view.scroll_at[synth].and_then(|g| g.serial);
-        self.view.scroll_at[synth] = Some(ScrollGesture { last: now, serial });
+    fn note_scroll_without_edit(&mut self, uid: MachineUid, now: f64) {
+        let panel = self.view.panel(uid);
+        let serial = panel.scroll_at.and_then(|g| g.serial);
+        panel.scroll_at = Some(ScrollGesture { last: now, serial });
     }
 
-    pub(crate) fn step303(&mut self, ui: &mut egui::Ui, synth: usize) {
-        let slot = self.doc.project.entry_at(synth).selected;
-        let pattern = self.doc.project.synth_at(synth).patterns[slot as usize].clone();
+    /// Synth `uid`'s pattern `slot`, if `uid` is a synth in the rack.
+    pub(crate) fn synth_pattern(&self, uid: MachineUid, slot: u8) -> Option<&SynthPattern> {
+        Some(&self.doc.project.synth(uid)?.patterns[slot as usize])
+    }
+
+    pub(crate) fn step303(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let slot = self.selected(uid);
+        let Some(pattern) = self.synth_pattern(uid, slot).cloned() else {
+            return;
+        };
         let len = pattern.length as usize;
-        let playhead = (self.status.playing && self.status.patterns[synth] == slot)
-            .then_some(self.status.playhead[synth]);
-        let cursor = self.view.writers[synth].map(|w| w.cursor);
+        let playhead = self.playhead(uid, slot);
+        let cursor = self.view.panel(uid).writer.map(|w| w.cursor);
         let mut edits = Vec::new();
         let mut start_writer = None;
         let mut scrolled = false;
-        let mut accum = self.view.scroll_accum[synth];
+        let mut accum = self.view.panel(uid).scroll_accum;
         egui::ScrollArea::horizontal()
-            .id_salt(("s303", synth))
+            .id_salt(("s303", uid))
             .show(ui, |ui| {
-                egui::Grid::new(("grid303", synth))
+                egui::Grid::new(("grid303", uid))
                     .spacing([2.0, 2.0])
                     .show(ui, |ui| {
                         ui.label("");
@@ -153,23 +162,43 @@ impl SidAcidApp {
                     });
             });
         if let Some(i) = start_writer {
-            self.view.writers[synth] = Some(StepWriter::new(i));
-            self.view.writers[1 - synth] = None;
-            self.view.focus = synth;
+            // One step-writer at a time.
+            for panel in self.view.panels.values_mut() {
+                panel.writer = None;
+            }
+            self.view.panel(uid).writer = Some(StepWriter::new(i));
+            self.view.focus = Some(uid);
         }
         let now = ui.input(|i| i.time);
         if scrolled {
-            self.view.scroll_accum[synth] = accum;
-            self.note_scroll_without_edit(synth, now);
+            self.view.panel(uid).scroll_accum = accum;
+            self.note_scroll_without_edit(uid, now);
         }
-        self.apply_step_ops(synth, slot, edits, now);
+        self.apply_step_ops(uid, slot, edits, now);
+    }
+
+    /// The synth whose step-writer is active, first in rack order.
+    pub(crate) fn step_writing_synth(&self) -> Option<MachineUid> {
+        self.doc
+            .project
+            .machines
+            .iter()
+            .filter(|m| m.machine_type() == MachineType::Synth)
+            .map(|m| m.uid)
+            .find(|uid| {
+                self.view
+                    .panels
+                    .get(uid)
+                    .is_some_and(|p| p.writer.is_some())
+            })
     }
 
     /// Feeds key presses to the active step-writer, if any.
     pub(crate) fn handle_step_write(&mut self, ctx: &egui::Context) {
-        for s in 0..2 {
-            if self.doc.project.synth_at(s).view != acid_engine::project::SeqView::Step303 {
-                self.view.writers[s] = None;
+        let project = &self.doc.project;
+        for (uid, panel) in &mut self.view.panels {
+            if project.synth(*uid).map(|s| s.view) != Some(SeqView::Step303) {
+                panel.writer = None;
             }
         }
         if self.view.confirm.is_some() || self.view.message.is_some() {
@@ -178,7 +207,7 @@ impl SidAcidApp {
         if ctx.wants_keyboard_input() {
             return;
         }
-        let Some(synth) = (0..2).find(|&s| self.view.writers[s].is_some()) else {
+        let Some(uid) = self.step_writing_synth() else {
             return;
         };
         let keys: Vec<egui::Key> = ctx.input(|i| {
@@ -200,20 +229,20 @@ impl SidAcidApp {
             let Some(write_key) = key_to_write(key) else {
                 continue;
             };
-            let slot = self.doc.project.entry_at(synth).selected;
-            let Some(mut writer) = self.view.writers[synth] else {
+            let slot = self.selected(uid);
+            let Some(mut writer) = self.view.panel(uid).writer else {
                 return;
             };
-            let action = writer.handle(
-                write_key,
-                &self.doc.project.synth_at(synth).patterns[slot as usize],
-            );
+            let Some(pattern) = self.synth_pattern(uid, slot) else {
+                return;
+            };
+            let action = writer.handle(write_key, pattern);
             match action {
                 WriteAction::Set { step, value } => {
-                    self.view.writers[synth] = Some(writer);
+                    self.view.panel(uid).writer = Some(writer);
                     let cmds = self.doc.apply(
                         Edit::SynthStep {
-                            synth,
+                            uid,
                             slot,
                             step,
                             value,
@@ -222,9 +251,9 @@ impl SidAcidApp {
                     );
                     self.send(cmds);
                 }
-                WriteAction::Moved => self.view.writers[synth] = Some(writer),
+                WriteAction::Moved => self.view.panel(uid).writer = Some(writer),
                 WriteAction::Exit => {
-                    self.view.writers[synth] = None;
+                    self.view.panel(uid).writer = None;
                     return;
                 }
             }
@@ -236,6 +265,7 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::test_rack::*;
 
     fn app() -> SidAcidApp {
         SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()))
@@ -281,15 +311,15 @@ mod tests {
     #[test]
     fn a_gate_click_and_a_scroll_on_one_step_in_one_frame_keep_both() {
         let mut app = app();
-        let slot = app.doc.project.entry_at(0).selected;
-        let before = app.doc.project.synth_at(0).patterns[slot as usize].steps[2];
+        let slot = app.doc.project.machine(SYNTH1).unwrap().selected;
+        let before = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[2];
         app.apply_step_ops(
-            0,
+            SYNTH1,
             slot,
             vec![(2, StepOp::Toggle(5)), (2, StepOp::Nudge(1))],
             0.0,
         );
-        let after = app.doc.project.synth_at(0).patterns[slot as usize].steps[2];
+        let after = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[2];
         assert_eq!(
             after.gate,
             super::super::step_edit::cycle_gate(before.gate),

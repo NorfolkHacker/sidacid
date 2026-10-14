@@ -9,7 +9,7 @@ use super::roll_edit::{
 use super::step_edit::NOTE_NAMES;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
-use crate::six::SixMachines;
+use acid_engine::machine::MachineUid;
 use acid_engine::project::SynthPattern;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
@@ -22,16 +22,17 @@ const BLACK_KEYS: [bool; 12] = [
 ];
 
 impl SidAcidApp {
-    pub(crate) fn piano_roll(&mut self, ui: &mut egui::Ui, synth: usize) {
-        let slot = self.doc.project.entry_at(synth).selected;
-        let mut pattern = self.doc.project.synth_at(synth).patterns[slot as usize].clone();
+    pub(crate) fn piano_roll(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let slot = self.selected(uid);
+        let Some(mut pattern) = self.synth_pattern(uid, slot).cloned() else {
+            return;
+        };
         let len = pattern.length as usize;
-        let playhead = (self.status.playing && self.status.patterns[synth] == slot)
-            .then_some(self.status.playhead[synth]);
+        let playhead = self.playhead(uid, slot);
         let mut changed = false;
         let mut finished = false;
         egui::ScrollArea::horizontal()
-            .id_salt(("roll", synth))
+            .id_salt(("roll", uid))
             .show(ui, |ui| {
                 let size = vec2(
                     KEY_W + CELL_W * len as f32,
@@ -178,9 +179,10 @@ impl SidAcidApp {
                             RollDrag::Resize { start: step }
                         }
                     };
-                    self.view.roll_drag[synth] = Some(drag);
+                    let panel = self.view.panel(uid);
+                    panel.roll_drag = Some(drag);
                     // Every frame of the drag is recomputed from here.
-                    self.view.roll_origin[synth] = Some(Box::new(RollSnapshot {
+                    panel.roll_origin = Some(Box::new(RollSnapshot {
                         slot,
                         origin: pattern.clone(),
                         last: pattern.clone(),
@@ -190,7 +192,7 @@ impl SidAcidApp {
                     && let Some(p) = pointer
                 {
                     let (step, row) = geom.cell_at_clamped(p.x, p.y);
-                    if let Some(next) = self.roll_drag_to(synth, slot, &pattern, step, row)
+                    if let Some(next) = self.roll_drag_to(uid, slot, &pattern, step, row)
                         && next != pattern
                     {
                         pattern = next;
@@ -198,13 +200,14 @@ impl SidAcidApp {
                     }
                 }
                 if resp.drag_stopped() {
-                    self.view.roll_drag[synth] = None;
-                    self.view.roll_origin[synth] = None;
+                    let panel = self.view.panel(uid);
+                    panel.roll_drag = None;
+                    panel.roll_origin = None;
                     finished = true;
                 }
             });
-        let dragging = self.view.roll_drag[synth].is_some();
-        self.commit_roll(synth, slot, changed.then_some(pattern), dragging, finished);
+        let dragging = self.view.panel(uid).roll_drag.is_some();
+        self.commit_roll(uid, slot, changed.then_some(pattern), dragging, finished);
     }
 
     /// One frame of a live roll drag: the pattern for the pointer at
@@ -214,17 +217,18 @@ impl SidAcidApp {
     /// over the change.
     pub(crate) fn roll_drag_to(
         &mut self,
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         current: &SynthPattern,
         step: usize,
         row: usize,
     ) -> Option<SynthPattern> {
-        let drag = self.view.roll_drag[synth]?;
-        let snap = self.view.roll_origin[synth].as_mut()?;
+        let panel = self.view.panels.get_mut(&uid)?;
+        let drag = panel.roll_drag?;
+        let snap = panel.roll_origin.as_mut()?;
         if snap.slot != slot || snap.last != *current {
-            self.view.roll_drag[synth] = None;
-            self.view.roll_origin[synth] = None;
+            panel.roll_drag = None;
+            panel.roll_origin = None;
             self.doc.end_gesture();
             return None;
         }
@@ -237,7 +241,7 @@ impl SidAcidApp {
     /// drag is live) and closes the gesture when the edit is finished.
     pub(crate) fn commit_roll(
         &mut self,
-        synth: usize,
+        uid: MachineUid,
         slot: u8,
         pattern: Option<SynthPattern>,
         dragging: bool,
@@ -246,14 +250,14 @@ impl SidAcidApp {
         if let Some(pattern) = pattern {
             let cmds = self.doc.apply(
                 Edit::SynthPattern {
-                    synth,
+                    uid,
                     slot,
                     pattern: Box::new(pattern),
                 },
                 dragging,
             );
             self.send(cmds);
-            self.view.focus = synth;
+            self.view.focus = Some(uid);
         }
         if finished {
             self.doc.end_gesture();
@@ -265,65 +269,70 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::test_rack::*;
     use crate::ui::roll_edit::{drag_from_origin, place};
     use acid_engine::project::Project;
 
     #[test]
     fn roll_drag_is_one_undo_step() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        let mut original = app.doc.project.synth_at(0).patterns[0].clone();
+        let mut original = app.doc.project.synth(SYNTH1).unwrap().patterns[0].clone();
         place(&mut original, 0, 2, 12);
-        app.commit_roll(0, 0, Some(original.clone()), false, true);
-        let before = app.doc.project.synth_at(0).patterns[0].clone();
+        app.commit_roll(SYNTH1, 0, Some(original.clone()), false, true);
+        let before = app.doc.project.synth(SYNTH1).unwrap().patterns[0].clone();
         assert_eq!(before, original);
         let drag = RollDrag::Move { start: 0, grab: 0 };
         for step in [1, 2, 3, 4] {
             let next = drag_from_origin(&before, drag, step, 12);
-            app.commit_roll(0, 0, Some(next), true, false);
+            app.commit_roll(SYNTH1, 0, Some(next), true, false);
         }
-        app.commit_roll(0, 0, None, false, true);
-        assert_ne!(app.doc.project.synth_at(0).patterns[0], before);
+        app.commit_roll(SYNTH1, 0, None, false, true);
+        assert_ne!(app.doc.project.synth(SYNTH1).unwrap().patterns[0], before);
         app.doc.undo();
-        assert_eq!(app.doc.project.synth_at(0).patterns[0], before, "one undo");
+        assert_eq!(
+            app.doc.project.synth(SYNTH1).unwrap().patterns[0],
+            before,
+            "one undo"
+        );
     }
 
     /// Starts a Move drag of a two-step note at step 0, as a drag-start
     /// frame does, and runs one drag frame to step 2.
     fn app_dragging_a_note() -> SidAcidApp {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        let mut pattern = app.doc.project.synth_at(0).patterns[0].clone();
+        let mut pattern = app.doc.project.synth(SYNTH1).unwrap().patterns[0].clone();
         place(&mut pattern, 0, 2, 12);
-        app.commit_roll(0, 0, Some(pattern.clone()), false, true);
-        app.view.roll_drag[0] = Some(RollDrag::Move { start: 0, grab: 0 });
-        app.view.roll_origin[0] = Some(Box::new(RollSnapshot {
+        app.commit_roll(SYNTH1, 0, Some(pattern.clone()), false, true);
+        app.view.panel(SYNTH1).roll_drag = Some(RollDrag::Move { start: 0, grab: 0 });
+        app.view.panel(SYNTH1).roll_origin = Some(Box::new(RollSnapshot {
             slot: 0,
             origin: pattern.clone(),
             last: pattern.clone(),
         }));
         let next = app
-            .roll_drag_to(0, 0, &pattern, 2, 12)
+            .roll_drag_to(SYNTH1, 0, &pattern, 2, 12)
             .expect("a live drag");
-        app.commit_roll(0, 0, Some(next), true, false);
+        app.commit_roll(SYNTH1, 0, Some(next), true, false);
         app
     }
 
     #[test]
     fn a_drag_continues_while_its_pattern_is_unchanged() {
         let mut app = app_dragging_a_note();
-        let current = app.doc.project.synth_at(0).patterns[0].clone();
-        assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_some());
+        let current = app.doc.project.synth(SYNTH1).unwrap().patterns[0].clone();
+        assert!(app.roll_drag_to(SYNTH1, 0, &current, 3, 12).is_some());
     }
 
     #[test]
     fn an_undo_mid_drag_drops_the_drag() {
         let mut app = app_dragging_a_note();
         app.doc.undo();
-        let current = app.doc.project.synth_at(0).patterns[0].clone();
-        assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_none());
-        assert_eq!(app.view.roll_drag[0], None);
-        assert!(app.view.roll_origin[0].is_none());
+        let current = app.doc.project.synth(SYNTH1).unwrap().patterns[0].clone();
+        assert!(app.roll_drag_to(SYNTH1, 0, &current, 3, 12).is_none());
+        assert_eq!(app.view.panel(SYNTH1).roll_drag, None);
+        assert!(app.view.panel(SYNTH1).roll_origin.is_none());
         assert_eq!(
-            app.doc.project.synth_at(0).patterns[0],
+            app.doc.project.synth(SYNTH1).unwrap().patterns[0],
             current,
             "the undo stands"
         );
@@ -332,8 +341,8 @@ mod tests {
     #[test]
     fn selecting_another_slot_mid_drag_drops_the_drag() {
         let mut app = app_dragging_a_note();
-        let other = app.doc.project.synth_at(0).patterns[1].clone();
-        assert!(app.roll_drag_to(0, 1, &other, 3, 12).is_none());
-        assert_eq!(app.view.roll_drag[0], None);
+        let other = app.doc.project.synth(SYNTH1).unwrap().patterns[1].clone();
+        assert!(app.roll_drag_to(SYNTH1, 1, &other, 3, 12).is_none());
+        assert_eq!(app.view.panel(SYNTH1).roll_drag, None);
     }
 }

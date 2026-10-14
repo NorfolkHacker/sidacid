@@ -5,7 +5,6 @@ use super::{SidAcidApp, knob};
 use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
-use acid_engine::machine::MachineId;
 use acid_engine::params::{
     FmParam, FxParam, MachineParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map,
     step_index,
@@ -108,14 +107,15 @@ pub fn value_text(id: ParamId, v: f32) -> String {
     }
 }
 
-/// "Synth 1 Cutoff", "808 BD Tune", "909 Volume", "Synth 2 Level", "Feedback", "Master Ratio".
-pub fn param_label(id: ParamId) -> String {
+/// "Synth 1 Cutoff", "808 BD Tune", "909 Volume", "Synth 2 Level", "Feedback",
+/// "Master Ratio": a machine param is prefixed with its machine's name.
+pub fn param_label(project: &acid_engine::project::Project, id: ParamId) -> String {
     let (uid, p) = match id {
         ParamId::Fx(p) => return p.name().to_string(),
         ParamId::Master(p) => return format!("Master {}", p.name()),
         ParamId::Machine(uid, p) => (uid, p),
     };
-    let machine = MachineId::from_uid(uid).map_or("?", MachineId::name);
+    let machine = project.machine(uid).map_or("?", |m| m.name.as_str());
     match p {
         MachineParam::Synth(p) => format!("{machine} {}", p.name()),
         MachineParam::Drum(i, p) => format!(
@@ -252,9 +252,7 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acid_engine::params::{
-        channel_param, drum_param, fm_op_param, fm_param, sampler_param, slot_param, synth_param,
-    };
+    use crate::test_rack::*;
 
     #[test]
     fn an_edit_without_a_drag_counts_as_a_touch_while_recording() {
@@ -323,7 +321,7 @@ mod tests {
     #[test]
     fn a_notch_at_the_knob_limit_takes_no_other_edits_serial() {
         use crate::document::Document;
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = SYNTH1.param(SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let cmds = app.doc.apply(Edit::Param { id, value: 1.0 }, false);
         app.send(cmds);
@@ -338,7 +336,7 @@ mod tests {
     #[test]
     fn wheel_notches_close_together_are_one_undo_step() {
         use crate::document::Document;
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = SYNTH1.param(SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(id);
         // Notches 100 ms apart, idle frames in between.
@@ -369,7 +367,7 @@ mod tests {
     #[test]
     fn another_edit_during_the_rest_ends_the_scroll_step_first() {
         use crate::document::Document;
-        let id = synth_param(0, SynthParam::Cutoff);
+        let id = SYNTH1.param(SynthParam::Cutoff);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(id);
         frame(&mut app, id, scroll(0.2), 0.0);
@@ -384,7 +382,7 @@ mod tests {
         frame(&mut app, id, reset, 0.1);
         frame(&mut app, id, idle(), 0.15);
         // Another knob's drag is open when the old scroll would have closed.
-        let other = synth_param(0, SynthParam::Resonance);
+        let other = SYNTH1.param(SynthParam::Resonance);
         let drag = |v| knob::KnobOutput {
             value: Some(v),
             released: false,
@@ -409,8 +407,8 @@ mod tests {
     #[test]
     fn a_sub_notch_wheel_on_another_knob_ends_the_first_knobs_scroll_step() {
         use crate::document::Document;
-        let a = synth_param(0, SynthParam::Cutoff);
-        let b = synth_param(0, SynthParam::Resonance);
+        let a = SYNTH1.param(SynthParam::Cutoff);
+        let b = SYNTH1.param(SynthParam::Resonance);
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let start = app.doc.project.param(a);
         frame(&mut app, a, scroll(0.2), 0.0);
@@ -443,49 +441,103 @@ mod tests {
     fn sampler_labels_and_values() {
         use acid_engine::params::SamplerParam;
         assert_eq!(
-            param_label(slot_param(2, SlotParam::Tune)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                SAMPLER.param(MachineParam::SamplerSlot(2, SlotParam::Tune))
+            ),
             "Sampler Slot 3 Tune"
         );
         assert_eq!(
-            param_label(sampler_param(SamplerParam::Grit)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                SAMPLER.param(SamplerParam::Grit)
+            ),
             "Sampler Grit"
         );
         assert_eq!(
-            discrete_names(slot_param(0, SlotParam::Reverse)),
+            discrete_names(SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Reverse))),
             &["Off", "On"]
         );
-        assert_eq!(value_text(slot_param(0, SlotParam::Tune), 1.0), "+24");
-        assert_eq!(value_text(slot_param(0, SlotParam::Fine), 0.0), "-50 c");
-        assert_eq!(value_text(slot_param(0, SlotParam::Attack), 0.0), "1 ms");
-        assert_eq!(value_text(slot_param(0, SlotParam::Release), 1.0), "4.00 s");
         assert_eq!(
-            value_text(slot_param(0, SlotParam::Cutoff), 1.0),
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Tune)),
+                1.0
+            ),
+            "+24"
+        );
+        assert_eq!(
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Fine)),
+                0.0
+            ),
+            "-50 c"
+        );
+        assert_eq!(
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Attack)),
+                0.0
+            ),
+            "1 ms"
+        );
+        assert_eq!(
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Release)),
+                1.0
+            ),
+            "4.00 s"
+        );
+        assert_eq!(
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Cutoff)),
+                1.0
+            ),
             "18000 Hz"
         );
-        assert_eq!(value_text(slot_param(0, SlotParam::Level), 0.5), "50%");
+        assert_eq!(
+            value_text(
+                SAMPLER.param(MachineParam::SamplerSlot(0, SlotParam::Level)),
+                0.5
+            ),
+            "50%"
+        );
     }
 
     #[test]
     fn param_labels_name_the_machine() {
         use acid_engine::params::{DrumParam, MasterParam, SynthParam};
         assert_eq!(
-            param_label(synth_param(0, SynthParam::Cutoff)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                SYNTH1.param(SynthParam::Cutoff)
+            ),
             "Synth 1 Cutoff"
         );
         assert_eq!(
-            param_label(drum_param(1, 0, DrumParam::Tune)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                KIT909.param(MachineParam::Drum(0, DrumParam::Tune))
+            ),
             "909 BD Tune"
         );
         assert_eq!(
-            param_label(ParamId::Master(MasterParam::CompRatio)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                ParamId::Master(MasterParam::CompRatio)
+            ),
             "Master Ratio"
         );
         assert_eq!(
-            param_label(fm_param(acid_engine::params::FmParam::Volume)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                FM.param(acid_engine::params::FmParam::Volume)
+            ),
             "FM Volume"
         );
         assert_eq!(
-            param_label(channel_param(5, acid_engine::params::ChannelParam::Level)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                SAMPLER.param(acid_engine::params::ChannelParam::Level)
+            ),
             "Sampler Level"
         );
     }
@@ -494,27 +546,48 @@ mod tests {
     fn fm_labels_switches_and_values() {
         use acid_engine::params::{FmParam, OpParam};
         assert_eq!(
-            param_label(fm_op_param(2, OpParam::Coarse)),
+            param_label(
+                &acid_engine::project::Project::default(),
+                FM.param(MachineParam::FmOp(2, OpParam::Coarse))
+            ),
             "FM OP3 Coarse"
         );
-        assert_eq!(param_label(fm_param(FmParam::Cutoff)), "FM Cutoff");
-        assert_eq!(discrete_names(fm_param(FmParam::LfoWave)).len(), 6);
         assert_eq!(
-            discrete_names(fm_op_param(0, OpParam::LeftCurve))[3],
+            param_label(
+                &acid_engine::project::Project::default(),
+                FM.param(FmParam::Cutoff)
+            ),
+            "FM Cutoff"
+        );
+        assert_eq!(discrete_names(FM.param(FmParam::LfoWave)).len(), 6);
+        assert_eq!(
+            discrete_names(FM.param(MachineParam::FmOp(0, OpParam::LeftCurve)))[3],
             "+Lin"
         );
-        assert_eq!(discrete_names(fm_op_param(0, OpParam::On)), &["Off", "On"]);
-        assert!(discrete_names(fm_param(FmParam::Algorithm)).is_empty());
-        assert_eq!(value_text(fm_param(FmParam::Algorithm), 1.0), "32");
-        assert_eq!(value_text(fm_op_param(0, OpParam::Detune), 0.0), "-7");
-        assert_eq!(value_text(fm_param(FmParam::Transpose), 1.0), "+24");
-        assert_eq!(value_text(fm_op_param(0, OpParam::R1), 1.0), "99");
-        assert_eq!(value_text(fm_op_param(0, OpParam::L1), 0.5), "50");
-        assert_eq!(value_text(fm_param(FmParam::Glide), 0.5), "0.50 s");
-        assert_eq!(value_text(fm_param(FmParam::Glide), 1.0), "2.00 s");
-        assert_eq!(value_text(fm_param(FmParam::Cutoff), 0.0), "40 Hz");
-        assert_eq!(value_text(fm_param(FmParam::Cutoff), 1.0), "18000 Hz");
-        assert_eq!(value_text(synth_param(0, SynthParam::Cutoff), 0.5), "50%");
+        assert_eq!(
+            discrete_names(FM.param(MachineParam::FmOp(0, OpParam::On))),
+            &["Off", "On"]
+        );
+        assert!(discrete_names(FM.param(FmParam::Algorithm)).is_empty());
+        assert_eq!(value_text(FM.param(FmParam::Algorithm), 1.0), "32");
+        assert_eq!(
+            value_text(FM.param(MachineParam::FmOp(0, OpParam::Detune)), 0.0),
+            "-7"
+        );
+        assert_eq!(value_text(FM.param(FmParam::Transpose), 1.0), "+24");
+        assert_eq!(
+            value_text(FM.param(MachineParam::FmOp(0, OpParam::R1)), 1.0),
+            "99"
+        );
+        assert_eq!(
+            value_text(FM.param(MachineParam::FmOp(0, OpParam::L1)), 0.5),
+            "50"
+        );
+        assert_eq!(value_text(FM.param(FmParam::Glide), 0.5), "0.50 s");
+        assert_eq!(value_text(FM.param(FmParam::Glide), 1.0), "2.00 s");
+        assert_eq!(value_text(FM.param(FmParam::Cutoff), 0.0), "40 Hz");
+        assert_eq!(value_text(FM.param(FmParam::Cutoff), 1.0), "18000 Hz");
+        assert_eq!(value_text(SYNTH1.param(SynthParam::Cutoff), 0.5), "50%");
     }
 
     #[test]

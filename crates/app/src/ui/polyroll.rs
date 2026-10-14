@@ -10,9 +10,8 @@ use super::poly_edit::{
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
-use crate::six::SixMachines;
 use acid_engine::host::Command;
-use acid_engine::machine::MachineId;
+use acid_engine::machine::MachineUid;
 use acid_engine::project::{NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 
@@ -37,15 +36,13 @@ fn vel_from_y(y: f32, top: f32) -> u8 {
 }
 
 impl SidAcidApp {
-    /// Pitch roll `n` (0 FM, 1 sampler) first centres on: C3 for FM; for
-    /// the sampler the lowest loaded zone's base key, or C1 with none.
-    pub(crate) fn roll_start_pitch(&self, n: usize) -> u8 {
-        if n == 0 {
+    /// Pitch the roll of note machine `uid` first centres on: for a
+    /// sampler the lowest loaded zone's base key, or C1 with none; C3 for FM.
+    pub(crate) fn roll_start_pitch(&self, uid: MachineUid) -> u8 {
+        let Some(sampler) = self.doc.project.sampler(uid) else {
             return FM_START_PITCH;
-        }
-        self.doc
-            .project
-            .sampler_machine()
+        };
+        sampler
             .slots
             .iter()
             .flatten()
@@ -54,26 +51,22 @@ impl SidAcidApp {
             .unwrap_or(acid_engine::sampler::FIRST_KEY)
     }
 
-    pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, machine: usize) {
-        let n = machine - MachineId::Fm.index();
-        let key_w = if machine == MachineId::Sampler.index() {
-            SAMPLER_KEY_W
-        } else {
-            KEY_W
-        };
-        let slot = self.doc.project.entry_at(machine).selected;
-        let Some(bank) = self.doc.project.notes_at(machine) else {
+    pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let is_sampler = self.doc.project.sampler(uid).is_some();
+        let key_w = if is_sampler { SAMPLER_KEY_W } else { KEY_W };
+        let slot = self.selected(uid);
+        let Some(bank) = self.doc.project.note_patterns(uid) else {
             return;
         };
         let mut pattern = bank[slot as usize].clone();
         let ticks = pattern.ticks();
-        let snap = self.view.poly_snap[n];
-        let new_len = match self.view.poly_len[n] {
+        let panel = self.view.panel(uid);
+        let snap = panel.poly_snap;
+        let new_len = match panel.poly_len {
             0 => TICKS_PER_STEP,
             l => l,
         };
-        let playhead = (self.status.playing && self.status.patterns[machine] == slot)
-            .then_some(self.status.playhead[machine]);
+        let playhead = self.playhead(uid, slot);
         let width = key_w + TICK_W * ticks as f32;
         let mut changed = false;
         let mut finished = false;
@@ -81,16 +74,16 @@ impl SidAcidApp {
         let mut dropped: Option<usize> = None;
 
         egui::ScrollArea::horizontal()
-            .id_salt(("poly_h", machine))
+            .id_salt(("poly_h", uid))
             .show(ui, |ui| {
                 let mut scroll = egui::ScrollArea::vertical()
-                    .id_salt(("poly_v", machine))
+                    .id_salt(("poly_v", uid))
                     .max_height(VIEW_H);
-                if !self.view.poly_scrolled[n] {
-                    let pitch = self.roll_start_pitch(n) as usize;
+                if !self.view.panel(uid).poly_scrolled {
+                    let pitch = self.roll_start_pitch(uid) as usize;
                     let y = (ROWS - 1 - pitch) as f32 * ROW_H - VIEW_H / 2.0;
                     scroll = scroll.vertical_scroll_offset(y.max(0.0));
-                    self.view.poly_scrolled[n] = true;
+                    self.view.panel(uid).poly_scrolled = true;
                 }
                 scroll.show(ui, |ui| {
                     let (rect, resp) = ui.allocate_exact_size(
@@ -105,7 +98,7 @@ impl SidAcidApp {
                         ticks,
                     };
                     let painter = ui.painter_at(rect);
-                    let held = self.view.audition.filter(|a| a.0 == machine).map(|a| a.1);
+                    let held = self.view.audition.filter(|a| a.0 == uid).map(|a| a.1);
                     for pitch in 0..ROWS as u8 {
                         let y0 = geom.row_top(pitch);
                         let black = BLACK_KEYS[pitch as usize % 12];
@@ -122,11 +115,8 @@ impl SidAcidApp {
                                 theme::GRID_BG
                             },
                         );
-                        let sampler_row = if machine == MachineId::Sampler.index() {
-                            super::sampler_ui::row_label(
-                                &self.doc.project.sampler_machine().slots,
-                                pitch,
-                            )
+                        let sampler_row = if let Some(sampler) = self.doc.project.sampler(uid) {
+                            super::sampler_ui::row_label(&sampler.slots, pitch)
                         } else {
                             None
                         };
@@ -232,7 +222,7 @@ impl SidAcidApp {
                         && let Some(p) = pointer
                         && let Some((tick, pitch)) = geom.cell_at(p.x, p.y)
                     {
-                        self.view.poly_drag[n] = match note_at(&pattern, tick, pitch) {
+                        self.view.panel(uid).poly_drag = match note_at(&pattern, tick, pitch) {
                             Some(i) if geom.near_right_edge(&pattern.notes[i], p.x) => {
                                 Some(PolyDrag::Resize { index: i })
                             }
@@ -255,7 +245,7 @@ impl SidAcidApp {
                     }
                     if resp.dragged()
                         && let Some(p) = pointer
-                        && let Some(drag) = self.view.poly_drag[n]
+                        && let Some(drag) = self.view.panel(uid).poly_drag
                     {
                         let (tick, pitch) = geom.cell_at_clamped(p.x, p.y);
                         match drag {
@@ -265,7 +255,7 @@ impl SidAcidApp {
                                         .saturating_sub(start)
                                         .max(1);
                                     if resize(&mut pattern, index, len) {
-                                        self.view.poly_len[n] = len;
+                                        self.view.panel(uid).poly_len = len;
                                         changed = true;
                                     }
                                 }
@@ -277,13 +267,14 @@ impl SidAcidApp {
                             PolyDrag::Velocity => {}
                         }
                     }
-                    if resp.drag_stopped() && self.view.poly_drag[n] != Some(PolyDrag::Velocity) {
+                    let drag = self.view.panel(uid).poly_drag;
+                    if resp.drag_stopped() && drag != Some(PolyDrag::Velocity) {
                         if let Some(PolyDrag::Move { index, .. } | PolyDrag::Resize { index }) =
-                            self.view.poly_drag[n]
+                            drag
                         {
                             dropped = Some(index);
                         }
-                        self.view.poly_drag[n] = None;
+                        self.view.panel(uid).poly_drag = None;
                         finished = true;
                     }
                 });
@@ -317,7 +308,7 @@ impl SidAcidApp {
                     );
                 }
                 if lresp.drag_started() {
-                    self.view.poly_drag[n] = Some(PolyDrag::Velocity);
+                    self.view.panel(uid).poly_drag = Some(PolyDrag::Velocity);
                 }
                 if (lresp.clicked() || lresp.dragged())
                     && let Some(p) = lresp.interact_pointer_pos()
@@ -334,13 +325,13 @@ impl SidAcidApp {
                     finished |= lresp.clicked();
                 }
                 if lresp.drag_stopped() {
-                    self.view.poly_drag[n] = None;
+                    self.view.panel(uid).poly_drag = None;
                     finished = true;
                 }
             });
 
-        self.audition(machine, key_down);
-        self.commit_poly_frame(machine, slot, pattern, changed, dropped, finished);
+        self.audition(uid, key_down);
+        self.commit_poly_frame(uid, slot, pattern, changed, dropped, finished);
     }
 
     /// Commits one frame of the poly roll. On the frame a move/resize is
@@ -350,7 +341,7 @@ impl SidAcidApp {
     /// drag's undo step, not push a second one.
     fn commit_poly_frame(
         &mut self,
-        machine: usize,
+        uid: MachineUid,
         slot: u8,
         mut pattern: NotePattern,
         mut changed: bool,
@@ -362,22 +353,15 @@ impl SidAcidApp {
             resolve_overlaps(&mut pattern, index);
             changed |= pattern != before;
         }
-        let dragging =
-            dropped.is_some() || self.view.poly_drag[machine - MachineId::Fm.index()].is_some();
-        self.commit_poly(
-            machine,
-            slot,
-            changed.then_some(pattern),
-            dragging,
-            finished,
-        );
+        let dragging = dropped.is_some() || self.view.panel(uid).poly_drag.is_some();
+        self.commit_poly(uid, slot, changed.then_some(pattern), dragging, finished);
     }
 
     /// Applies a frame's roll edit (merging into the open gesture while a
     /// drag is live) and closes the gesture when the edit is finished.
     pub(crate) fn commit_poly(
         &mut self,
-        machine: usize,
+        uid: MachineUid,
         slot: u8,
         pattern: Option<NotePattern>,
         dragging: bool,
@@ -386,14 +370,14 @@ impl SidAcidApp {
         if let Some(pattern) = pattern {
             let cmds = self.doc.apply(
                 Edit::NotePattern {
-                    machine,
+                    uid,
                     slot,
                     pattern: Box::new(pattern),
                 },
                 dragging,
             );
             self.send(cmds);
-            self.view.focus = machine;
+            self.view.focus = Some(uid);
         }
         if finished {
             self.doc.end_gesture();
@@ -412,8 +396,8 @@ impl SidAcidApp {
             self.audition(m, None);
         }
         let mut open = false;
-        for d in &mut self.view.poly_drag {
-            open |= d.take().is_some();
+        for panel in self.view.panels.values_mut() {
+            open |= panel.poly_drag.take().is_some();
         }
         if open {
             self.doc.end_gesture();
@@ -421,22 +405,19 @@ impl SidAcidApp {
     }
 
     /// Follows the key-strip press: starts the pressed pitch, stops the old one.
-    fn audition(&mut self, machine: usize, pitch: Option<u8>) {
-        let now = pitch.map(|p| (machine, p));
+    fn audition(&mut self, uid: MachineUid, pitch: Option<u8>) {
+        let now = pitch.map(|p| (uid, p));
         let before = self.view.audition;
-        if before == now || (now.is_none() && before.is_some_and(|(m, _)| m != machine)) {
+        if before == now || (now.is_none() && before.is_some_and(|(m, _)| m != uid)) {
             return;
         }
         let mut cmds = Vec::new();
         if let Some((m, p)) = before {
-            cmds.push(Command::NoteOff {
-                uid: crate::six::machine_uid(m),
-                pitch: p,
-            });
+            cmds.push(Command::NoteOff { uid: m, pitch: p });
         }
         if let Some((m, p)) = now {
             cmds.push(Command::NoteOn {
-                uid: crate::six::machine_uid(m),
+                uid: m,
                 pitch: p,
                 vel: NEW_VEL,
             });
@@ -450,6 +431,7 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::test_rack::*;
     use crate::ui::poly_edit::move_to;
     use acid_engine::project::Project;
 
@@ -469,9 +451,9 @@ mod tests {
     #[test]
     fn audition_pairs_note_on_with_note_off() {
         let mut app = fm_app();
-        app.audition(4, Some(60));
-        app.audition(4, Some(62));
-        app.audition(4, None);
+        app.audition(FM, Some(60));
+        app.audition(FM, Some(62));
+        app.audition(FM, None);
         let seen: Vec<_> = app.pending.iter().map(cmd).collect();
         assert_eq!(
             seen,
@@ -483,25 +465,25 @@ mod tests {
     #[test]
     fn releasing_another_machine_sends_nothing() {
         let mut app = fm_app();
-        app.audition(4, Some(60));
+        app.audition(FM, Some(60));
         app.pending.clear();
-        app.audition(5, None);
+        app.audition(SAMPLER, None);
         assert!(app.pending.is_empty());
-        assert_eq!(app.view.audition, Some((4, 60)));
+        assert_eq!(app.view.audition, Some((FM, 60)));
     }
 
     #[test]
     fn a_stale_audition_and_drag_are_released_once_the_pointer_is_up() {
         let mut app = fm_app();
-        app.audition(4, Some(60));
-        app.view.poly_drag[0] = Some(PolyDrag::Resize { index: 0 });
+        app.audition(FM, Some(60));
+        app.view.panel(FM).poly_drag = Some(PolyDrag::Resize { index: 0 });
         app.pending.clear();
         app.release_stale_poly_input(true);
-        assert_eq!(app.view.audition, Some((4, 60)), "pointer still down");
-        assert!(app.view.poly_drag[0].is_some());
+        assert_eq!(app.view.audition, Some((FM, 60)), "pointer still down");
+        assert!(app.view.panel(FM).poly_drag.is_some());
         app.release_stale_poly_input(false);
         assert_eq!(app.view.audition, None);
-        assert_eq!(app.view.poly_drag, [None; 2]);
+        assert!(app.view.panels.values().all(|p| p.poly_drag.is_none()));
         assert_eq!(
             app.pending.iter().map(cmd).collect::<Vec<_>>(),
             [(false, 5, 60)]
@@ -511,15 +493,15 @@ mod tests {
     #[test]
     fn a_collapsed_panel_frame_releases_a_held_key() {
         let mut app = fm_app();
-        app.audition(4, Some(60));
-        app.view.poly_drag[0] = Some(PolyDrag::Resize { index: 0 });
+        app.audition(FM, Some(60));
+        app.view.panel(FM).poly_drag = Some(PolyDrag::Resize { index: 0 });
         app.doc.apply(Edit::Bpm(100.0), true);
         // The FM panel collapses: its roll isn't drawn, so only the
         // frame-level check can see that the pointer is up.
         app.view.force_open.push(("fm", false));
         crate::ui::run_frames(&mut app, 1);
         assert_eq!(app.view.audition, None);
-        assert_eq!(app.view.poly_drag, [None; 2]);
+        assert!(app.view.panels.values().all(|p| p.poly_drag.is_none()));
         let offs: Vec<_> = app
             .flushed
             .iter()
@@ -536,42 +518,53 @@ mod tests {
     #[test]
     fn dropping_a_move_onto_a_same_pitch_note_is_one_undo_step() {
         let mut app = fm_app();
-        let mut p = app.doc.project.fm_machine().patterns[0].clone();
+        let mut p = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         add(&mut p, 0, 4, 60, 100);
         let i = add(&mut p, 8, 4, 60, 50).unwrap();
-        app.commit_poly(4, 0, Some(p.clone()), false, true);
-        let before = app.doc.project.fm_machine().patterns[0].clone();
+        app.commit_poly(FM, 0, Some(p.clone()), false, true);
+        let before = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         // The drag: move onto the first note (a live drag merges).
-        app.view.poly_drag[0] = Some(PolyDrag::Move { index: i, grab: 0 });
+        app.view.panel(FM).poly_drag = Some(PolyDrag::Move { index: i, grab: 0 });
         move_to(&mut p, i, 2, 60);
-        app.commit_poly_frame(4, 0, p.clone(), true, None, false);
+        app.commit_poly_frame(FM, 0, p.clone(), true, None, false);
         // The drop frame: the drag state is already cleared.
-        app.view.poly_drag[0] = None;
-        app.commit_poly_frame(4, 0, p, false, Some(i), true);
+        app.view.panel(FM).poly_drag = None;
+        app.commit_poly_frame(FM, 0, p, false, Some(i), true);
         assert_eq!(
-            app.doc.project.fm_machine().patterns[0].notes.len(),
+            app.doc.project.fm(FM).unwrap().patterns[0].notes.len(),
             1,
             "merged"
         );
         app.doc.undo();
-        assert_eq!(app.doc.project.fm_machine().patterns[0], before, "one undo");
+        assert_eq!(
+            app.doc.project.fm(FM).unwrap().patterns[0],
+            before,
+            "one undo"
+        );
     }
 
     #[test]
     fn poly_drag_is_one_undo_step() {
         let mut app = fm_app();
-        let mut p = app.doc.project.fm_machine().patterns[0].clone();
+        let mut p = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         add(&mut p, 0, 4, 60, 100);
-        app.commit_poly(4, 0, Some(p.clone()), false, true);
-        let before = app.doc.project.fm_machine().patterns[0].clone();
+        app.commit_poly(FM, 0, Some(p.clone()), false, true);
+        let before = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         assert_eq!(before, p);
         for start in [4, 8, 12] {
             move_to(&mut p, 0, start, 62);
-            app.commit_poly(4, 0, Some(p.clone()), true, false);
+            app.commit_poly(FM, 0, Some(p.clone()), true, false);
         }
-        app.commit_poly(4, 0, None, false, true);
-        assert_eq!(app.doc.project.fm_machine().patterns[0].notes[0].start, 12);
+        app.commit_poly(FM, 0, None, false, true);
+        assert_eq!(
+            app.doc.project.fm(FM).unwrap().patterns[0].notes[0].start,
+            12
+        );
         app.doc.undo();
-        assert_eq!(app.doc.project.fm_machine().patterns[0], before, "one undo");
+        assert_eq!(
+            app.doc.project.fm(FM).unwrap().patterns[0],
+            before,
+            "one undo"
+        );
     }
 }

@@ -641,9 +641,9 @@ mod tests {
 
     #[test]
     fn each_command_reaches_the_engine() {
-        use crate::params::{MasterParam, SynthParam, synth_param};
+        use crate::params::{MasterParam, SynthParam};
         let (mut host, mut tx, mut rx) = host_with_demo();
-        let cutoff = synth_param(0, SynthParam::Cutoff);
+        let cutoff = MachineUid(1).param(SynthParam::Cutoff);
         let level = ParamId::Master(MasterParam::Level);
 
         tx.push(Command::SetParam(cutoff, 0.125)).unwrap();
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(
             old_drums.map(|p| *p
                 == crate::demo::demo_project()
-                    .kit(crate::machine::MachineId::Kit909.uid())
+                    .kit(MachineUid(4))
                     .unwrap()
                     .patterns[0]),
             Some(true),
@@ -737,12 +737,12 @@ mod tests {
         let id = ParamId::Master(crate::params::MasterParam::Level);
         let mut p = crate::demo::demo_project();
         let bar = crate::project::Bar {
-            cells: crate::machine::MachineId::ALL
+            cells: crate::machine::standard_rack()
                 .iter()
                 .map(|m| {
                     let pattern = Some(crate::project::PatternRef(0));
                     (
-                        m.uid(),
+                        m.0,
                         crate::project::Cell {
                             pattern,
                             ..Default::default()

@@ -6,7 +6,6 @@ use super::params_ui::param_label;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
-use acid_engine::machine::MachineId;
 use acid_engine::project::{Bar, PatternRef, Song};
 use acid_engine::sequencer::Mode;
 use acid_engine::song;
@@ -48,9 +47,8 @@ impl SidAcidApp {
 
     fn bar_from_selected_patterns(&self) -> Bar {
         let mut bar = Bar::default();
-        for m in MachineId::ALL {
-            let slot = self.doc.project.machine(m.uid()).map_or(0, |e| e.selected);
-            bar.cell_mut(m.uid()).pattern = Some(PatternRef(slot));
+        for m in &self.doc.project.machines {
+            bar.cell_mut(m.uid).pattern = Some(PatternRef(m.selected));
         }
         bar
     }
@@ -151,6 +149,7 @@ impl SidAcidApp {
 
     fn song_timeline(&mut self, ui: &mut egui::Ui) {
         let bars = &self.doc.project.song.bars;
+        let machines = &self.doc.project.machines;
         let loop_range = self.doc.project.song.loop_range;
         let sel = self.song_selection();
         let playing_bar = (self.status.playing && self.view.mode == Mode::Song)
@@ -164,15 +163,15 @@ impl SidAcidApp {
                         ui.weak("No bars yet — press \"Add bar\".");
                     }
                     for (i, bar) in bars.iter().enumerate() {
-                        let cell = |m: MachineId| {
-                            let c = bar.cell(m.uid());
+                        let cell = |uid| {
+                            let c = bar.cell(uid);
                             let label = c.pattern.map_or("—".to_string(), |r| r.label());
                             if c.mute { format!("{label}×") } else { label }
                         };
                         let mut text = format!("{}", i + 1);
-                        for m in MachineId::ALL {
+                        for m in machines {
                             text.push('\n');
-                            text.push_str(&cell(m));
+                            text.push_str(&cell(m.uid));
                         }
                         let mut rich = egui::RichText::new(text).monospace().size(10.0);
                         if Some(i) == playing_bar {
@@ -209,9 +208,16 @@ impl SidAcidApp {
             return;
         };
         let mut bar = self.doc.project.song.bars[a].clone();
-        let selected: Vec<u8> = MachineId::ALL
+        // One lane per machine in rack order: (uid, name, selected, transposes).
+        let lanes: Vec<_> = self
+            .doc
+            .project
+            .machines
             .iter()
-            .map(|m| self.doc.project.machine(m.uid()).map_or(0, |e| e.selected))
+            .map(|m| {
+                let transposes = m.machine_type().transposes();
+                (m.uid, m.name.clone(), m.selected, transposes)
+            })
             .collect();
         // A record pass owns the open gesture: transpose edits made during
         // it neither merge into it nor close it.
@@ -221,16 +227,14 @@ impl SidAcidApp {
         let mut finished = false;
         ui.label(egui::RichText::new(format!("Bar {}", a + 1)).strong());
         egui::Grid::new("bar_editor").striped(true).show(ui, |ui| {
-            for machine in MachineId::ALL {
-                let m = machine.index();
-                ui.label(machine.name());
-                let uid = machine.uid();
+            for (uid, name, selected, transposes) in lanes {
+                ui.label(name);
                 ui.monospace(bar.cell(uid).pattern.map_or("—".to_string(), |r| r.label()));
                 if ui
-                    .button(format!("Use {}", PatternRef(selected[m]).label()))
+                    .button(format!("Use {}", PatternRef(selected).label()))
                     .clicked()
                 {
-                    bar.cell_mut(uid).pattern = Some(PatternRef(selected[m]));
+                    bar.cell_mut(uid).pattern = Some(PatternRef(selected));
                     changed = true;
                 }
                 if ui.button("Clear").clicked() {
@@ -240,7 +244,7 @@ impl SidAcidApp {
                 if ui.checkbox(&mut bar.cell_mut(uid).mute, "Mute").changed() {
                     changed = true;
                 }
-                if machine.machine_type().transposes() {
+                if transposes {
                     let r = ui.add(
                         egui::DragValue::new(&mut bar.cell_mut(uid).transpose)
                             .range(-12..=12)
@@ -278,7 +282,7 @@ impl SidAcidApp {
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{}  ({} steps)",
-                    param_label(l.param),
+                    param_label(&self.doc.project, l.param),
                     l.points.len()
                 ));
                 if ui.button("Clear").clicked() {

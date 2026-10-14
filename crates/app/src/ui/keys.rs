@@ -56,7 +56,7 @@ impl SidAcidApp {
         {
             return;
         }
-        let step_writing = self.view.writers.iter().any(Option::is_some);
+        let step_writing = self.view.panels.values().any(|p| p.writer.is_some());
         let pressed: Vec<Shortcut> = ctx.input(|i| {
             i.events
                 .iter()

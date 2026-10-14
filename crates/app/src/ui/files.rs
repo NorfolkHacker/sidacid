@@ -3,11 +3,9 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
-use crate::six::SixMachines;
 use acid_engine::host::Command;
-use acid_engine::machine::{MachineKind, kind_of};
 use acid_engine::project::{
-    BANK_SIZE, DrumPattern, NotePattern, PatternRef, Project, SynthPattern,
+    BANK_SIZE, DrumPattern, MachineBody, NotePattern, PatternRef, Project, SynthPattern,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -184,17 +182,11 @@ impl SidAcidApp {
     /// still sounding on an engine that outlives the load stops.
     pub(crate) fn release_held_notes(&mut self) {
         let mut cmds = Vec::new();
-        if let Some(pitch) = self.view.pad_note.take() {
-            cmds.push(Command::NoteOff {
-                uid: acid_engine::machine::MachineId::Sampler.uid(),
-                pitch,
-            });
+        if let Some((uid, pitch)) = self.view.pad_note.take() {
+            cmds.push(Command::NoteOff { uid, pitch });
         }
-        if let Some((machine, pitch)) = self.view.audition.take() {
-            cmds.push(Command::NoteOff {
-                uid: crate::six::machine_uid(machine),
-                pitch,
-            });
+        if let Some((uid, pitch)) = self.view.audition.take() {
+            cmds.push(Command::NoteOff { uid, pitch });
         }
         self.send(cmds);
     }
@@ -212,25 +204,25 @@ impl SidAcidApp {
         }
         self.doc = doc;
         // An empty imported bank is no bank (the Imported tab stays off).
-        if self
-            .doc
-            .project
-            .fm_machine()
-            .bank
-            .as_ref()
-            .is_some_and(Vec::is_empty)
-        {
-            self.doc.project.fm_machine_mut().bank = None;
+        for m in &mut self.doc.project.machines {
+            if let MachineBody::Fm(fm) = &mut m.body
+                && fm.bank.as_ref().is_some_and(Vec::is_empty)
+            {
+                fm.bank = None;
+            }
         }
         self.view.overwrite = None;
-        self.view.writers = [None; 2];
-        self.view.roll_drag = [None; 2];
-        self.view.roll_origin = [None, None];
-        self.view.scroll_accum = [0.0; 2];
-        self.view.scroll_at = [None; 2];
+        // Gestures and scroll positions start over; snap and note length stay.
+        for panel in self.view.panels.values_mut() {
+            panel.writer = None;
+            panel.roll_drag = None;
+            panel.roll_origin = None;
+            panel.scroll_accum = 0.0;
+            panel.scroll_at = None;
+            panel.poly_drag = None;
+            panel.poly_scrolled = false;
+        }
         self.view.knob_scroll = None;
-        self.view.poly_drag = [None; 2];
-        self.view.poly_scrolled = [false; 2];
         self.view.audition = None;
         self.view.fm_op = 0;
         self.view.sampler_slot = 0;
@@ -242,8 +234,8 @@ impl SidAcidApp {
         self.reset_transport_view();
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
-        for m in 0..acid_engine::machine::MACHINES {
-            self.view.bank[m] = self.doc.project.entry_at(m).selected / BANK_SIZE as u8;
+        for m in &self.doc.project.machines {
+            self.view.panels.entry(m.uid).or_default().bank = m.selected / BANK_SIZE as u8;
         }
         self.pending.clear();
         if let Some(audio) = self.audio.as_mut() {
@@ -421,49 +413,52 @@ impl SidAcidApp {
         self.perform(action);
     }
 
+    /// Copies the focused machine's selected pattern; the clip's kind
+    /// follows the machine's type.
     pub(crate) fn copy_pattern(&mut self) {
-        let m = self.view.focus;
-        let slot = self.doc.project.entry_at(m).selected as usize;
+        let Some(entry) = self.focused().and_then(|uid| self.doc.project.machine(uid)) else {
+            return;
+        };
+        let slot = entry.selected as usize;
         self.view.clip_text = Some(format!(
             "SidAcid pattern {}",
             PatternRef(slot as u8).label()
         ));
-        self.view.clipboard = match kind_of(m) {
-            Some(MachineKind::Synth(s)) => Some(Clip::Synth(
-                self.doc.project.synth_at(s).patterns[slot].clone(),
-            )),
-            Some(MachineKind::Drum(k)) => Some(Clip::Drum(
-                self.doc.project.kit_at(k).patterns[slot].clone(),
-            )),
-            Some(MachineKind::Notes(_)) => self
-                .doc
-                .project
-                .notes_at(m)
-                .map(|p| Clip::Notes(p[slot].clone())),
-            None => None,
-        };
+        self.view.clipboard = Some(match &entry.body {
+            MachineBody::Synth(s) => Clip::Synth(s.patterns[slot].clone()),
+            MachineBody::Kit(k) => Clip::Drum(k.patterns[slot].clone()),
+            MachineBody::Fm(f) => Clip::Notes(f.patterns[slot].clone()),
+            MachineBody::Sampler(s) => Clip::Notes(s.patterns[slot].clone()),
+        });
     }
 
+    /// Pastes onto the focused machine's selected pattern: synth onto
+    /// synth, drums onto any kit (808 and 909 alike), notes onto FM or
+    /// Sampler.
     pub(crate) fn paste_pattern(&mut self) {
-        let m = self.view.focus;
-        let slot = self.doc.project.entry_at(m).selected;
-        let edit = match (&self.view.clipboard, kind_of(m)) {
+        let Some(entry) = self.focused().and_then(|uid| self.doc.project.machine(uid)) else {
+            return;
+        };
+        let (uid, slot) = (entry.uid, entry.selected);
+        let edit = match (&self.view.clipboard, &entry.body) {
             (None, _) => return,
-            (Some(Clip::Synth(p)), Some(MachineKind::Synth(s))) => Edit::SynthPattern {
-                synth: s,
+            (Some(Clip::Synth(p)), MachineBody::Synth(_)) => Edit::SynthPattern {
+                uid,
                 slot,
                 pattern: Box::new(p.clone()),
             },
-            (Some(Clip::Drum(p)), Some(MachineKind::Drum(k))) => Edit::DrumPattern {
-                kit: k,
+            (Some(Clip::Drum(p)), MachineBody::Kit(_)) => Edit::DrumPattern {
+                uid,
                 slot,
                 pattern: Box::new(p.clone()),
             },
-            (Some(Clip::Notes(p)), Some(MachineKind::Notes(_))) => Edit::NotePattern {
-                machine: m,
-                slot,
-                pattern: Box::new(p.clone()),
-            },
+            (Some(Clip::Notes(p)), MachineBody::Fm(_) | MachineBody::Sampler(_)) => {
+                Edit::NotePattern {
+                    uid,
+                    slot,
+                    pattern: Box::new(p.clone()),
+                }
+            }
             _ => {
                 self.view.message = Some("The clipboard holds a different kind of pattern.".into());
                 return;
@@ -659,6 +654,7 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rack::*;
 
     #[test]
     fn export_status_text() {
@@ -996,21 +992,24 @@ mod tests {
         use acid_engine::fm::sysex::Dx7Voice;
         let voice: Dx7Voice = crate::ui::fm_voices::starter()[3].clone();
         let mut project = Project::default();
-        project.fm_machine_mut().bank = Some(vec![voice.clone()]);
+        project.fm_mut(FM).unwrap().bank = Some(vec![voice.clone()]);
         let mut app = SidAcidApp::headless(Document::new(project));
         app.view.fm_browser = crate::ui::fm_voices::FmBrowser::Imported;
         run_frames(&mut app, 2);
-        app.load_fm_voice(&app.doc.project.fm_machine().bank.as_ref().unwrap()[0].clone());
-        assert_eq!(app.doc.project.fm_machine().voice_name, voice.name);
+        app.load_fm_voice(
+            FM,
+            &app.doc.project.fm(FM).unwrap().bank.as_ref().unwrap()[0].clone(),
+        );
+        assert_eq!(app.doc.project.fm(FM).unwrap().voice_name, voice.name);
     }
 
     #[test]
     fn an_empty_bank_loads_as_no_bank() {
         let mut project = Project::default();
-        project.fm_machine_mut().bank = Some(Vec::new());
+        project.fm_mut(FM).unwrap().bank = Some(Vec::new());
         let mut app = app();
         app.load_document(Document::new(project));
-        assert_eq!(app.doc.project.fm_machine().bank, None);
+        assert_eq!(app.doc.project.fm(FM).unwrap().bank, None);
         assert!(!app.doc.is_dirty());
         run_frames(&mut app, 1);
     }

@@ -2,10 +2,8 @@
 //! counter-line on synth 2, an 808 beat and 909 hats.
 
 use crate::drums::{BD, CH, CP, OH, SD};
-use crate::machine::MachineId;
-use crate::params::{
-    ChannelParam, FxParam, MasterParam, ParamId, SynthParam, channel_param, synth_param,
-};
+use crate::machine::{MachineUid, standard_rack};
+use crate::params::{ChannelParam, FxParam, MasterParam, ParamId, SynthParam};
 use crate::project::{DrumHit, DrumMachine, Gate, Project, SynthMachine, SynthStep};
 
 fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
@@ -26,15 +24,16 @@ const REST: SynthStep = SynthStep {
     slide: false,
 };
 
-fn synth(p: &mut Project, m: MachineId) -> &mut SynthMachine {
-    p.synth_mut(m.uid()).expect("standard rack synth")
+fn synth(p: &mut Project, uid: MachineUid) -> &mut SynthMachine {
+    p.synth_mut(uid).expect("standard rack synth")
 }
 
-fn kit(p: &mut Project, m: MachineId) -> &mut DrumMachine {
-    p.kit_mut(m.uid()).expect("standard rack kit")
+fn kit(p: &mut Project, uid: MachineUid) -> &mut DrumMachine {
+    p.kit_mut(uid).expect("standard rack kit")
 }
 
 pub fn demo_project() -> Project {
+    let [s1, s2, k808, k909, ..] = standard_rack().map(|m| m.0);
     let mut p = Project {
         name: "Demo".into(),
         bpm: 128.0,
@@ -60,7 +59,7 @@ pub fn demo_project() -> Project {
         REST,
         step(10, -1, false, false),
     ];
-    synth(&mut p, MachineId::Synth1).patterns[0].steps[..16].copy_from_slice(&acid);
+    synth(&mut p, s1).patterns[0].steps[..16].copy_from_slice(&acid);
 
     let counter = [
         step(7, 1, false, false),
@@ -80,9 +79,9 @@ pub fn demo_project() -> Project {
         step(0, 1, true, false),
         REST,
     ];
-    synth(&mut p, MachineId::Synth2).patterns[0].steps[..16].copy_from_slice(&counter);
+    synth(&mut p, s2).patterns[0].steps[..16].copy_from_slice(&counter);
 
-    let kit808 = &mut kit(&mut p, MachineId::Kit808).patterns[0];
+    let kit808 = &mut kit(&mut p, k808).patterns[0];
     for s in [0, 4, 8, 12] {
         kit808.steps[s][BD] = DrumHit::On;
     }
@@ -90,7 +89,7 @@ pub fn demo_project() -> Project {
     kit808.steps[12][CP] = DrumHit::Accent;
     kit808.steps[15][SD] = DrumHit::On;
 
-    let kit909 = &mut kit(&mut p, MachineId::Kit909).patterns[0];
+    let kit909 = &mut kit(&mut p, k909).patterns[0];
     for s in 0..16 {
         kit909.steps[s][CH] = if s % 4 == 2 {
             DrumHit::Accent
@@ -104,22 +103,22 @@ pub fn demo_project() -> Project {
     }
 
     let set = |p: &mut Project, id: ParamId, v: f32| p.set_param(id, v);
-    set(&mut p, synth_param(0, SynthParam::Cutoff), 0.3);
-    set(&mut p, synth_param(0, SynthParam::Resonance), 0.85);
-    set(&mut p, synth_param(0, SynthParam::EnvMod), 0.7);
-    set(&mut p, synth_param(0, SynthParam::Decay), 0.35);
-    set(&mut p, synth_param(0, SynthParam::Accent), 0.8);
-    set(&mut p, synth_param(1, SynthParam::Wave), 1.0);
-    set(&mut p, synth_param(1, SynthParam::Unison), 1.0);
-    set(&mut p, synth_param(1, SynthParam::Cutoff), 0.45);
-    set(&mut p, channel_param(0, ChannelParam::DistOn), 1.0);
-    set(&mut p, channel_param(0, ChannelParam::DistDrive), 0.35);
-    set(&mut p, channel_param(0, ChannelParam::DelaySend), 0.3);
-    set(&mut p, channel_param(1, ChannelParam::Level), 0.5);
-    set(&mut p, channel_param(1, ChannelParam::Pan), 0.65);
-    set(&mut p, channel_param(1, ChannelParam::ReverbSend), 0.4);
-    set(&mut p, channel_param(2, ChannelParam::ReverbSend), 0.1);
-    set(&mut p, channel_param(3, ChannelParam::Level), 0.55);
+    set(&mut p, s1.param(SynthParam::Cutoff), 0.3);
+    set(&mut p, s1.param(SynthParam::Resonance), 0.85);
+    set(&mut p, s1.param(SynthParam::EnvMod), 0.7);
+    set(&mut p, s1.param(SynthParam::Decay), 0.35);
+    set(&mut p, s1.param(SynthParam::Accent), 0.8);
+    set(&mut p, s2.param(SynthParam::Wave), 1.0);
+    set(&mut p, s2.param(SynthParam::Unison), 1.0);
+    set(&mut p, s2.param(SynthParam::Cutoff), 0.45);
+    set(&mut p, s1.param(ChannelParam::DistOn), 1.0);
+    set(&mut p, s1.param(ChannelParam::DistDrive), 0.35);
+    set(&mut p, s1.param(ChannelParam::DelaySend), 0.3);
+    set(&mut p, s2.param(ChannelParam::Level), 0.5);
+    set(&mut p, s2.param(ChannelParam::Pan), 0.65);
+    set(&mut p, s2.param(ChannelParam::ReverbSend), 0.4);
+    set(&mut p, k808.param(ChannelParam::ReverbSend), 0.1);
+    set(&mut p, k909.param(ChannelParam::Level), 0.55);
     set(&mut p, ParamId::Fx(FxParam::DelayFeedback), 0.45);
     set(&mut p, ParamId::Master(MasterParam::Level), 0.7);
     p
@@ -133,7 +132,7 @@ mod tests {
     fn demo_is_valid_and_nonempty() {
         let p = demo_project();
         p.validate().unwrap();
-        let s = &p.synth(MachineId::Synth1.uid()).unwrap().patterns[0];
+        let s = &p.synth(standard_rack()[0].0).unwrap().patterns[0];
         assert!(s.steps.iter().any(|s| s.slide));
         assert!(s.steps.iter().any(|s| s.accent));
     }

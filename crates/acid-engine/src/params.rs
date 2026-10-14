@@ -4,9 +4,6 @@
 use crate::machine::{MachineType, MachineUid};
 use serde::{Deserialize, Serialize};
 
-pub const SYNTHS: usize = 2;
-pub const KITS: usize = 2;
-pub const CHANNELS: usize = 6;
 pub const DRUM_INSTRUMENTS: usize = 8;
 /// Operators in the FM synth.
 pub const FM_OPS: usize = 6;
@@ -431,45 +428,30 @@ impl From<GlobalParam> for ParamId {
     }
 }
 
-// Temporary helpers for the fixed six-machine rack (uids 1..=6); deleted
-// together with `MachineId`.
-
-/// Synth `s` (0 or 1): uid `s + 1`.
-pub const fn synth_param(s: usize, p: SynthParam) -> ParamId {
-    ParamId::Machine(MachineUid(s as u16 + 1), MachineParam::Synth(p))
+impl MachineUid {
+    /// Control `p` on this machine.
+    pub fn param(self, p: impl Into<MachineParam>) -> ParamId {
+        ParamId::Machine(self, p.into())
+    }
 }
 
-/// Kit `k` (0 = 808, 1 = 909): uid `k + 3`.
-pub const fn drum_param(k: usize, i: u8, p: DrumParam) -> ParamId {
-    ParamId::Machine(MachineUid(k as u16 + 3), MachineParam::Drum(i, p))
+macro_rules! machine_param_from {
+    ($($t:ident => $v:ident),+ $(,)?) => {
+        $(impl From<$t> for MachineParam {
+            fn from(p: $t) -> Self {
+                MachineParam::$v(p)
+            }
+        })+
+    };
 }
 
-pub const fn kit_param(k: usize, p: KitParam) -> ParamId {
-    ParamId::Machine(MachineUid(k as u16 + 3), MachineParam::Kit(p))
-}
-
-/// Channel strip of machine index `m`: uid `m + 1`.
-pub const fn channel_param(m: usize, p: ChannelParam) -> ParamId {
-    ParamId::Machine(MachineUid(m as u16 + 1), MachineParam::Channel(p))
-}
-
-/// The FM machine: uid 5.
-pub const fn fm_param(p: FmParam) -> ParamId {
-    ParamId::Machine(MachineUid(5), MachineParam::Fm(p))
-}
-
-pub const fn fm_op_param(op: u8, p: OpParam) -> ParamId {
-    ParamId::Machine(MachineUid(5), MachineParam::FmOp(op, p))
-}
-
-/// The sampler: uid 6.
-pub const fn sampler_param(p: SamplerParam) -> ParamId {
-    ParamId::Machine(MachineUid(6), MachineParam::Sampler(p))
-}
-
-pub const fn slot_param(slot: u8, p: SlotParam) -> ParamId {
-    ParamId::Machine(MachineUid(6), MachineParam::SamplerSlot(slot, p))
-}
+machine_param_from!(
+    SynthParam => Synth,
+    KitParam => Kit,
+    ChannelParam => Channel,
+    FmParam => Fm,
+    SamplerParam => Sampler,
+);
 
 pub fn lin(v: f32, lo: f32, hi: f32) -> f32 {
     lo + (hi - lo) * v.clamp(0.0, 1.0)
@@ -532,6 +514,13 @@ mod tests {
     use super::*;
     use crate::machine::MachineType;
     use std::collections::HashSet;
+
+    const SYNTH: MachineUid = MachineUid(1);
+    const FM: MachineUid = MachineUid(5);
+    const SAMPLER: MachineUid = MachineUid(6);
+    fn fm_op(op: u8, p: OpParam) -> ParamId {
+        FM.param(MachineParam::FmOp(op, p))
+    }
 
     #[test]
     fn per_type_index_spaces_match_all_for() {
@@ -596,7 +585,7 @@ mod tests {
             MachineParam::SamplerSlot(15, SlotParam::TempoLock)
         );
         assert!(sampler.contains(&MachineParam::Sampler(SamplerParam::Volume)));
-        assert_eq!(fm_param(FmParam::Volume).info().default, 0.7);
+        assert_eq!(FM.param(FmParam::Volume).info().default, 0.7);
     }
 
     #[test]
@@ -608,9 +597,21 @@ mod tests {
             MachineParam::SamplerSlot(16, SlotParam::Level).index_for(sampler),
             None
         );
-        assert_eq!(sampler_param(SamplerParam::Grit).info().steps, 2);
-        assert_eq!(slot_param(3, SlotParam::Choke).info().steps, 2);
-        assert_eq!(slot_param(3, SlotParam::Release).info().default, 0.3);
+        assert_eq!(SAMPLER.param(SamplerParam::Grit).info().steps, 2);
+        assert_eq!(
+            SAMPLER
+                .param(MachineParam::SamplerSlot(3, SlotParam::Choke))
+                .info()
+                .steps,
+            2
+        );
+        assert_eq!(
+            SAMPLER
+                .param(MachineParam::SamplerSlot(3, SlotParam::Release))
+                .info()
+                .default,
+            0.3
+        );
         assert_eq!(sampler_map::tune_semitones(0.5), 0);
         assert_eq!(sampler_map::tune_semitones(1.0), 24);
         assert_eq!(sampler_map::tune_semitones(0.0), -24);
@@ -636,30 +637,30 @@ mod tests {
     #[test]
     fn fm_defaults_are_the_dx7_init_voice() {
         let d = |id: ParamId| id.info().default;
-        assert_eq!(d(fm_op_param(0, OpParam::Level)), 1.0);
-        assert_eq!(d(fm_op_param(1, OpParam::Level)), 0.0);
-        assert_eq!(d(fm_op_param(3, OpParam::R1)), 1.0);
-        assert_eq!(d(fm_op_param(3, OpParam::L4)), 0.0);
-        assert!((d(fm_op_param(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
+        assert_eq!(d(fm_op(0, OpParam::Level)), 1.0);
+        assert_eq!(d(fm_op(1, OpParam::Level)), 0.0);
+        assert_eq!(d(fm_op(3, OpParam::R1)), 1.0);
+        assert_eq!(d(fm_op(3, OpParam::L4)), 0.0);
+        assert!((d(fm_op(2, OpParam::Coarse)) - 1.0 / 31.0).abs() < 1e-6);
         // Decoded through the step counts, the defaults are the DX7 INIT
         // values: changing an fm_steps constant must change its default too.
         let step = |id: ParamId, steps: usize| step_index(d(id), steps as u8);
-        assert_eq!(step(fm_op_param(2, OpParam::Coarse), fm_steps::COARSE), 1);
-        assert_eq!(step(fm_op_param(2, OpParam::Detune), fm_steps::DETUNE), 7);
+        assert_eq!(step(fm_op(2, OpParam::Coarse), fm_steps::COARSE), 1);
+        assert_eq!(step(fm_op(2, OpParam::Detune), fm_steps::DETUNE), 7);
         assert_eq!(
-            step(fm_param(FmParam::PitchModSens), fm_steps::PITCH_MOD_SENS),
+            step(FM.param(FmParam::PitchModSens), fm_steps::PITCH_MOD_SENS),
             3
         );
-        assert_eq!(step(fm_param(FmParam::Transpose), fm_steps::TRANSPOSE), 24);
-        assert_eq!(d(fm_op_param(2, OpParam::Detune)), 0.5);
-        assert_eq!(d(fm_op_param(5, OpParam::On)), 1.0);
-        assert!((d(fm_param(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);
-        assert_eq!(d(fm_param(FmParam::Transpose)), 0.5);
-        assert_eq!(d(fm_param(FmParam::Algorithm)), 0.0);
-        assert_eq!(fm_param(FmParam::LfoWave).info().steps, 6);
-        assert_eq!(fm_op_param(0, OpParam::LeftCurve).info().steps, 4);
+        assert_eq!(step(FM.param(FmParam::Transpose), fm_steps::TRANSPOSE), 24);
+        assert_eq!(d(fm_op(2, OpParam::Detune)), 0.5);
+        assert_eq!(d(fm_op(5, OpParam::On)), 1.0);
+        assert!((d(FM.param(FmParam::PitchL1)) - 50.0 / 99.0).abs() < 1e-6);
+        assert_eq!(d(FM.param(FmParam::Transpose)), 0.5);
+        assert_eq!(d(FM.param(FmParam::Algorithm)), 0.0);
+        assert_eq!(FM.param(FmParam::LfoWave).info().steps, 6);
+        assert_eq!(fm_op(0, OpParam::LeftCurve).info().steps, 4);
         assert_eq!(
-            fm_param(FmParam::Algorithm).info().steps,
+            FM.param(FmParam::Algorithm).info().steps,
             0,
             "a rounded knob"
         );
@@ -704,10 +705,10 @@ mod tests {
 
     #[test]
     fn discrete_params_report_steps() {
-        assert_eq!(synth_param(0, SynthParam::Wave).info().steps, 2);
-        assert_eq!(synth_param(0, SynthParam::FilterMode).info().steps, 3);
+        assert_eq!(SYNTH.param(SynthParam::Wave).info().steps, 2);
+        assert_eq!(SYNTH.param(SynthParam::FilterMode).info().steps, 3);
         assert_eq!(ParamId::Fx(FxParam::DelayDivision).info().steps, 6);
-        assert_eq!(synth_param(0, SynthParam::Cutoff).info().steps, 0);
+        assert_eq!(SYNTH.param(SynthParam::Cutoff).info().steps, 0);
     }
 
     #[test]
