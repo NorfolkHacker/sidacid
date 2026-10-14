@@ -13,8 +13,8 @@ use acid_engine::machine::MachineUid;
 use acid_engine::project::SynthPattern;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
-const CELL_W: f32 = 22.0;
-const CELL_H: f32 = 9.0;
+pub(crate) const CELL_W: f32 = 22.0;
+pub(crate) const CELL_H: f32 = 9.0;
 const KEY_W: f32 = 30.0;
 const LANE_H: f32 = 12.0;
 const BLACK_KEYS: [bool; 12] = [

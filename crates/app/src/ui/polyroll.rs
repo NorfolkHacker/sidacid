@@ -15,9 +15,10 @@ use acid_engine::machine::MachineUid;
 use acid_engine::project::{NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 
-const TICK_W: f32 = 6.0;
-/// Rows sized like the acid synth's piano roll: three octaves in view.
-const ROW_H: f32 = 12.0;
+/// Sized like the 303's piano roll: the same step width and row height,
+/// with the same three octaves in view.
+const TICK_W: f32 = super::pianoroll::CELL_W / TICKS_PER_STEP as f32;
+const ROW_H: f32 = super::pianoroll::CELL_H;
 const KEY_W: f32 = 30.0;
 /// The sampler's key strip is wider to fit row labels like "Amen ·05".
 const SAMPLER_KEY_W: f32 = 64.0;
@@ -79,7 +80,10 @@ impl SidAcidApp {
             .show(ui, |ui| {
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt(("poly_v", uid))
-                    .max_height(VIEW_H);
+                    .max_height(VIEW_H)
+                    // Nested in the horizontal area there is little height
+                    // left, and egui would shrink this to its 64 pt minimum.
+                    .min_scrolled_height(VIEW_H);
                 if !self.view.panel(uid).poly_scrolled {
                     let pitch = self.roll_start_pitch(uid) as usize;
                     let y = (ROWS - 1 - pitch) as f32 * ROW_H - VIEW_H / 2.0;
