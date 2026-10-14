@@ -449,11 +449,19 @@ impl SidAcidApp {
         let (uid, slot) = (entry.uid, entry.selected);
         let edit = match (&self.view.clipboard, &entry.body) {
             (None, _) => return,
-            (Some(Clip::Synth(p)), MachineBody::Synth(_)) => Edit::SynthPattern {
-                uid,
-                slot,
-                pattern: Box::new(p.clone()),
-            },
+            (Some(Clip::Synth(p)), MachineBody::Synth(_)) => {
+                let mut pattern = Box::new(p.clone());
+                // Copied before its lane's machine left the rack (or was
+                // retyped): such a lane would make the project invalid.
+                if pattern
+                    .param_lane
+                    .as_ref()
+                    .is_some_and(|l| !self.doc.project.param_in_rack(l.param))
+                {
+                    pattern.param_lane = None;
+                }
+                Edit::SynthPattern { uid, slot, pattern }
+            }
             (Some(Clip::Drum(p)), MachineBody::Kit(_)) => Edit::DrumPattern {
                 uid,
                 slot,

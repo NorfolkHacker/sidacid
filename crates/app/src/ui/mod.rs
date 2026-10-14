@@ -18,6 +18,7 @@ mod perf;
 mod pianoroll;
 mod poly_edit;
 mod polyroll;
+mod rack_header;
 mod rack_sync;
 mod record;
 mod roll_edit;
@@ -155,6 +156,10 @@ pub struct ViewState {
     /// Key held by a shift-click on a slot pad: (sampler, key).
     pub pad_note: Option<(MachineUid, u8)>,
     pub perf: perf::PerfMeter,
+    /// Machine whose name is being edited, and the text typed so far.
+    pub renaming: Option<(MachineUid, String)>,
+    /// Rack control clicked while the rack was drawn; applied after it.
+    pub rack_action: Option<rack_header::RackAction>,
 }
 
 pub struct SidAcidApp {
@@ -316,14 +321,7 @@ impl SidAcidApp {
     }
 
     pub(crate) fn start_audio(&mut self) {
-        self.pending.clear();
-        // Whatever happens, the next engine is a fresh one.
-        self.reset_transport_view();
-        self.view.perf.restart();
-        // Release the old stream before opening another: JACK and ASIO
-        // allow one client stream per device.
-        self.audio = None;
-        self.rack_for_new_host();
+        self.reset_for_new_host();
         match open_audio(&self.doc.project, &self.settings.audio) {
             Ok((link, notes)) => {
                 self.audio = Some(link);
@@ -334,6 +332,18 @@ impl SidAcidApp {
             }
             Err(e) => self.audio_error = Some(e),
         }
+    }
+
+    /// Drops the stream and everything sent toward it: whatever happens
+    /// next, the next engine is a fresh one.
+    pub(crate) fn reset_for_new_host(&mut self) {
+        self.pending.clear();
+        self.reset_transport_view();
+        self.view.perf.restart();
+        // Release the old stream before opening another: JACK and ASIO
+        // allow one client stream per device.
+        self.audio = None;
+        self.rack_for_new_host();
     }
 
     /// Queues commands for the audio thread. Repeated values for the same
@@ -434,8 +444,9 @@ impl SidAcidApp {
         debug_assert!(!status.song_rejected, "the engine refused a song");
         // Likewise for a rack: the UI's idea of the engine's rack is wrong.
         debug_assert!(!status.rack_rejected, "the engine refused a rack");
-        if status.rack_rejected {
-            self.reload_after_refused_rack(&status);
+        // The status came from the host just dropped: nothing in it holds.
+        if status.rack_rejected && self.reload_after_refused_rack(&status) {
+            return;
         }
         self.view.perf.on_status(&status, now);
         self.gate_status(&mut status);
@@ -542,8 +553,11 @@ impl SidAcidApp {
             }
             ui.add_space(6.0);
         }
+        self.add_bar(ui);
+        ui.add_space(6.0);
         self.mixer_panel(ui);
         self.song_panel(ui);
+        self.rack_action_after_draw();
     }
 
     /// The name a machine's panel header shows (upper-cased there).
@@ -2366,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_rack_reloads_the_engine_from_the_project() {
+    fn a_refused_rack_restarts_on_a_fresh_host() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.add_machine(MachineType::Fm);
         app.add_machine(MachineType::Fm);
@@ -2375,13 +2389,15 @@ mod tests {
             rack_rejected: true,
             ..Status::default()
         };
-        app.reload_after_refused_rack(&refused);
-        assert_eq!(app.rack_expected, 2, "the reload's ReplaceEngine: +1");
+        assert!(app.reload_after_refused_rack(&refused));
+        assert_eq!(app.rack_expected, 0, "a fresh host counts from 0");
         assert_eq!(app.engine_rack, app.doc.project.rack_uids());
         assert!(app.pending.is_empty(), "queued swaps were for the old rack");
-        // More refusals from before the reload do not reload again.
-        app.reload_after_refused_rack(&refused);
-        assert_eq!(app.rack_expected, 2);
+        // The same refusal reported again does not restart again.
+        app.add_machine(MachineType::Fm);
+        assert!(!app.reload_after_refused_rack(&refused));
+        assert_eq!(app.rack_expected, 1, "no second restart");
+        assert!(!app.pending.is_empty());
     }
 
     #[test]

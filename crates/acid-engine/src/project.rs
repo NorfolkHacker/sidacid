@@ -622,7 +622,7 @@ impl Project {
 
     /// True when `id` names a global or a machine in the rack whose type
     /// it fits.
-    fn param_in_rack(&self, id: ParamId) -> bool {
+    pub fn param_in_rack(&self, id: ParamId) -> bool {
         match id {
             ParamId::Machine(uid, p) => self.machine(uid).is_some_and(|m| p.fits(m.machine_type())),
             ParamId::Fx(_) | ParamId::Master(_) => true,

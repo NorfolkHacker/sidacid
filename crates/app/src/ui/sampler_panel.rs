@@ -49,26 +49,23 @@ impl SidAcidApp {
             self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label()
         );
-        egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-            .id_salt(("sampler", uid))
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    self.param_knob(ui, uid.param(SamplerParam::Volume), "Volume");
-                    self.param_knob(ui, uid.param(SamplerParam::Grit), "Grit");
-                });
-                self.sampler_pads(ui, uid);
-                self.sampler_slot_row(ui, uid);
-                self.sampler_waveform(ui, uid);
-                let s = self.view.panel(uid).sampler_slot.min(SLOTS - 1) as u8;
-                ui.horizontal_wrapped(|ui| {
-                    for (p, label) in SLOT_KNOBS {
-                        self.param_knob(ui, uid.param(MachineParam::SamplerSlot(s, p)), label);
-                    }
-                });
-                self.note_pattern_row(ui, uid);
-                self.poly_roll(ui, uid);
+        self.machine_panel(ui, uid, "sampler", title, |app, ui| {
+            ui.horizontal_wrapped(|ui| {
+                app.param_knob(ui, uid.param(SamplerParam::Volume), "Volume");
+                app.param_knob(ui, uid.param(SamplerParam::Grit), "Grit");
             });
+            app.sampler_pads(ui, uid);
+            app.sampler_slot_row(ui, uid);
+            app.sampler_waveform(ui, uid);
+            let s = app.view.panel(uid).sampler_slot.min(SLOTS - 1) as u8;
+            ui.horizontal_wrapped(|ui| {
+                for (p, label) in SLOT_KNOBS {
+                    app.param_knob(ui, uid.param(MachineParam::SamplerSlot(s, p)), label);
+                }
+            });
+            app.note_pattern_row(ui, uid);
+            app.poly_roll(ui, uid);
+        });
         self.sampler_drop(ui, uid);
         self.release_pad_note(ui);
     }

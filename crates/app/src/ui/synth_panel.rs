@@ -38,123 +38,120 @@ impl SidAcidApp {
             self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label()
         );
-        egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-            .id_salt(("synth", uid))
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (p, label) in KNOBS {
-                        self.param_knob(ui, uid.param(p), label);
-                    }
-                });
-                egui::ScrollArea::horizontal()
-                    .id_salt(("synth_pads", uid))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            self.pattern_pads(ui, uid);
-                            ui.separator();
-                            let pattern = &self.synth_of(uid).patterns[slot as usize];
-                            let mut length = pattern.length;
-                            let mut transpose = pattern.transpose;
-                            let r = ui.add(
-                                egui::DragValue::new(&mut length)
-                                    .range(1..=64)
-                                    .prefix("Len "),
-                            );
-                            if r.changed() {
-                                self.set_synth_length(uid, slot, length, r.dragged());
-                            }
-                            if r.drag_stopped() || r.lost_focus() {
-                                self.doc.end_gesture();
-                            }
-                            let r2 = ui.add(
-                                egui::DragValue::new(&mut transpose)
-                                    .range(-12..=12)
-                                    .prefix("Trans "),
-                            );
-                            if r2.changed() {
-                                self.set_synth_transpose(uid, slot, transpose, r2.dragged());
-                            }
-                            if r2.drag_stopped() || r2.lost_focus() {
-                                self.doc.end_gesture();
-                            }
-                            ui.separator();
-                            let view = self.synth_of(uid).view;
-                            for (v, label) in [
-                                (SeqView::Step303, "303"),
-                                (SeqView::PianoRoll, "Piano roll"),
-                            ] {
-                                if ui.selectable_label(view == v, label).clicked() && view != v {
-                                    let cmds = self.doc.apply(Edit::View { uid, view: v }, false);
-                                    self.send(cmds);
-                                    self.view.panel(uid).writer = None;
-                                }
-                            }
-                            if let Some(w) = self.view.panel(uid).writer {
-                                ui.label(format!(
-                                    "Step-write: step {}  octave {:+}  (Esc to stop)",
-                                    w.cursor + 1,
-                                    w.octave
-                                ));
-                            }
-                        });
-                    });
-                ui.horizontal(|ui| {
-                    use acid_engine::random::Dice;
-                    ui.label("Dice");
-                    let dice = [
-                        (
-                            "Notes",
-                            Dice {
-                                notes: true,
-                                ..Dice::default()
-                            },
-                        ),
-                        (
-                            "Accent",
-                            Dice {
-                                accent: true,
-                                ..Dice::default()
-                            },
-                        ),
-                        (
-                            "Slide",
-                            Dice {
-                                slide: true,
-                                ..Dice::default()
-                            },
-                        ),
-                        (
-                            "Rest",
-                            Dice {
-                                rest: true,
-                                ..Dice::default()
-                            },
-                        ),
-                        (
-                            "Octave",
-                            Dice {
-                                octave: true,
-                                ..Dice::default()
-                            },
-                        ),
-                        ("All", Dice::ALL),
-                    ];
-                    for (label, d) in dice {
-                        if ui
-                            .button(label)
-                            .on_hover_text("Randomise the selected pattern (undoable)")
-                            .clicked()
-                        {
-                            self.randomise_synth(uid, d);
-                        }
-                    }
-                });
-                match self.synth_of(uid).view {
-                    SeqView::Step303 => self.step303(ui, uid),
-                    SeqView::PianoRoll => self.piano_roll(ui, uid),
+        self.machine_panel(ui, uid, "synth", title, |app, ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (p, label) in KNOBS {
+                    app.param_knob(ui, uid.param(p), label);
                 }
             });
+            egui::ScrollArea::horizontal()
+                .id_salt(("synth_pads", uid))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        app.pattern_pads(ui, uid);
+                        ui.separator();
+                        let pattern = &app.synth_of(uid).patterns[slot as usize];
+                        let mut length = pattern.length;
+                        let mut transpose = pattern.transpose;
+                        let r = ui.add(
+                            egui::DragValue::new(&mut length)
+                                .range(1..=64)
+                                .prefix("Len "),
+                        );
+                        if r.changed() {
+                            app.set_synth_length(uid, slot, length, r.dragged());
+                        }
+                        if r.drag_stopped() || r.lost_focus() {
+                            app.doc.end_gesture();
+                        }
+                        let r2 = ui.add(
+                            egui::DragValue::new(&mut transpose)
+                                .range(-12..=12)
+                                .prefix("Trans "),
+                        );
+                        if r2.changed() {
+                            app.set_synth_transpose(uid, slot, transpose, r2.dragged());
+                        }
+                        if r2.drag_stopped() || r2.lost_focus() {
+                            app.doc.end_gesture();
+                        }
+                        ui.separator();
+                        let view = app.synth_of(uid).view;
+                        for (v, label) in [
+                            (SeqView::Step303, "303"),
+                            (SeqView::PianoRoll, "Piano roll"),
+                        ] {
+                            if ui.selectable_label(view == v, label).clicked() && view != v {
+                                let cmds = app.doc.apply(Edit::View { uid, view: v }, false);
+                                app.send(cmds);
+                                app.view.panel(uid).writer = None;
+                            }
+                        }
+                        if let Some(w) = app.view.panel(uid).writer {
+                            ui.label(format!(
+                                "Step-write: step {}  octave {:+}  (Esc to stop)",
+                                w.cursor + 1,
+                                w.octave
+                            ));
+                        }
+                    });
+                });
+            ui.horizontal(|ui| {
+                use acid_engine::random::Dice;
+                ui.label("Dice");
+                let dice = [
+                    (
+                        "Notes",
+                        Dice {
+                            notes: true,
+                            ..Dice::default()
+                        },
+                    ),
+                    (
+                        "Accent",
+                        Dice {
+                            accent: true,
+                            ..Dice::default()
+                        },
+                    ),
+                    (
+                        "Slide",
+                        Dice {
+                            slide: true,
+                            ..Dice::default()
+                        },
+                    ),
+                    (
+                        "Rest",
+                        Dice {
+                            rest: true,
+                            ..Dice::default()
+                        },
+                    ),
+                    (
+                        "Octave",
+                        Dice {
+                            octave: true,
+                            ..Dice::default()
+                        },
+                    ),
+                    ("All", Dice::ALL),
+                ];
+                for (label, d) in dice {
+                    if ui
+                        .button(label)
+                        .on_hover_text("Randomise the selected pattern (undoable)")
+                        .clicked()
+                    {
+                        app.randomise_synth(uid, d);
+                    }
+                }
+            });
+            match app.synth_of(uid).view {
+                SeqView::Step303 => app.step303(ui, uid),
+                SeqView::PianoRoll => app.piano_roll(ui, uid),
+            }
+        });
     }
 }
 

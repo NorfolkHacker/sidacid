@@ -96,40 +96,36 @@ impl SidAcidApp {
             PatternRef(slot).label(),
             self.fm_of(uid).voice_name
         );
-        egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-            .id_salt(("fm", uid))
-            .default_open(true)
-            .open(self.view.forced_open("fm"))
-            .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    self.alg_diagram(ui, uid);
+        self.machine_panel(ui, uid, "fm", title, |app, ui| {
+            ui.horizontal_top(|ui| {
+                app.alg_diagram(ui, uid);
+                ui.horizontal_wrapped(|ui| {
+                    for (p, label) in TOP {
+                        app.param_knob(ui, uid.param(p), label);
+                    }
+                });
+            });
+            app.fm_operator_editor(ui, uid);
+            egui::CollapsingHeader::new("LFO · Pitch EG · Effects")
+                .id_salt(("fm_more", uid))
+                .default_open(false)
+                .open(app.view.forced_open("fm_more"))
+                .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        for (p, label) in TOP {
-                            self.param_knob(ui, uid.param(p), label);
+                        for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
+                            app.param_knob(ui, uid.param(*p), label);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (p, label) in FX {
+                            app.param_knob(ui, uid.param(p), label);
                         }
                     });
                 });
-                self.fm_operator_editor(ui, uid);
-                egui::CollapsingHeader::new("LFO · Pitch EG · Effects")
-                    .id_salt(("fm_more", uid))
-                    .default_open(false)
-                    .open(self.view.forced_open("fm_more"))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            for (p, label) in LFO.iter().chain(PITCH_EG.iter()) {
-                                self.param_knob(ui, uid.param(*p), label);
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            for (p, label) in FX {
-                                self.param_knob(ui, uid.param(p), label);
-                            }
-                        });
-                    });
-                self.fm_voice_browser(ui, uid);
-                self.note_pattern_row(ui, uid);
-                self.poly_roll(ui, uid);
-            });
+            app.fm_voice_browser(ui, uid);
+            app.note_pattern_row(ui, uid);
+            app.poly_roll(ui, uid);
+        });
     }
 
     fn fm_value(&self, id: ParamId) -> f32 {

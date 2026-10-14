@@ -38,70 +38,67 @@ impl SidAcidApp {
             self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label()
         );
-        egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-            .id_salt(("drums", uid))
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    egui::Grid::new(("drum_knobs", uid))
-                        .spacing([0.0, 0.0])
-                        .show(ui, |ui| {
-                            ui.label("");
-                            for name in INST_NAMES {
-                                ui.label(egui::RichText::new(name).strong());
+        self.machine_panel(ui, uid, "drums", title, |app, ui| {
+            ui.horizontal(|ui| {
+                egui::Grid::new(("drum_knobs", uid))
+                    .spacing([0.0, 0.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        for name in INST_NAMES {
+                            ui.label(egui::RichText::new(name).strong());
+                        }
+                        ui.end_row();
+                        for (p, label) in KNOB_ROWS {
+                            ui.label(label);
+                            for inst in 0..8u8 {
+                                app.param_knob(ui, uid.param(MachineParam::Drum(inst, p)), "");
                             }
                             ui.end_row();
-                            for (p, label) in KNOB_ROWS {
-                                ui.label(label);
-                                for inst in 0..8u8 {
-                                    self.param_knob(ui, uid.param(MachineParam::Drum(inst, p)), "");
-                                }
-                                ui.end_row();
-                            }
-                        });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        self.param_knob(ui, uid.param(KitParam::Volume), "Volume");
-                        self.param_knob(ui, uid.param(KitParam::Accent), "Accent");
+                        }
+                    });
+                ui.separator();
+                ui.vertical(|ui| {
+                    app.param_knob(ui, uid.param(KitParam::Volume), "Volume");
+                    app.param_knob(ui, uid.param(KitParam::Accent), "Accent");
+                });
+            });
+            egui::ScrollArea::horizontal()
+                .id_salt(("drum_pads", uid))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        app.pattern_pads(ui, uid);
+                        ui.separator();
+                        let mut length = app.drum_pattern(uid, slot).map_or(16, |p| p.length);
+                        let r = ui.add(
+                            egui::DragValue::new(&mut length)
+                                .range(1..=64)
+                                .prefix("Len "),
+                        );
+                        if r.changed() {
+                            app.set_drum_length(uid, slot, length, r.dragged());
+                        }
+                        if r.drag_stopped() || r.lost_focus() {
+                            app.doc.end_gesture();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Template")
+                            .on_hover_text("Replace with a fresh groove (undoable)")
+                            .clicked()
+                        {
+                            app.drum_template(uid);
+                        }
+                        if ui
+                            .button("Evolve")
+                            .on_hover_text("Small random changes (undoable)")
+                            .clicked()
+                        {
+                            app.evolve_drums(uid);
+                        }
                     });
                 });
-                egui::ScrollArea::horizontal()
-                    .id_salt(("drum_pads", uid))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            self.pattern_pads(ui, uid);
-                            ui.separator();
-                            let mut length = self.drum_pattern(uid, slot).map_or(16, |p| p.length);
-                            let r = ui.add(
-                                egui::DragValue::new(&mut length)
-                                    .range(1..=64)
-                                    .prefix("Len "),
-                            );
-                            if r.changed() {
-                                self.set_drum_length(uid, slot, length, r.dragged());
-                            }
-                            if r.drag_stopped() || r.lost_focus() {
-                                self.doc.end_gesture();
-                            }
-                            ui.separator();
-                            if ui
-                                .button("Template")
-                                .on_hover_text("Replace with a fresh groove (undoable)")
-                                .clicked()
-                            {
-                                self.drum_template(uid);
-                            }
-                            if ui
-                                .button("Evolve")
-                                .on_hover_text("Small random changes (undoable)")
-                                .clicked()
-                            {
-                                self.evolve_drums(uid);
-                            }
-                        });
-                    });
-                self.drum_grid(ui, uid, slot);
-            });
+            app.drum_grid(ui, uid, slot);
+        });
     }
 
     fn drum_grid(&mut self, ui: &mut egui::Ui, uid: MachineUid, slot: u8) {

@@ -113,10 +113,15 @@ impl SidAcidApp {
     /// Applies a toolbar click. The song is cloned only here, never per frame.
     pub(crate) fn song_action(&mut self, action: SongAction, sel: Option<(usize, usize)>) {
         let new_bar = self.bar_from_selected_patterns();
-        let clip = match action {
+        let mut clip = match action {
             SongAction::Paste => self.view.song_clip.clone().unwrap_or_default(),
             _ => Vec::new(),
         };
+        // Bars copied before a machine left the rack: drop its cells.
+        let project = &self.doc.project;
+        for bar in &mut clip {
+            bar.cells.retain(|(uid, _)| project.machine(*uid).is_some());
+        }
         let mut s = self.doc.project.song.clone();
         let banks = song::Banks::of(&self.doc.project);
         match action {
