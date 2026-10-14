@@ -519,7 +519,17 @@ mod tests {
 
     #[test]
     fn every_discrete_param_has_a_name_per_step() {
-        for &id in acid_engine::project::Project::default().params.keys() {
+        let p = acid_engine::project::Project::default();
+        let machines = p.machines.iter().flat_map(|m| {
+            m.params
+                .keys()
+                .map(|&mp| acid_engine::params::ParamId::Machine(m.uid, mp))
+        });
+        let globals = p
+            .globals
+            .keys()
+            .map(|&g| acid_engine::params::ParamId::from(g));
+        for id in machines.chain(globals) {
             let steps = id.info().steps;
             if steps >= 2 {
                 assert_eq!(discrete_names(id).len(), steps as usize, "{id:?}");

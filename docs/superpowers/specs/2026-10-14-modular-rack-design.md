@@ -51,19 +51,22 @@ struct MachineEntry {
     uid: MachineUid,
     name: String,                         // user-editable
     selected: u8,                         // selected pattern
-    channel: BTreeMap<ChannelParam, f32>, // the machine's mixer strip
+    params: BTreeMap<MachineParam, f32>, // channel strip + type params
     body: MachineBody,
 }
 enum MachineBody {
-    Synth(SynthMachine),     // its params + 128 patterns
-    Kit(DrumMachine),        // carries KitKind::{K808, K909}; params + patterns
+    Synth(SynthMachine),     // 128 patterns
+    Kit(DrumMachine),        // carries KitKind::{K808, K909}; patterns
     Fm(FmMachine),
     Sampler(SamplerMachine), // slots + embedded audio
 }
 ```
 
-- Each per-type machine struct owns its parameter map (today's global
-  `params` map is split per machine) beside its patterns.
+- Each machine entry owns one parameter map (today's global `params` map
+  is split per machine) holding its channel-strip params
+  (`MachineParam::Channel(_)`) and its type's params alike; the per-type
+  body structs keep only patterns and sound data. `Project::param(ParamId)`
+  is the one lookup path.
 - An empty rack is valid (the song plays silence).
 - Default names: the type label plus the next free number for that type —
   "Synth 3", "808 2", "909 2", "FM 2", "Sampler 2". Migrated and new-project
@@ -105,8 +108,8 @@ enum MachineParam {
 ### Migration
 
 - v2 → v3: the six machines get uids 1–6 in today's order and the names
-  above; `next_uid = 7`. `ParamId::Channel(n, p)` moves to machine n's
-  `channel`; synth/kit/FM/sampler params move into their machine; bar
+  above; `next_uid = 7`. `ParamId::Channel(n, p)` and the
+  synth/kit/FM/sampler params move into their machine's `params`; bar
   arrays become cells (patterns, mutes, transposes via today's
   `transpose_index`); automation `ParamId`s are remapped.
 - v1 → v2 → v3 (existing v1 upgrade, then the new step).

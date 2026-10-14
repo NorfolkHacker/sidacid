@@ -313,6 +313,7 @@ mod tests {
     use super::*;
     use crate::drums::BD;
     use crate::drums::{CH, CP, OH};
+    use crate::machine::MachineId;
     use crate::project::SynthStep;
 
     fn hits(p: &DrumPattern) -> usize {
@@ -575,7 +576,11 @@ mod tests {
 
     #[test]
     fn no_dice_changes_nothing() {
-        let base = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let base = crate::demo::demo_project()
+            .synth(MachineId::Synth1.uid())
+            .unwrap()
+            .patterns[0]
+            .clone();
         assert_eq!(
             randomise_synth(&base, Dice::default(), &groove_four_on_floor(), 1),
             base
@@ -584,7 +589,11 @@ mod tests {
 
     #[test]
     fn each_die_touches_only_its_field() {
-        let base = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let base = crate::demo::demo_project()
+            .synth(MachineId::Synth1.uid())
+            .unwrap()
+            .patterns[0]
+            .clone();
         let g = groove_four_on_floor();
         let r = randomise_synth(
             &base,

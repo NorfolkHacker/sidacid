@@ -10,6 +10,7 @@ use super::poly_edit::{
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::host::Command;
 use acid_engine::machine::MachineId;
 use acid_engine::project::{NotePattern, TICKS_PER_STEP};
@@ -44,7 +45,7 @@ impl SidAcidApp {
         }
         self.doc
             .project
-            .sampler
+            .sampler_machine()
             .slots
             .iter()
             .flatten()
@@ -60,8 +61,8 @@ impl SidAcidApp {
         } else {
             KEY_W
         };
-        let slot = self.doc.project.selected[machine];
-        let Some(bank) = self.doc.project.note_patterns(machine) else {
+        let slot = self.doc.project.entry_at(machine).selected;
+        let Some(bank) = self.doc.project.notes_at(machine) else {
             return;
         };
         let mut pattern = bank[slot as usize].clone();
@@ -122,7 +123,10 @@ impl SidAcidApp {
                             },
                         );
                         let sampler_row = if machine == MachineId::Sampler.index() {
-                            super::sampler_ui::row_label(&self.doc.project.sampler.slots, pitch)
+                            super::sampler_ui::row_label(
+                                &self.doc.project.sampler_machine().slots,
+                                pitch,
+                            )
                         } else {
                             None
                         };
@@ -531,11 +535,11 @@ mod tests {
     #[test]
     fn dropping_a_move_onto_a_same_pitch_note_is_one_undo_step() {
         let mut app = fm_app();
-        let mut p = app.doc.project.fm.patterns[0].clone();
+        let mut p = app.doc.project.fm_machine().patterns[0].clone();
         add(&mut p, 0, 4, 60, 100);
         let i = add(&mut p, 8, 4, 60, 50).unwrap();
         app.commit_poly(4, 0, Some(p.clone()), false, true);
-        let before = app.doc.project.fm.patterns[0].clone();
+        let before = app.doc.project.fm_machine().patterns[0].clone();
         // The drag: move onto the first note (a live drag merges).
         app.view.poly_drag[0] = Some(PolyDrag::Move { index: i, grab: 0 });
         move_to(&mut p, i, 2, 60);
@@ -543,26 +547,30 @@ mod tests {
         // The drop frame: the drag state is already cleared.
         app.view.poly_drag[0] = None;
         app.commit_poly_frame(4, 0, p, false, Some(i), true);
-        assert_eq!(app.doc.project.fm.patterns[0].notes.len(), 1, "merged");
+        assert_eq!(
+            app.doc.project.fm_machine().patterns[0].notes.len(),
+            1,
+            "merged"
+        );
         app.doc.undo();
-        assert_eq!(app.doc.project.fm.patterns[0], before, "one undo");
+        assert_eq!(app.doc.project.fm_machine().patterns[0], before, "one undo");
     }
 
     #[test]
     fn poly_drag_is_one_undo_step() {
         let mut app = fm_app();
-        let mut p = app.doc.project.fm.patterns[0].clone();
+        let mut p = app.doc.project.fm_machine().patterns[0].clone();
         add(&mut p, 0, 4, 60, 100);
         app.commit_poly(4, 0, Some(p.clone()), false, true);
-        let before = app.doc.project.fm.patterns[0].clone();
+        let before = app.doc.project.fm_machine().patterns[0].clone();
         assert_eq!(before, p);
         for start in [4, 8, 12] {
             move_to(&mut p, 0, start, 62);
             app.commit_poly(4, 0, Some(p.clone()), true, false);
         }
         app.commit_poly(4, 0, None, false, true);
-        assert_eq!(app.doc.project.fm.patterns[0].notes[0].start, 12);
+        assert_eq!(app.doc.project.fm_machine().patterns[0].notes[0].start, 12);
         app.doc.undo();
-        assert_eq!(app.doc.project.fm.patterns[0], before, "one undo");
+        assert_eq!(app.doc.project.fm_machine().patterns[0], before, "one undo");
     }
 }

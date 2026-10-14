@@ -6,7 +6,7 @@ use super::params_ui::param_label;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
-use acid_engine::machine::{MACHINES, MachineId};
+use acid_engine::machine::MachineId;
 use acid_engine::project::{Bar, PatternRef, Song};
 use acid_engine::sequencer::Mode;
 use acid_engine::song;
@@ -47,10 +47,12 @@ impl SidAcidApp {
     }
 
     fn bar_from_selected_patterns(&self) -> Bar {
-        Bar {
-            patterns: self.doc.project.selected.map(|s| Some(PatternRef(s))),
-            ..Bar::default()
+        let mut bar = Bar::default();
+        for m in MachineId::ALL {
+            let slot = self.doc.project.machine(m.uid()).map_or(0, |e| e.selected);
+            bar.cell_mut(m.uid()).pattern = Some(PatternRef(slot));
         }
+        bar
     }
 
     pub(crate) fn song_panel(&mut self, ui: &mut egui::Ui) {
@@ -128,7 +130,7 @@ impl SidAcidApp {
             }
             SongAction::Insert => {
                 let at = sel.map_or(s.bars.len(), |(a, _)| a);
-                let bar = sel.map_or(new_bar, |(a, _)| s.bars[a]);
+                let bar = sel.map_or(new_bar, |(a, _)| s.bars[a].clone());
                 song::insert_bars(&mut s, at, &[bar], banks);
             }
             SongAction::Duplicate(a, b) => song::duplicate_bars(&mut s, a, b, banks),
@@ -162,16 +164,13 @@ impl SidAcidApp {
                         ui.weak("No bars yet — press \"Add bar\".");
                     }
                     for (i, bar) in bars.iter().enumerate() {
-                        let cell = |m: usize| {
-                            let label = bar.patterns[m].map_or("—".to_string(), |r| r.label());
-                            if bar.mutes[m] {
-                                format!("{label}×")
-                            } else {
-                                label
-                            }
+                        let cell = |m: MachineId| {
+                            let c = bar.cell(m.uid());
+                            let label = c.pattern.map_or("—".to_string(), |r| r.label());
+                            if c.mute { format!("{label}×") } else { label }
                         };
                         let mut text = format!("{}", i + 1);
-                        for m in 0..MACHINES {
+                        for m in MachineId::ALL {
                             text.push('\n');
                             text.push_str(&cell(m));
                         }
@@ -209,8 +208,11 @@ impl SidAcidApp {
         let Some((a, _)) = self.song_selection() else {
             return;
         };
-        let mut bar = self.doc.project.song.bars[a];
-        let selected = self.doc.project.selected;
+        let mut bar = self.doc.project.song.bars[a].clone();
+        let selected: Vec<u8> = MachineId::ALL
+            .iter()
+            .map(|m| self.doc.project.machine(m.uid()).map_or(0, |e| e.selected))
+            .collect();
         // A record pass owns the open gesture: transpose edits made during
         // it neither merge into it nor close it.
         let recording = self.recording();
@@ -222,24 +224,25 @@ impl SidAcidApp {
             for machine in MachineId::ALL {
                 let m = machine.index();
                 ui.label(machine.name());
-                ui.monospace(bar.patterns[m].map_or("—".to_string(), |r| r.label()));
+                let uid = machine.uid();
+                ui.monospace(bar.cell(uid).pattern.map_or("—".to_string(), |r| r.label()));
                 if ui
                     .button(format!("Use {}", PatternRef(selected[m]).label()))
                     .clicked()
                 {
-                    bar.patterns[m] = Some(PatternRef(selected[m]));
+                    bar.cell_mut(uid).pattern = Some(PatternRef(selected[m]));
                     changed = true;
                 }
                 if ui.button("Clear").clicked() {
-                    bar.patterns[m] = None;
+                    bar.cell_mut(uid).pattern = None;
                     changed = true;
                 }
-                if ui.checkbox(&mut bar.mutes[m], "Mute").changed() {
+                if ui.checkbox(&mut bar.cell_mut(uid).mute, "Mute").changed() {
                     changed = true;
                 }
-                if let Some(ti) = machine.transpose_index() {
+                if machine.machine_type().transposes() {
                     let r = ui.add(
-                        egui::DragValue::new(&mut bar.transpose[ti])
+                        egui::DragValue::new(&mut bar.cell_mut(uid).transpose)
                             .range(-12..=12)
                             .prefix("Trans "),
                     );

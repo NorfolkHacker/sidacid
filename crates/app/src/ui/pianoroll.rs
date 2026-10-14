@@ -9,6 +9,7 @@ use super::roll_edit::{
 use super::step_edit::NOTE_NAMES;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::project::SynthPattern;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
@@ -22,8 +23,8 @@ const BLACK_KEYS: [bool; 12] = [
 
 impl SidAcidApp {
     pub(crate) fn piano_roll(&mut self, ui: &mut egui::Ui, synth: usize) {
-        let slot = self.doc.project.selected[synth];
-        let mut pattern = self.doc.project.synths[synth].patterns[slot as usize].clone();
+        let slot = self.doc.project.entry_at(synth).selected;
+        let mut pattern = self.doc.project.synth_at(synth).patterns[slot as usize].clone();
         let len = pattern.length as usize;
         let playhead = (self.status.playing && self.status.patterns[synth] == slot)
             .then_some(self.status.playhead[synth]);
@@ -270,10 +271,10 @@ mod tests {
     #[test]
     fn roll_drag_is_one_undo_step() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        let mut original = app.doc.project.synths[0].patterns[0].clone();
+        let mut original = app.doc.project.synth_at(0).patterns[0].clone();
         place(&mut original, 0, 2, 12);
         app.commit_roll(0, 0, Some(original.clone()), false, true);
-        let before = app.doc.project.synths[0].patterns[0].clone();
+        let before = app.doc.project.synth_at(0).patterns[0].clone();
         assert_eq!(before, original);
         let drag = RollDrag::Move { start: 0, grab: 0 };
         for step in [1, 2, 3, 4] {
@@ -281,16 +282,16 @@ mod tests {
             app.commit_roll(0, 0, Some(next), true, false);
         }
         app.commit_roll(0, 0, None, false, true);
-        assert_ne!(app.doc.project.synths[0].patterns[0], before);
+        assert_ne!(app.doc.project.synth_at(0).patterns[0], before);
         app.doc.undo();
-        assert_eq!(app.doc.project.synths[0].patterns[0], before, "one undo");
+        assert_eq!(app.doc.project.synth_at(0).patterns[0], before, "one undo");
     }
 
     /// Starts a Move drag of a two-step note at step 0, as a drag-start
     /// frame does, and runs one drag frame to step 2.
     fn app_dragging_a_note() -> SidAcidApp {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        let mut pattern = app.doc.project.synths[0].patterns[0].clone();
+        let mut pattern = app.doc.project.synth_at(0).patterns[0].clone();
         place(&mut pattern, 0, 2, 12);
         app.commit_roll(0, 0, Some(pattern.clone()), false, true);
         app.view.roll_drag[0] = Some(RollDrag::Move { start: 0, grab: 0 });
@@ -309,7 +310,7 @@ mod tests {
     #[test]
     fn a_drag_continues_while_its_pattern_is_unchanged() {
         let mut app = app_dragging_a_note();
-        let current = app.doc.project.synths[0].patterns[0].clone();
+        let current = app.doc.project.synth_at(0).patterns[0].clone();
         assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_some());
     }
 
@@ -317,12 +318,13 @@ mod tests {
     fn an_undo_mid_drag_drops_the_drag() {
         let mut app = app_dragging_a_note();
         app.doc.undo();
-        let current = app.doc.project.synths[0].patterns[0].clone();
+        let current = app.doc.project.synth_at(0).patterns[0].clone();
         assert!(app.roll_drag_to(0, 0, &current, 3, 12).is_none());
         assert_eq!(app.view.roll_drag[0], None);
         assert!(app.view.roll_origin[0].is_none());
         assert_eq!(
-            app.doc.project.synths[0].patterns[0], current,
+            app.doc.project.synth_at(0).patterns[0],
+            current,
             "the undo stands"
         );
     }
@@ -330,7 +332,7 @@ mod tests {
     #[test]
     fn selecting_another_slot_mid_drag_drops_the_drag() {
         let mut app = app_dragging_a_note();
-        let other = app.doc.project.synths[0].patterns[1].clone();
+        let other = app.doc.project.synth_at(0).patterns[1].clone();
         assert!(app.roll_drag_to(0, 1, &other, 3, 12).is_none());
         assert_eq!(app.view.roll_drag[0], None);
     }

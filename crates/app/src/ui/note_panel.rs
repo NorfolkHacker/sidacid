@@ -3,6 +3,7 @@
 use super::SidAcidApp;
 use super::poly_edit::Snap;
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::machine::MachineId;
 use eframe::egui;
 
@@ -10,7 +11,7 @@ impl SidAcidApp {
     /// Pattern pads, length and snap for a note machine (FM or Sampler).
     pub(crate) fn note_pattern_row(&mut self, ui: &mut egui::Ui, m: usize) {
         let n = m - MachineId::Fm.index();
-        let slot = self.doc.project.selected[m];
+        let slot = self.doc.project.entry_at(m).selected;
         egui::ScrollArea::horizontal()
             .id_salt(("note_pads", m))
             .show(ui, |ui| {
@@ -20,7 +21,7 @@ impl SidAcidApp {
                     let mut length = self
                         .doc
                         .project
-                        .note_patterns(m)
+                        .notes_at(m)
                         .map_or(16, |p| p[slot as usize].length);
                     let r = ui.add(
                         egui::DragValue::new(&mut length)

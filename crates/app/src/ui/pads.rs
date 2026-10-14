@@ -1,6 +1,7 @@
 //! Bank (A–H) and pattern (1–16) pads for one machine.
 
 use super::{SidAcidApp, theme};
+use crate::six::SixMachines;
 use acid_engine::project::BANK_SIZE;
 use eframe::egui;
 
@@ -10,7 +11,7 @@ pub fn bank_letter(bank: u8) -> String {
 
 impl SidAcidApp {
     pub(crate) fn pattern_pads(&mut self, ui: &mut egui::Ui, machine: usize) {
-        let selected = self.doc.project.selected[machine];
+        let selected = self.doc.project.entry_at(machine).selected;
         let playing = self.status.playing.then_some(self.status.patterns[machine]);
         let queued = self.status.queued[machine];
         ui.vertical(|ui| {
@@ -46,7 +47,7 @@ impl SidAcidApp {
     /// while recording). A synth's step-writer stops when another pattern
     /// is selected, so keys never land in a pattern the user did not click.
     pub(crate) fn select_pad(&mut self, machine: usize, slot: u8) {
-        let changed = self.doc.project.selected[machine] != slot;
+        let changed = self.doc.project.entry_at(machine).selected != slot;
         let cmds = self.doc.select_pattern(machine, slot);
         self.send(cmds);
         self.view.focus = machine;
@@ -66,7 +67,7 @@ mod tests {
     #[test]
     fn selecting_another_pattern_stops_that_synths_step_writer() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let slot = app.doc.project.selected[0];
+        let slot = app.doc.project.entry_at(0).selected;
         app.view.writers[0] = Some(StepWriter::new(3));
         app.select_pad(0, slot);
         assert!(
@@ -80,7 +81,7 @@ mod tests {
         );
         app.select_pad(0, slot + 1);
         assert!(app.view.writers[0].is_none());
-        assert_eq!(app.doc.project.selected[0], slot + 1);
+        assert_eq!(app.doc.project.entry_at(0).selected, slot + 1);
         assert_eq!(app.view.focus, 0);
     }
 }

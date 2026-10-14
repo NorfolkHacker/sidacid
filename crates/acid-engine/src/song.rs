@@ -1,10 +1,10 @@
 //! Pure song helpers shared by the sequencer, offline render and the UI:
 //! bar lengths, global step positions, automation lookup and editing.
 
-use crate::machine::{MACHINES, MachineKind, NOTE_MACHINES, kind_of};
+use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
+    AutoLane, Bar, Cell, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
     SynthPattern, steps_of,
 };
 use std::collections::BTreeMap;
@@ -33,11 +33,15 @@ impl<'a> Banks<'a> {
         }
     }
 
+    /// The standard six machines' banks; a missing machine has an empty bank.
     pub fn of(p: &'a Project) -> Self {
+        let synth = |m: MachineId| p.synth(m.uid()).map_or(&[][..], |s| &s.patterns[..]);
+        let kit = |m: MachineId| p.kit(m.uid()).map_or(&[][..], |k| &k.patterns[..]);
+        let notes = |m: MachineId| p.note_patterns(m.uid()).map_or(&[][..], |n| &n[..]);
         Self {
-            synths: [&p.synths[0].patterns, &p.synths[1].patterns],
-            drums: [&p.drums[0].patterns, &p.drums[1].patterns],
-            notes: [&p.fm.patterns, &p.sampler.patterns],
+            synths: [synth(MachineId::Synth1), synth(MachineId::Synth2)],
+            drums: [kit(MachineId::Kit808), kit(MachineId::Kit909)],
+            notes: [notes(MachineId::Fm), notes(MachineId::Sampler)],
         }
     }
 
@@ -63,10 +67,15 @@ impl<'a> Banks<'a> {
     }
 }
 
+/// Machine `m`'s (by `MachineId::index`) cell in `bar`.
+fn cell_of(bar: &Bar, m: usize) -> Cell {
+    MachineId::from_index(m).map_or_else(Cell::default, |id| bar.cell(id.uid()))
+}
+
 /// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
 pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
     let longest = (0..MACHINES)
-        .filter_map(|m| banks.length(m, bar.patterns[m]?.0))
+        .filter_map(|m| banks.length(m, cell_of(bar, m).pattern?.0))
         .max()
         .unwrap_or(0);
     if longest == 0 {
@@ -146,14 +155,17 @@ pub fn write_pattern_ref(song: &mut Song, bar: usize, machine: usize, slot: u8) 
     if machine >= MACHINES || slot as usize >= PATTERNS {
         return;
     }
-    let Some(old) = song.bars.get(bar).map(|b| b.patterns[machine]) else {
+    let Some(uid) = MachineId::from_index(machine).map(MachineId::uid) else {
+        return;
+    };
+    let Some(old) = song.bars.get(bar).map(|b| b.cell(uid).pattern) else {
         return;
     };
     for b in bar..song.bars.len() {
-        if b > bar && song.bars[b].patterns[machine] != old {
+        if b > bar && song.bars[b].cell(uid).pattern != old {
             break;
         }
-        song.bars[b].patterns[machine] = Some(PatternRef(slot));
+        song.bars[b].cell_mut(uid).pattern = Some(PatternRef(slot));
     }
 }
 
@@ -188,7 +200,7 @@ pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
     let start = bar_start_step(song, at, banks);
     let added: u32 = bars.iter().map(|b| bar_steps(b, banks) as u32).sum();
     shift_automation(song, start, added as i64);
-    song.bars.splice(at..at, bars.iter().copied());
+    song.bars.splice(at..at, bars.iter().cloned());
     if let Some((a, b)) = song.loop_range {
         let n = bars.len() as u16;
         // a stray range past the bars can't overflow or leave the bar cap
@@ -281,11 +293,11 @@ mod tests {
 
     fn project_with_lengths(synth0: u8, drum0: u8) -> Project {
         let mut p = Project::default();
-        p.synths[0].patterns[1] = SynthPattern {
+        p.synth_mut(MachineId::Synth1.uid()).unwrap().patterns[1] = SynthPattern {
             length: synth0,
             ..SynthPattern::default()
         };
-        p.drums[0].patterns[2] = DrumPattern {
+        p.kit_mut(MachineId::Kit808.uid()).unwrap().patterns[2] = DrumPattern {
             length: drum0,
             ..DrumPattern::default()
         };
@@ -293,14 +305,11 @@ mod tests {
     }
 
     fn bar(refs: [Option<u8>; 4]) -> Bar {
-        let mut patterns = [None; crate::machine::MACHINES];
+        let mut bar = Bar::default();
         for (m, r) in refs.into_iter().enumerate() {
-            patterns[m] = r.map(PatternRef);
+            bar.cell_mut(MachineId::ALL[m].uid()).pattern = r.map(PatternRef);
         }
-        Bar {
-            patterns,
-            ..Bar::default()
-        }
+        bar
     }
 
     #[test]
@@ -367,7 +376,11 @@ mod tests {
             .map(|&r| bar([Some(r), None, None, None]))
             .collect();
         write_pattern_ref(&mut song, 1, 0, 9);
-        let refs: Vec<_> = song.bars.iter().map(|b| b.patterns[0].unwrap().0).collect();
+        let refs: Vec<_> = song
+            .bars
+            .iter()
+            .map(|b| b.cell(MachineId::Synth1.uid()).pattern.unwrap().0)
+            .collect();
         assert_eq!(refs, vec![0, 9, 9, 5, 0]);
         write_pattern_ref(&mut song, 99, 0, 1);
         assert_eq!(song.bars.len(), 5, "out-of-range bar is ignored");
@@ -419,13 +432,13 @@ mod tests {
     #[test]
     fn duplicate_copies_bars_and_their_automation() {
         let (mut p, id) = sixteen_step_song(2);
-        p.song.bars[1].mutes[2] = true;
+        p.song.bars[1].cell_mut(MachineId::Kit808.uid()).mute = true;
         write_automation(&mut p.song, id, 18, 18, 0.6);
         let snapshot = p.clone();
         let b = Banks::of(&snapshot);
         duplicate_bars(&mut p.song, 1, 1, b);
         assert_eq!(p.song.bars.len(), 3);
-        assert!(p.song.bars[2].mutes[2]);
+        assert!(p.song.bars[2].cell(MachineId::Kit808.uid()).mute);
         let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
         assert_eq!(keys, vec![18, 34]);
     }
@@ -489,9 +502,9 @@ mod tests {
     #[test]
     fn note_patterns_count_toward_bar_length() {
         let mut p = Project::default();
-        p.sampler.patterns[3].length = 48;
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[3].length = 48;
         let mut b = Bar::default();
-        b.patterns[5] = Some(PatternRef(3));
+        b.cell_mut(MachineId::Sampler.uid()).pattern = Some(PatternRef(3));
         assert_eq!(bar_steps(&b, Banks::of(&p)), 48);
         assert_eq!(Banks::of(&p).length(5, 3), Some(48));
         assert_eq!(Banks::of(&p).length(6, 0), None);
@@ -505,10 +518,16 @@ mod tests {
             ..Default::default()
         };
         write_pattern_ref(&mut song, 1, 5, 7);
-        assert_eq!(song.bars[1].patterns[5], Some(PatternRef(7)));
-        assert_eq!(song.bars[2].patterns[5], Some(PatternRef(7)));
+        assert_eq!(
+            song.bars[1].cell(MachineId::Sampler.uid()).pattern,
+            Some(PatternRef(7))
+        );
+        assert_eq!(
+            song.bars[2].cell(MachineId::Sampler.uid()).pattern,
+            Some(PatternRef(7))
+        );
         write_pattern_ref(&mut song, 0, 6, 7);
-        assert!(song.bars[0].patterns.iter().all(Option::is_none));
+        assert!(song.bars[0].cells.iter().all(|(_, c)| c.pattern.is_none()));
     }
 
     #[test]
@@ -551,8 +570,8 @@ mod tests {
     #[test]
     fn bar_steps_ignores_bad_slots_and_clamps_lengths() {
         let mut p = Project::default();
-        p.synths[0].patterns[1].length = 0;
-        p.drums[0].patterns[2].length = 255;
+        p.synth_mut(MachineId::Synth1.uid()).unwrap().patterns[1].length = 0;
+        p.kit_mut(MachineId::Kit808.uid()).unwrap().patterns[2].length = 255;
         let b = Banks::of(&p);
         assert_eq!(b.length(0, 200), None, "slot past the bank");
         assert_eq!(b.length(0, 1), Some(1), "length 0 counts as 1");
@@ -588,7 +607,7 @@ mod tests {
         let (mut p, _) = sixteen_step_song(MAX_BARS - 1);
         let snapshot = p.clone();
         let b = Banks::of(&snapshot);
-        insert_bars(&mut p.song, 0, &[Bar::default(); 5], b);
+        insert_bars(&mut p.song, 0, &vec![Bar::default(); 5], b);
         assert_eq!(p.song.bars.len(), MAX_BARS);
     }
 
@@ -599,7 +618,7 @@ mod tests {
         let insert = |range: (u16, u16), at: usize| {
             let mut song = p.song.clone();
             song.loop_range = Some(range);
-            insert_bars(&mut song, at, &[Bar::default(); 2], b);
+            insert_bars(&mut song, at, &vec![Bar::default(); 2], b);
             song.loop_range
         };
         let top = (MAX_BARS - 1) as u16;

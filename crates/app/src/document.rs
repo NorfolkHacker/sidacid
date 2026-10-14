@@ -2,6 +2,7 @@
 //! applying one returns the engine `Command`s that bring the audio
 //! thread in line. Undo stores the inverse edit.
 
+use crate::six::SixMachines;
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::Command;
 use acid_engine::params::ParamId;
@@ -348,35 +349,35 @@ impl Document {
                 slot,
                 step,
                 value,
-            } => p.synths[*synth].patterns[*slot as usize].steps[*step] == *value,
+            } => p.synth_at(*synth).patterns[*slot as usize].steps[*step] == *value,
             Edit::SynthLength {
                 synth,
                 slot,
                 length,
-            } => p.synths[*synth].patterns[*slot as usize].length == *length,
+            } => p.synth_at(*synth).patterns[*slot as usize].length == *length,
             Edit::SynthTranspose {
                 synth,
                 slot,
                 transpose,
-            } => p.synths[*synth].patterns[*slot as usize].transpose == *transpose,
+            } => p.synth_at(*synth).patterns[*slot as usize].transpose == *transpose,
             Edit::DrumHit {
                 kit,
                 slot,
                 step,
                 inst,
                 hit,
-            } => p.drums[*kit].patterns[*slot as usize].steps[*step][*inst] == *hit,
+            } => p.kit_at(*kit).patterns[*slot as usize].steps[*step][*inst] == *hit,
             Edit::DrumLength { kit, slot, length } => {
-                p.drums[*kit].patterns[*slot as usize].length == *length
+                p.kit_at(*kit).patterns[*slot as usize].length == *length
             }
             Edit::NoteLength {
                 machine,
                 slot,
                 length,
             } => p
-                .note_patterns(*machine)
+                .notes_at(*machine)
                 .is_some_and(|pats| pats[*slot as usize].length == *length),
-            Edit::View { synth, view } => p.synths[*synth].view == *view,
+            Edit::View { synth, view } => p.synth_at(*synth).view == *view,
             _ => false,
         }
     }
@@ -466,8 +467,8 @@ impl Document {
 
     /// Selecting a pattern is a transport action: saved, not undoable.
     pub fn select_pattern(&mut self, machine: usize, slot: u8) -> Vec<Command> {
-        if self.project.selected[machine] != slot {
-            self.project.selected[machine] = slot;
+        if self.project.entry_at(machine).selected != slot {
+            self.project.entry_at_mut(machine).selected = slot;
             self.unsaved_selection = true;
         }
         vec![Command::SelectPattern {
@@ -482,7 +483,7 @@ impl Document {
         match edit {
             Edit::Param { id, value } => {
                 let old = p.param(id);
-                p.params.insert(id, value.clamp(0.0, 1.0));
+                p.set_param(id, value.clamp(0.0, 1.0));
                 Edit::Param { id, value: old }
             }
             Edit::SynthStep {
@@ -492,7 +493,7 @@ impl Document {
                 value,
             } => {
                 let old = std::mem::replace(
-                    &mut p.synths[synth].patterns[slot as usize].steps[step],
+                    &mut p.synth_at_mut(synth).patterns[slot as usize].steps[step],
                     value,
                 );
                 Edit::SynthStep {
@@ -507,7 +508,7 @@ impl Document {
                 slot,
                 length,
             } => {
-                let pat = &mut p.synths[synth].patterns[slot as usize];
+                let pat = &mut p.synth_at_mut(synth).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::SynthLength {
                     synth,
@@ -520,7 +521,7 @@ impl Document {
                 slot,
                 transpose,
             } => {
-                let pat = &mut p.synths[synth].patterns[slot as usize];
+                let pat = &mut p.synth_at_mut(synth).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.transpose, transpose.clamp(-12, 12));
                 Edit::SynthTranspose {
                     synth,
@@ -537,7 +538,8 @@ impl Document {
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 pattern.transpose = pattern.transpose.clamp(-12, 12);
                 debug_assert!(pattern.is_well_formed(), "malformed synth pattern");
-                let old = std::mem::replace(&mut p.synths[synth].patterns[slot as usize], pattern);
+                let old =
+                    std::mem::replace(&mut p.synth_at_mut(synth).patterns[slot as usize], pattern);
                 Edit::SynthPattern {
                     synth,
                     slot,
@@ -552,7 +554,7 @@ impl Document {
                 hit,
             } => {
                 let old = std::mem::replace(
-                    &mut p.drums[kit].patterns[slot as usize].steps[step][inst],
+                    &mut p.kit_at_mut(kit).patterns[slot as usize].steps[step][inst],
                     hit,
                 );
                 Edit::DrumHit {
@@ -564,7 +566,7 @@ impl Document {
                 }
             }
             Edit::DrumLength { kit, slot, length } => {
-                let pat = &mut p.drums[kit].patterns[slot as usize];
+                let pat = &mut p.kit_at_mut(kit).patterns[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::DrumLength {
                     kit,
@@ -576,7 +578,8 @@ impl Document {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 debug_assert!(pattern.is_well_formed(), "malformed drum pattern");
-                let old = std::mem::replace(&mut p.drums[kit].patterns[slot as usize], pattern);
+                let old =
+                    std::mem::replace(&mut p.kit_at_mut(kit).patterns[slot as usize], pattern);
                 Edit::DrumPattern {
                     kit,
                     slot,
@@ -591,7 +594,7 @@ impl Document {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 debug_assert!(pattern.is_well_formed(), "malformed note pattern");
-                let pats = p.note_patterns_mut(machine).expect("note machine");
+                let pats = p.notes_at_mut(machine).expect("note machine");
                 let old = std::mem::replace(&mut pats[slot as usize], pattern);
                 Edit::NotePattern {
                     machine,
@@ -604,7 +607,7 @@ impl Document {
                 slot,
                 length,
             } => {
-                let pat = &mut p.note_patterns_mut(machine).expect("note machine")[slot as usize];
+                let pat = &mut p.notes_at_mut(machine).expect("note machine")[slot as usize];
                 let old = std::mem::replace(&mut pat.length, length.clamp(1, STEPS as u8));
                 Edit::NoteLength {
                     machine,
@@ -618,18 +621,18 @@ impl Document {
             }
             Edit::View { synth, view } => Edit::View {
                 synth,
-                view: std::mem::replace(&mut p.synths[synth].view, view),
+                view: std::mem::replace(&mut p.synth_at_mut(synth).view, view),
             },
             Edit::Song { song } => Edit::Song {
                 song: Box::new(std::mem::replace(&mut p.song, *song)),
             },
             Edit::FmVoice { name, values } => {
-                let old_name = std::mem::replace(&mut p.fm.voice_name, name);
+                let old_name = std::mem::replace(&mut p.fm_machine_mut().voice_name, name);
                 let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
                         let old = p.param(id);
-                        p.params.insert(id, v.clamp(0.0, 1.0));
+                        p.set_param(id, v.clamp(0.0, 1.0));
                         (id, old)
                     })
                     .collect();
@@ -641,12 +644,13 @@ impl Document {
                 }
             }
             Edit::SamplerSlot { slot, data, values } => {
-                let old = std::mem::replace(&mut p.sampler.slots[slot], data.map(|d| *d));
+                let old =
+                    std::mem::replace(&mut p.sampler_machine_mut().slots[slot], data.map(|d| *d));
                 let mut old_values: Vec<_> = values
                     .into_iter()
                     .map(|(id, v)| {
                         let before = p.param(id);
-                        p.params.insert(id, v.clamp(0.0, 1.0));
+                        p.set_param(id, v.clamp(0.0, 1.0));
                         (id, before)
                     })
                     .collect();
@@ -657,7 +661,7 @@ impl Document {
                     values: old_values,
                 }
             }
-            Edit::SlotMeta { slot, meta } => match p.sampler.slots[slot].as_mut() {
+            Edit::SlotMeta { slot, meta } => match p.sampler_machine_mut().slots[slot].as_mut() {
                 Some(d) => Edit::SlotMeta {
                     slot,
                     meta: Box::new(std::mem::replace(&mut d.meta, *meta)),
@@ -665,7 +669,7 @@ impl Document {
                 None => Edit::SlotMeta { slot, meta },
             },
             Edit::FmBank { bank } => Edit::FmBank {
-                bank: std::mem::replace(&mut p.fm.bank, bank),
+                bank: std::mem::replace(&mut p.fm_machine_mut().bank, bank),
             },
             Edit::Group(edits) => {
                 let mut inverses: Vec<Edit> =
@@ -687,7 +691,7 @@ impl Document {
             | Edit::SynthPattern { synth, slot, .. } => vec![Command::SynthPattern {
                 synth: *synth as u8,
                 slot: *slot,
-                pattern: Box::new(p.synths[*synth].patterns[*slot as usize].clone()),
+                pattern: Box::new(p.synth_at(*synth).patterns[*slot as usize].clone()),
             }],
             Edit::DrumHit { kit, slot, .. }
             | Edit::DrumLength { kit, slot, .. }
@@ -695,7 +699,7 @@ impl Document {
                 vec![Command::DrumPattern {
                     kit: *kit as u8,
                     slot: *slot,
-                    pattern: Box::new(p.drums[*kit].patterns[*slot as usize].clone()),
+                    pattern: Box::new(p.kit_at(*kit).patterns[*slot as usize].clone()),
                 }]
             }
             Edit::NotePattern { machine, slot, .. } | Edit::NoteLength { machine, slot, .. } => {
@@ -703,7 +707,7 @@ impl Document {
                     machine: *machine as u8,
                     slot: *slot,
                     pattern: Box::new(
-                        p.note_patterns(*machine).expect("note machine")[*slot as usize].clone(),
+                        p.notes_at(*machine).expect("note machine")[*slot as usize].clone(),
                     ),
                 }]
             }
@@ -717,7 +721,7 @@ impl Document {
                 .collect(),
             Edit::FmBank { .. } => Vec::new(),
             Edit::SamplerSlot { slot, values, .. } => {
-                let data = p.sampler.slots[*slot].as_ref();
+                let data = p.sampler_machine().slots[*slot].as_ref();
                 let mut cmds = vec![
                     Command::SamplerSample {
                         slot: *slot as u8,
@@ -740,7 +744,7 @@ impl Document {
             Edit::SlotMeta { slot, .. } => vec![Command::SamplerPlay {
                 slot: *slot as u8,
                 play: Box::new(
-                    p.sampler.slots[*slot]
+                    p.sampler_machine().slots[*slot]
                         .as_ref()
                         .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
                 ),
@@ -775,12 +779,12 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.fm.voice_name, "BRASS");
+        assert_eq!(d.project.fm_machine().voice_name, "BRASS");
         assert_eq!(d.project.param(alg), 1.0);
         assert_eq!(cmds.len(), 2);
         assert!(cmds.iter().all(|c| matches!(c, Command::SetParam(..))));
         d.undo();
-        assert_eq!(d.project.fm.voice_name, "INIT VOICE");
+        assert_eq!(d.project.fm_machine().voice_name, "INIT VOICE");
         assert_eq!(d.project.param(alg), alg.info().default);
         assert_eq!(d.project.param(lvl), lvl.info().default);
     }
@@ -1036,7 +1040,7 @@ mod tests {
     #[test]
     fn consecutive_merged_pattern_edits_undo_in_one_step() {
         let mut d = doc();
-        let before = d.project.synths[0].patterns[0].clone();
+        let before = d.project.synth_at(0).patterns[0].clone();
         let mut a = before.clone();
         a.length = 3;
         let mut b = a.clone();
@@ -1059,7 +1063,7 @@ mod tests {
         );
         d.end_gesture();
         d.undo();
-        assert_eq!(d.project.synths[0].patterns[0], before);
+        assert_eq!(d.project.synth_at(0).patterns[0], before);
         assert!(!d.can_undo());
     }
 
@@ -1131,7 +1135,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.sampler.patterns[7], p);
+        assert_eq!(d.project.sampler_machine().patterns[7], p);
         assert!(matches!(
             cmds.as_slice(),
             [Command::NotePattern { machine: 5, slot: 7, pattern }] if **pattern == p
@@ -1144,12 +1148,16 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.sampler.patterns[7].length, 64, "clamped");
+        assert_eq!(
+            d.project.sampler_machine().patterns[7].length,
+            64,
+            "clamped"
+        );
         d.undo();
-        assert_eq!(d.project.sampler.patterns[7].length, 16);
+        assert_eq!(d.project.sampler_machine().patterns[7].length, 16);
         d.undo();
-        assert!(d.project.sampler.patterns[7].notes.is_empty());
-        assert!(d.project.fm.patterns[7].notes.is_empty());
+        assert!(d.project.sampler_machine().patterns[7].notes.is_empty());
+        assert!(d.project.fm_machine().patterns[7].notes.is_empty());
     }
 
     #[test]
@@ -1167,7 +1175,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.synths[0].patterns[0].length, 1);
+        assert_eq!(d.project.synth_at(0).patterns[0].length, 1);
         d.apply(
             Edit::Param {
                 id: CUTOFF,
@@ -1189,9 +1197,9 @@ mod tests {
             false,
         );
         assert!(cmds.is_empty());
-        assert_eq!(d.project.synths[1].view, SeqView::PianoRoll);
+        assert_eq!(d.project.synth_at(1).view, SeqView::PianoRoll);
         d.undo();
-        assert_eq!(d.project.synths[1].view, SeqView::Step303);
+        assert_eq!(d.project.synth_at(1).view, SeqView::Step303);
     }
 
     #[test]
@@ -1237,7 +1245,7 @@ mod tests {
     fn select_pattern_marks_dirty_and_commands_engine() {
         let mut d = doc();
         let cmds = d.select_pattern(2, 17);
-        assert_eq!(d.project.selected[2], 17);
+        assert_eq!(d.project.entry_at(2).selected, 17);
         assert!(matches!(
             cmds.as_slice(),
             [Command::SelectPattern {
@@ -1270,7 +1278,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.sampler.slots[2], Some(data));
+        assert_eq!(d.project.sampler_machine().slots[2], Some(data));
         assert!(matches!(
             cmds[0],
             Command::SamplerSample {
@@ -1280,7 +1288,11 @@ mod tests {
         ));
         assert!(matches!(cmds[1], Command::SamplerPlay { slot: 2, .. }));
         assert!(matches!(cmds[2], Command::SetParam(id, v) if id == choke && v == 1.0));
-        let mut meta = d.project.sampler.slots[2].as_ref().unwrap().meta.clone();
+        let mut meta = d.project.sampler_machine().slots[2]
+            .as_ref()
+            .unwrap()
+            .meta
+            .clone();
         meta.slices = vec![0, 300];
         let cmds = d.apply(
             Edit::SlotMeta {
@@ -1293,11 +1305,15 @@ mod tests {
         assert!(matches!(cmds[0], Command::SamplerPlay { slot: 2, .. }));
         d.undo();
         assert_eq!(
-            d.project.sampler.slots[2].as_ref().unwrap().meta.slices,
+            d.project.sampler_machine().slots[2]
+                .as_ref()
+                .unwrap()
+                .meta
+                .slices,
             vec![0, 500]
         );
         d.undo();
-        assert_eq!(d.project.sampler.slots[2], None);
+        assert_eq!(d.project.sampler_machine().slots[2], None);
         assert_eq!(d.project.param(choke), 0.0);
     }
 
@@ -1318,7 +1334,7 @@ mod tests {
         d.apply(Edit::Bpm(1000.0), false);
         d.undo();
         assert!(!d.can_undo(), "the clamped repeat added no step");
-        let step = d.project.synths[0].patterns[0].steps[3];
+        let step = d.project.synth_at(0).patterns[0].steps[3];
         d.apply(
             Edit::SynthStep {
                 synth: 0,
@@ -1331,7 +1347,7 @@ mod tests {
         d.apply(
             Edit::View {
                 synth: 0,
-                view: d.project.synths[0].view,
+                view: d.project.synth_at(0).view,
             },
             false,
         );
@@ -1494,8 +1510,8 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.synths[0].patterns[0].length, 1);
-        assert_eq!(d.project.synths[0].patterns[0].transpose, 12);
+        assert_eq!(d.project.synth_at(0).patterns[0].length, 1);
+        assert_eq!(d.project.synth_at(0).patterns[0].transpose, 12);
         p.length = 200;
         p.transpose = -40;
         d.apply(
@@ -1506,8 +1522,8 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.synths[0].patterns[0].length, STEPS as u8);
-        assert_eq!(d.project.synths[0].patterns[0].transpose, -12);
+        assert_eq!(d.project.synth_at(0).patterns[0].length, STEPS as u8);
+        assert_eq!(d.project.synth_at(0).patterns[0].transpose, -12);
         let drums = DrumPattern {
             length: 0,
             ..Default::default()
@@ -1520,7 +1536,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.drums[1].patterns[2].length, 1);
+        assert_eq!(d.project.kit_at(1).patterns[2].length, 1);
         let notes = NotePattern {
             length: 99,
             ..Default::default()
@@ -1533,7 +1549,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(d.project.fm.patterns[0].length, STEPS as u8);
+        assert_eq!(d.project.fm_machine().patterns[0].length, STEPS as u8);
     }
 
     #[test]
@@ -1603,7 +1619,10 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 3, "only the newest three loads fit");
-        assert!(d.project.sampler.slots[0].is_some(), "oldest loads dropped");
+        assert!(
+            d.project.sampler_machine().slots[0].is_some(),
+            "oldest loads dropped"
+        );
     }
 
     #[test]
@@ -1614,6 +1633,13 @@ mod tests {
         d.apply(slot_load(600), false);
         assert!(d.can_undo());
         d.undo();
-        assert_eq!(d.project.sampler.slots[0].as_ref().unwrap().pcm.len(), 500);
+        assert_eq!(
+            d.project.sampler_machine().slots[0]
+                .as_ref()
+                .unwrap()
+                .pcm
+                .len(),
+            500
+        );
     }
 }

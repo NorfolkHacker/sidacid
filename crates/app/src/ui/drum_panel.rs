@@ -3,6 +3,7 @@
 
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::params::{DrumParam, KitParam, drum_param, kit_param};
 use acid_engine::project::{DrumHit, PatternRef};
 use eframe::egui;
@@ -28,7 +29,7 @@ pub fn cycle_hit(hit: DrumHit) -> DrumHit {
 impl SidAcidApp {
     pub(crate) fn drum_panel(&mut self, ui: &mut egui::Ui, kit: usize) {
         let machine = 2 + kit;
-        let slot = self.doc.project.selected[machine];
+        let slot = self.doc.project.entry_at(machine).selected;
         let title = format!("{} DRUMS   {}", KIT_NAMES[kit], PatternRef(slot).label());
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt(("drums", kit))
@@ -64,7 +65,7 @@ impl SidAcidApp {
                             self.pattern_pads(ui, machine);
                             ui.separator();
                             let mut length =
-                                self.doc.project.drums[kit].patterns[slot as usize].length;
+                                self.doc.project.kit_at(kit).patterns[slot as usize].length;
                             let r = ui.add(
                                 egui::DragValue::new(&mut length)
                                     .range(1..=64)
@@ -99,7 +100,7 @@ impl SidAcidApp {
 
     fn drum_grid(&mut self, ui: &mut egui::Ui, kit: usize, slot: u8) {
         let machine = 2 + kit;
-        let pattern = self.doc.project.drums[kit].patterns[slot as usize].clone();
+        let pattern = self.doc.project.kit_at(kit).patterns[slot as usize].clone();
         let len = pattern.length as usize;
         let playhead = (self.status.playing && self.status.patterns[machine] == slot)
             .then_some(self.status.playhead[machine]);
@@ -159,7 +160,7 @@ impl SidAcidApp {
         inst: usize,
         hit: Option<DrumHit>,
     ) {
-        let current = self.doc.project.drums[kit].patterns[slot as usize].steps[step][inst];
+        let current = self.doc.project.kit_at(kit).patterns[slot as usize].steps[step][inst];
         let hit = hit.unwrap_or_else(|| cycle_hit(current));
         let cmds = self.doc.apply(
             Edit::DrumHit {
@@ -200,7 +201,7 @@ mod tests {
     fn drum_cell_click_cycles_and_undoes() {
         let mut app = app();
         let slot = 5;
-        let hit = |app: &SidAcidApp| app.doc.project.drums[1].patterns[slot as usize].steps[3][2];
+        let hit = |app: &SidAcidApp| app.doc.project.kit_at(1).patterns[slot as usize].steps[3][2];
         assert_eq!(hit(&app), DrumHit::Off);
         app.click_drum_cell(1, slot, 3, 2, None);
         assert_eq!(hit(&app), DrumHit::On);
@@ -220,20 +221,20 @@ mod tests {
     #[test]
     fn drum_length_edits_focus_the_kit() {
         let mut app = app();
-        let slot = app.doc.project.selected[3];
+        let slot = app.doc.project.entry_at(3).selected;
         app.set_drum_length(1, slot, 12, false);
-        assert_eq!(app.doc.project.drums[1].patterns[slot as usize].length, 12);
+        assert_eq!(app.doc.project.kit_at(1).patterns[slot as usize].length, 12);
         assert_eq!(app.view.focus, 3, "copy/paste now acts on the 909");
     }
 
     #[test]
     fn keyboard_drum_length_edits_are_separate_undo_steps() {
         let mut app = app();
-        let slot = app.doc.project.selected[3];
+        let slot = app.doc.project.entry_at(3).selected;
         app.set_drum_length(1, slot, 12, false);
         app.set_drum_length(1, slot, 13, false);
         app.doc.undo();
-        assert_eq!(app.doc.project.drums[1].patterns[slot as usize].length, 12);
+        assert_eq!(app.doc.project.kit_at(1).patterns[slot as usize].length, 12);
     }
 
     #[test]

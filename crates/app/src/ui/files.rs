@@ -3,6 +3,7 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
+use crate::six::SixMachines;
 use acid_engine::host::Command;
 use acid_engine::machine::{MachineKind, kind_of};
 use acid_engine::project::{
@@ -211,8 +212,15 @@ impl SidAcidApp {
         }
         self.doc = doc;
         // An empty imported bank is no bank (the Imported tab stays off).
-        if self.doc.project.fm.bank.as_ref().is_some_and(Vec::is_empty) {
-            self.doc.project.fm.bank = None;
+        if self
+            .doc
+            .project
+            .fm_machine()
+            .bank
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            self.doc.project.fm_machine_mut().bank = None;
         }
         self.view.overwrite = None;
         self.view.writers = [None; 2];
@@ -235,7 +243,7 @@ impl SidAcidApp {
         self.view.song_cursor = 0;
         self.view.song_sel_end = None;
         for m in 0..acid_engine::machine::MACHINES {
-            self.view.bank[m] = self.doc.project.selected[m] / BANK_SIZE as u8;
+            self.view.bank[m] = self.doc.project.entry_at(m).selected / BANK_SIZE as u8;
         }
         self.pending.clear();
         if let Some(audio) = self.audio.as_mut() {
@@ -415,22 +423,22 @@ impl SidAcidApp {
 
     pub(crate) fn copy_pattern(&mut self) {
         let m = self.view.focus;
-        let slot = self.doc.project.selected[m] as usize;
+        let slot = self.doc.project.entry_at(m).selected as usize;
         self.view.clip_text = Some(format!(
             "SidAcid pattern {}",
             PatternRef(slot as u8).label()
         ));
         self.view.clipboard = match kind_of(m) {
             Some(MachineKind::Synth(s)) => Some(Clip::Synth(
-                self.doc.project.synths[s].patterns[slot].clone(),
+                self.doc.project.synth_at(s).patterns[slot].clone(),
             )),
-            Some(MachineKind::Drum(k)) => {
-                Some(Clip::Drum(self.doc.project.drums[k].patterns[slot].clone()))
-            }
+            Some(MachineKind::Drum(k)) => Some(Clip::Drum(
+                self.doc.project.kit_at(k).patterns[slot].clone(),
+            )),
             Some(MachineKind::Notes(_)) => self
                 .doc
                 .project
-                .note_patterns(m)
+                .notes_at(m)
                 .map(|p| Clip::Notes(p[slot].clone())),
             None => None,
         };
@@ -438,7 +446,7 @@ impl SidAcidApp {
 
     pub(crate) fn paste_pattern(&mut self) {
         let m = self.view.focus;
-        let slot = self.doc.project.selected[m];
+        let slot = self.doc.project.entry_at(m).selected;
         let edit = match (&self.view.clipboard, kind_of(m)) {
             (None, _) => return,
             (Some(Clip::Synth(p)), Some(MachineKind::Synth(s))) => Edit::SynthPattern {
@@ -988,21 +996,21 @@ mod tests {
         use acid_engine::fm::sysex::Dx7Voice;
         let voice: Dx7Voice = crate::ui::fm_voices::starter()[3].clone();
         let mut project = Project::default();
-        project.fm.bank = Some(vec![voice.clone()]);
+        project.fm_machine_mut().bank = Some(vec![voice.clone()]);
         let mut app = SidAcidApp::headless(Document::new(project));
         app.view.fm_browser = crate::ui::fm_voices::FmBrowser::Imported;
         run_frames(&mut app, 2);
-        app.load_fm_voice(&app.doc.project.fm.bank.as_ref().unwrap()[0].clone());
-        assert_eq!(app.doc.project.fm.voice_name, voice.name);
+        app.load_fm_voice(&app.doc.project.fm_machine().bank.as_ref().unwrap()[0].clone());
+        assert_eq!(app.doc.project.fm_machine().voice_name, voice.name);
     }
 
     #[test]
     fn an_empty_bank_loads_as_no_bank() {
         let mut project = Project::default();
-        project.fm.bank = Some(Vec::new());
+        project.fm_machine_mut().bank = Some(Vec::new());
         let mut app = app();
         app.load_document(Document::new(project));
-        assert_eq!(app.doc.project.fm.bank, None);
+        assert_eq!(app.doc.project.fm_machine().bank, None);
         assert!(!app.doc.is_dirty());
         run_frames(&mut app, 1);
     }

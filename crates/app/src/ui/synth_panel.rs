@@ -2,6 +2,7 @@
 
 use super::SidAcidApp;
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::params::{SynthParam, synth_param};
 use acid_engine::project::{PatternRef, SeqView};
 use eframe::egui;
@@ -26,7 +27,7 @@ const KNOBS: [(SynthParam, &str); 15] = [
 
 impl SidAcidApp {
     pub(crate) fn synth_panel(&mut self, ui: &mut egui::Ui, synth: usize) {
-        let slot = self.doc.project.selected[synth];
+        let slot = self.doc.project.entry_at(synth).selected;
         let title = format!("SYNTH {}   {}", synth + 1, PatternRef(slot).label());
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt(("synth", synth))
@@ -43,7 +44,7 @@ impl SidAcidApp {
                         ui.horizontal(|ui| {
                             self.pattern_pads(ui, synth);
                             ui.separator();
-                            let pattern = &self.doc.project.synths[synth].patterns[slot as usize];
+                            let pattern = &self.doc.project.synth_at(synth).patterns[slot as usize];
                             let mut length = pattern.length;
                             let mut transpose = pattern.transpose;
                             let r = ui.add(
@@ -69,7 +70,7 @@ impl SidAcidApp {
                                 self.doc.end_gesture();
                             }
                             ui.separator();
-                            let view = self.doc.project.synths[synth].view;
+                            let view = self.doc.project.synth_at(synth).view;
                             for (v, label) in [
                                 (SeqView::Step303, "303"),
                                 (SeqView::PianoRoll, "Piano roll"),
@@ -140,7 +141,7 @@ impl SidAcidApp {
                         }
                     }
                 });
-                match self.doc.project.synths[synth].view {
+                match self.doc.project.synth_at(synth).view {
                     SeqView::Step303 => self.step303(ui, synth),
                     SeqView::PianoRoll => self.piano_roll(ui, synth),
                 }
@@ -209,10 +210,10 @@ impl SidAcidApp {
         seed: u64,
     ) {
         let p = &self.doc.project;
-        let slot = p.selected[synth];
-        let groove = &p.drums[synth].patterns[p.selected[2 + synth] as usize];
+        let slot = p.entry_at(synth).selected;
+        let groove = &p.kit_at(synth).patterns[p.entry_at(2 + synth).selected as usize];
         let pattern = acid_engine::random::randomise_synth(
-            &p.synths[synth].patterns[slot as usize],
+            &p.synth_at(synth).patterns[slot as usize],
             dice,
             groove,
             seed,
@@ -231,8 +232,8 @@ impl SidAcidApp {
 
     pub(crate) fn drum_template(&mut self, kit: usize) {
         let seed = self.next_seed();
-        let slot = self.doc.project.selected[2 + kit];
-        let length = self.doc.project.drums[kit].patterns[slot as usize].length;
+        let slot = self.doc.project.entry_at(2 + kit).selected;
+        let length = self.doc.project.kit_at(kit).patterns[slot as usize].length;
         let pattern = acid_engine::random::drum_template(seed, length);
         let cmds = self.doc.apply(
             crate::document::Edit::DrumPattern {
@@ -252,9 +253,9 @@ impl SidAcidApp {
     }
 
     pub(crate) fn evolve_drums_seeded(&mut self, kit: usize, seed: u64) {
-        let slot = self.doc.project.selected[2 + kit];
+        let slot = self.doc.project.entry_at(2 + kit).selected;
         let pattern = acid_engine::random::evolve_drums(
-            &self.doc.project.drums[kit].patterns[slot as usize],
+            &self.doc.project.kit_at(kit).patterns[slot as usize],
             seed,
         );
         let cmds = self.doc.apply(
@@ -279,28 +280,28 @@ mod tests {
     fn length_and_transpose_edits_focus_the_synth() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.view.focus = 4;
-        let slot = app.doc.project.selected[1];
+        let slot = app.doc.project.entry_at(1).selected;
         app.set_synth_length(1, slot, 7, false);
         assert_eq!(app.view.focus, 1);
         app.view.focus = 4;
         app.set_synth_transpose(1, slot, -3, false);
         assert_eq!(app.view.focus, 1);
-        let p = &app.doc.project.synths[1].patterns[slot as usize];
+        let p = &app.doc.project.synth_at(1).patterns[slot as usize];
         assert_eq!((p.length, p.transpose), (7, -3));
     }
 
     #[test]
     fn keyboard_length_and_transpose_edits_are_separate_undo_steps() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let slot = app.doc.project.selected[0];
-        let before = app.doc.project.synths[0].patterns[slot as usize].clone();
+        let slot = app.doc.project.entry_at(0).selected;
+        let before = app.doc.project.synth_at(0).patterns[slot as usize].clone();
         // Two arrow-key presses (not a drag): two undo steps.
         app.set_synth_length(0, slot, 7, false);
         app.set_synth_length(0, slot, 8, false);
         app.set_synth_transpose(0, slot, 2, false);
         app.set_synth_transpose(0, slot, 3, false);
         app.doc.undo();
-        let p = &app.doc.project.synths[0].patterns[slot as usize];
+        let p = &app.doc.project.synth_at(0).patterns[slot as usize];
         assert_eq!(
             (p.length, p.transpose),
             (8, 2),
@@ -308,7 +309,7 @@ mod tests {
         );
         app.doc.undo();
         app.doc.undo();
-        let p = &app.doc.project.synths[0].patterns[slot as usize];
+        let p = &app.doc.project.synth_at(0).patterns[slot as usize];
         assert_eq!((p.length, p.transpose), (7, before.transpose));
         // A drag (merge) is one step.
         app.doc.undo();
@@ -316,6 +317,6 @@ mod tests {
         app.set_synth_length(0, slot, 10, true);
         app.doc.end_gesture();
         app.doc.undo();
-        assert_eq!(app.doc.project.synths[0].patterns[slot as usize], before);
+        assert_eq!(app.doc.project.synth_at(0).patterns[slot as usize], before);
     }
 }

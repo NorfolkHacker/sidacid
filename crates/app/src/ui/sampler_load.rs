@@ -4,6 +4,7 @@
 
 use super::SidAcidApp;
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::params::{SlotParam, slot_param};
 use acid_engine::sampler::decode::decode;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
@@ -71,7 +72,7 @@ impl SidAcidApp {
                 return;
             }
         };
-        let sampler = &self.doc.project.sampler;
+        let sampler = &self.doc.project.sampler_machine();
         let old = sampler.slots[slot].as_ref().map_or(0, |d| d.memory_bytes());
         if sampler.memory_bytes() - old + decoded.samples.len() * 4 > MEMORY_LIMIT {
             self.view.message =
@@ -152,7 +153,7 @@ impl SidAcidApp {
         if self
             .doc
             .project
-            .sampler
+            .sampler_machine()
             .slots
             .get(slot)
             .is_some_and(Option::is_some)
@@ -175,7 +176,7 @@ impl SidAcidApp {
         let Some(meta) = self
             .doc
             .project
-            .sampler
+            .sampler_machine()
             .slots
             .get(slot)
             .and_then(Option::as_ref)
@@ -206,7 +207,7 @@ impl SidAcidApp {
         merge: bool,
         change: impl FnOnce(&mut SlotMeta),
     ) -> bool {
-        let sampler = &self.doc.project.sampler;
+        let sampler = &self.doc.project.sampler_machine();
         let Some(data) = sampler.slots.get(slot).and_then(Option::as_ref) else {
             return false;
         };

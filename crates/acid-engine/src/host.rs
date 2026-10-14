@@ -609,7 +609,11 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            old_drums.map(|p| **p == crate::demo::demo_project().drums[1].patterns[0]),
+            old_drums.map(|p| **p
+                == crate::demo::demo_project()
+                    .kit(crate::machine::MachineId::Kit909.uid())
+                    .unwrap()
+                    .patterns[0]),
             Some(true),
             "the replaced drum pattern comes back"
         );
@@ -652,10 +656,21 @@ mod tests {
         let id = ParamId::Master(crate::params::MasterParam::Level);
         let mut p = crate::demo::demo_project();
         let bar = crate::project::Bar {
-            patterns: [Some(crate::project::PatternRef(0)); MACHINES],
-            ..Default::default()
+            cells: crate::machine::MachineId::ALL
+                .iter()
+                .map(|m| {
+                    let pattern = Some(crate::project::PatternRef(0));
+                    (
+                        m.uid(),
+                        crate::project::Cell {
+                            pattern,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
         };
-        p.song.bars = vec![bar, bar];
+        p.song.bars = vec![bar.clone(), bar];
         crate::song::write_automation(&mut p.song, id, 0, 31, 0.8);
         let (mut host, mut tx, _rx) = channel(Engine::from_project(SR, &p));
         tx.push(Command::SetMode(Mode::Song)).unwrap();

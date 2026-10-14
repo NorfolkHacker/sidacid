@@ -4,6 +4,7 @@
 
 use acid_engine::engine::Engine;
 use acid_engine::host::{self, Command, Event};
+use acid_engine::machine::MachineId;
 use acid_engine::params::{MasterParam, ParamId, fm_param, sampler_param, slot_param};
 use acid_engine::project::{Bar, Note, NotePattern, PatternRef, Project};
 use acid_engine::sequencer::Mode;
@@ -60,38 +61,52 @@ fn busy_project() -> Project {
     let mut p = acid_engine::demo::demo_project();
     for (i, root) in [48u8, 53, 55, 50].into_iter().enumerate() {
         for third in [0, 4, 7] {
-            p.fm.patterns[0].notes.push(Note {
-                start: i as u16 * 16,
-                len: 14,
-                pitch: root + third,
-                vel: 100,
-            });
+            p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+                .notes
+                .push(Note {
+                    start: i as u16 * 16,
+                    len: 14,
+                    pitch: root + third,
+                    vel: 100,
+                });
         }
     }
     for k in 0..32u16 {
-        p.sampler.patterns[0].notes.push(Note {
-            start: k * 2,
-            len: 1,
-            pitch: 36 + (k % 12) as u8,
-            vel: 90,
-        });
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: k * 2,
+                len: 1,
+                pitch: 36 + (k % 12) as u8,
+                vel: 90,
+            });
     }
     let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
     let slices: Vec<u32> = (0..12).map(|i| i * 3675).collect();
-    p.sampler.slots[0] = Some(acid_engine::sampler::slot::SlotData::new(
-        "Busy",
-        44_100,
-        1,
-        &tone,
-        acid_engine::sampler::slot::SlotMeta::sliced(36, slices, 120.0, 44_100),
-    ));
-    p.params
-        .insert(slot_param(0, acid_engine::params::SlotParam::Choke), 1.0);
-    p.params
-        .insert(sampler_param(acid_engine::params::SamplerParam::Grit), 1.0);
+    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+        Some(acid_engine::sampler::slot::SlotData::new(
+            "Busy",
+            44_100,
+            1,
+            &tone,
+            acid_engine::sampler::slot::SlotMeta::sliced(36, slices, 120.0, 44_100),
+        ));
+    p.set_param(slot_param(0, acid_engine::params::SlotParam::Choke), 1.0);
+    p.set_param(sampler_param(acid_engine::params::SamplerParam::Grit), 1.0);
     let bar = Bar {
-        patterns: [Some(PatternRef(0)); acid_engine::machine::MACHINES],
-        ..Bar::default()
+        cells: MachineId::ALL
+            .iter()
+            .map(|m| {
+                let pattern = Some(PatternRef(0));
+                (
+                    m.uid(),
+                    acid_engine::project::Cell {
+                        pattern,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
     };
     p.song.bars = vec![bar; 4];
     p.song.loop_range = Some((0, 3));
@@ -167,7 +182,8 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
     meta.loop_on = true;
     meta.loop_start = 10_000;
     meta.loop_end = 30_000;
-    p.sampler.slots[0] = Some(SlotData::new("Pad", 44_100, 1, &tone, meta.clone()));
+    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+        Some(SlotData::new("Pad", 44_100, 1, &tone, meta.clone()));
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
     meta.loop_end = 20_000;
@@ -194,10 +210,12 @@ fn a_steal_by_a_note_shorter_than_its_fade_does_not_allocate() {
     let mut p = Project::default();
     let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
     let pad = SlotMeta::chromatic(36, 59, 48, 44_100);
-    p.sampler.slots[0] = Some(SlotData::new("Pad", 44_100, 1, &tone, pad));
+    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] =
+        Some(SlotData::new("Pad", 44_100, 1, &tone, pad));
     // Key 60 plays a 20-frame slice, well inside the 2 ms steal fade.
     let tick = SlotMeta::sliced(60, vec![0, 20], 120.0, 44_100);
-    p.sampler.slots[1] = Some(SlotData::new("Tick", 44_100, 1, &tone, tick));
+    p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[1] =
+        Some(SlotData::new("Tick", 44_100, 1, &tone, tick));
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
     let n = count_allocs(|| {

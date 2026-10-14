@@ -8,6 +8,7 @@ use super::step_edit::{
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
+use crate::six::SixMachines;
 use acid_engine::project::Gate;
 use eframe::egui;
 
@@ -43,7 +44,7 @@ impl SidAcidApp {
         now: f64,
     ) {
         for (step, op) in ops {
-            let current = self.doc.project.synths[synth].patterns[slot as usize].steps[step];
+            let current = self.doc.project.synth_at(synth).patterns[slot as usize].steps[step];
             let (value, scroll) = match op {
                 StepOp::Toggle(row) => (toggle_row(row, current), false),
                 StepOp::Nudge(n) => (nudge_note(current, n), true),
@@ -75,8 +76,8 @@ impl SidAcidApp {
     }
 
     pub(crate) fn step303(&mut self, ui: &mut egui::Ui, synth: usize) {
-        let slot = self.doc.project.selected[synth];
-        let pattern = self.doc.project.synths[synth].patterns[slot as usize].clone();
+        let slot = self.doc.project.entry_at(synth).selected;
+        let pattern = self.doc.project.synth_at(synth).patterns[slot as usize].clone();
         let len = pattern.length as usize;
         let playhead = (self.status.playing && self.status.patterns[synth] == slot)
             .then_some(self.status.playhead[synth]);
@@ -167,7 +168,7 @@ impl SidAcidApp {
     /// Feeds key presses to the active step-writer, if any.
     pub(crate) fn handle_step_write(&mut self, ctx: &egui::Context) {
         for s in 0..2 {
-            if self.doc.project.synths[s].view != acid_engine::project::SeqView::Step303 {
+            if self.doc.project.synth_at(s).view != acid_engine::project::SeqView::Step303 {
                 self.view.writers[s] = None;
             }
         }
@@ -199,13 +200,13 @@ impl SidAcidApp {
             let Some(write_key) = key_to_write(key) else {
                 continue;
             };
-            let slot = self.doc.project.selected[synth];
+            let slot = self.doc.project.entry_at(synth).selected;
             let Some(mut writer) = self.view.writers[synth] else {
                 return;
             };
             let action = writer.handle(
                 write_key,
-                &self.doc.project.synths[synth].patterns[slot as usize],
+                &self.doc.project.synth_at(synth).patterns[slot as usize],
             );
             match action {
                 WriteAction::Set { step, value } => {
@@ -280,15 +281,15 @@ mod tests {
     #[test]
     fn a_gate_click_and_a_scroll_on_one_step_in_one_frame_keep_both() {
         let mut app = app();
-        let slot = app.doc.project.selected[0];
-        let before = app.doc.project.synths[0].patterns[slot as usize].steps[2];
+        let slot = app.doc.project.entry_at(0).selected;
+        let before = app.doc.project.synth_at(0).patterns[slot as usize].steps[2];
         app.apply_step_ops(
             0,
             slot,
             vec![(2, StepOp::Toggle(5)), (2, StepOp::Nudge(1))],
             0.0,
         );
-        let after = app.doc.project.synths[0].patterns[slot as usize].steps[2];
+        let after = app.doc.project.synth_at(0).patterns[slot as usize].steps[2];
         assert_eq!(
             after.gate,
             super::super::step_edit::cycle_gate(before.gate),

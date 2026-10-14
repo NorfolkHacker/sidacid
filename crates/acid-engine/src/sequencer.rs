@@ -316,16 +316,20 @@ impl Sequencer {
             let t = &mut self.tracks[m];
             t.step = 0;
             t.pos = 0;
-            match bar.patterns[m] {
+            let machine = MachineId::ALL[m];
+            let cell = bar.cell(machine.uid());
+            match cell.pattern {
                 Some(PatternRef(slot)) if (slot as usize) < bank_len => {
                     t.pattern = slot;
-                    t.silent = bar.mutes[m];
+                    t.silent = cell.mute;
                 }
                 _ => t.silent = true,
             }
-            t.transpose_add = MachineId::ALL[m]
-                .transpose_index()
-                .map_or(0, |i| bar.transpose[i]);
+            t.transpose_add = if machine.machine_type().transposes() {
+                cell.transpose
+            } else {
+                0
+            };
         }
         true
     }
@@ -1125,14 +1129,11 @@ mod tests {
     }
 
     fn song_bar(refs: [Option<u8>; 4]) -> crate::project::Bar {
-        let mut patterns = [None; crate::machine::MACHINES];
+        let mut bar = crate::project::Bar::default();
         for (m, r) in refs.into_iter().enumerate() {
-            patterns[m] = r.map(crate::project::PatternRef);
+            bar.cell_mut(MachineId::ALL[m].uid()).pattern = r.map(crate::project::PatternRef);
         }
-        crate::project::Bar {
-            patterns,
-            ..Default::default()
-        }
+        bar
     }
 
     fn notes(ev: &[(usize, SeqEvent)]) -> Vec<(usize, u8)> {
@@ -1191,9 +1192,9 @@ mod tests {
         f.synths[0][0].steps[0] = on(0);
         f.drums[0][0].steps[0][0] = DrumHit::On;
         let mut muted = song_bar([None, None, Some(0), None]);
-        muted.mutes[2] = true;
+        muted.cell_mut(MachineId::Kit808.uid()).mute = true;
         let mut lifted = song_bar([Some(0), None, Some(0), None]);
-        lifted.transpose[0] = 5;
+        lifted.cell_mut(MachineId::Synth1.uid()).transpose = 5;
         f.song.bars = vec![muted, lifted];
         let mut s = song_seq();
         s.play();
@@ -1632,10 +1633,11 @@ mod tests {
         f.notes[0][0].notes.push(note(0, 4, 60));
         f.notes[1][0].notes.push(note(0, 4, 60));
         let mut bar = song_bar([None; 4]);
-        bar.patterns[4] = Some(PatternRef(0));
-        bar.patterns[5] = Some(PatternRef(0));
-        bar.mutes[5] = true;
-        bar.transpose[2] = 3;
+        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(PatternRef(0));
+        let sampler = bar.cell_mut(MachineId::Sampler.uid());
+        sampler.pattern = Some(PatternRef(0));
+        sampler.mute = true;
+        bar.cell_mut(MachineId::Fm.uid()).transpose = 3;
         f.song.bars = vec![bar];
         let mut s = new_seq();
         s.set_mode(Mode::Song);
@@ -1659,7 +1661,7 @@ mod tests {
         let mut f = Fixture::new();
         f.notes[0][0].notes.push(note(0, 64, 60));
         let mut bar = song_bar([None; 4]);
-        bar.patterns[4] = Some(PatternRef(0));
+        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(PatternRef(0));
         f.song.bars = vec![bar];
         let mut s = new_seq();
         s.set_mode(Mode::Song);

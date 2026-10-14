@@ -181,16 +181,27 @@ impl Engine {
     /// Not real-time safe (clones patterns); call while stopped or from
     /// a non-audio thread before handing the engine to the audio thread.
     pub fn load_project(&mut self, p: &Project) {
+        let synths = [MachineId::Synth1, MachineId::Synth2];
+        let kits = [MachineId::Kit808, MachineId::Kit909];
         for s in 0..2 {
-            self.synth_patterns[s] = p.synths[s].patterns.clone();
-            self.drum_patterns[s] = p.drums[s].patterns.clone();
+            if let Some(m) = p.synth(synths[s].uid()) {
+                self.synth_patterns[s] = m.patterns.clone();
+            }
+            if let Some(m) = p.kit(kits[s].uid()) {
+                self.drum_patterns[s] = m.patterns.clone();
+            }
         }
-        self.note_patterns = [p.fm.patterns.clone(), p.sampler.patterns.clone()];
+        for (n, m) in [MachineId::Fm, MachineId::Sampler].into_iter().enumerate() {
+            if let Some(pats) = p.note_patterns(m.uid()) {
+                self.note_patterns[n] = pats.clone();
+            }
+        }
         for id in flat_ids() {
             self.set_param(id, p.param(id));
         }
+        let slots = p.sampler(MachineId::Sampler.uid()).map(|s| &s.slots);
         for i in 0..SLOTS {
-            let data = p.sampler.slots.get(i).and_then(Option::as_ref);
+            let data = slots.and_then(|s| s.get(i)).and_then(Option::as_ref);
             let mut sample = data.map(|d| Arc::new(d.to_sample()));
             self.sampler.swap_sample(i, &mut sample);
             let mut play = data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta));
@@ -199,8 +210,10 @@ impl Engine {
         self.song = p.song.clone();
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
-        for (m, &slot) in p.selected.iter().enumerate() {
-            self.seq.select(m, slot);
+        for m in MachineId::ALL {
+            if let Some(e) = p.machine(m.uid()) {
+                self.seq.select(m.index(), e.selected);
+            }
         }
     }
 
@@ -394,8 +407,8 @@ impl Engine {
         let refs_ok = song
             .bars
             .iter()
-            .flat_map(|b| b.patterns)
-            .flatten()
+            .flat_map(|b| &b.cells)
+            .filter_map(|(_, c)| c.pattern)
             .all(|r| (r.0 as usize) < PATTERNS);
         let lanes_ok = song.automation.len() <= FLAT_COUNT
             && song
@@ -711,18 +724,17 @@ mod tests {
         use crate::project::Note;
         use crate::sampler::slot::SlotMeta;
         let mut p = Project::default();
-        p.sampler.slots[0] = Some(tone_slot(SlotMeta::sliced(
-            36,
-            vec![0, 11_025, 22_050, 33_075],
-            120.0,
-            44_100,
-        )));
-        p.sampler.patterns[0].notes.push(Note {
-            start: 0,
-            len: 4,
-            pitch: 37,
-            vel: 120,
-        });
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(
+            SlotMeta::sliced(36, vec![0, 11_025, 22_050, 33_075], 120.0, 44_100),
+        ));
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 4,
+                pitch: 37,
+                vel: 120,
+            });
         p
     }
 
@@ -760,9 +772,8 @@ mod tests {
         meta.loop_on = true;
         meta.loop_start = 10_000;
         meta.loop_end = 30_000;
-        p.sampler.slots[0] = Some(tone_slot(meta));
-        p.params
-            .insert(slot_param(0, crate::params::SlotParam::Release), 1.0);
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(meta));
+        p.set_param(slot_param(0, crate::params::SlotParam::Release), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.note_on(5, 60, 100);
         render(&mut e, 0.1);
@@ -775,9 +786,9 @@ mod tests {
     /// A project whose sampler slot 0 holds a chromatic tone (keys 36..=96).
     fn tone_slot_project() -> Project {
         let mut p = Project::default();
-        p.sampler.slots[0] = Some(tone_slot(crate::sampler::slot::SlotMeta::chromatic(
-            36, 96, 60, 44_100,
-        )));
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(
+            crate::sampler::slot::SlotMeta::chromatic(36, 96, 60, 44_100),
+        ));
         p
     }
 
@@ -785,18 +796,22 @@ mod tests {
     fn note_patterns_play_on_their_own_channels() {
         use crate::project::Note;
         let mut p = tone_slot_project();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 32,
-            pitch: 60,
-            vel: 120,
-        });
-        p.sampler.patterns[0].notes.push(Note {
-            start: 0,
-            len: 32,
-            pitch: 72,
-            vel: 120,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 32,
+                pitch: 60,
+                vel: 120,
+            });
+        p.sampler_mut(MachineId::Sampler.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 32,
+                pitch: 72,
+                vel: 120,
+            });
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.5);
@@ -826,12 +841,14 @@ mod tests {
     fn stop_releases_note_machines() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 64,
-            pitch: 60,
-            vel: 120,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 64,
+                pitch: 60,
+                vel: 120,
+            });
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.2);
@@ -846,7 +863,7 @@ mod tests {
         use crate::params::OpParam;
         let mut p = Project::default();
         // OP1's L4 at full: a released note keeps sounding.
-        p.params.insert(fm_op_param(0, OpParam::L4), 1.0);
+        p.set_param(fm_op_param(0, OpParam::L4), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         e.note_on(4, 60, 100);
@@ -868,12 +885,14 @@ mod tests {
     fn restarting_play_releases_held_notes() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 64,
-            pitch: 60,
-            vel: 120,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 64,
+                pitch: 60,
+                vel: 120,
+            });
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.2);
@@ -889,13 +908,15 @@ mod tests {
     fn deleting_a_sounding_note_while_playing_releases_it() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].length = 64;
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 8,
-            pitch: 60,
-            vel: 120,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0].length = 64;
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 8,
+                pitch: 60,
+                vel: 120,
+            });
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.1);
@@ -917,13 +938,15 @@ mod tests {
         use crate::params::FmParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 32,
-            pitch: 60,
-            vel: 120,
-        });
-        p.params.insert(fm_param(FmParam::Volume), 0.0);
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 32,
+                pitch: 60,
+                vel: 120,
+            });
+        p.set_param(fm_param(FmParam::Volume), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -1103,7 +1126,11 @@ mod tests {
     fn lane_value_overrides_only_its_step() {
         use crate::project::ParamLane;
         let mut e = demo_engine();
-        let mut p = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let mut p = crate::demo::demo_project()
+            .synth(MachineId::Synth1.uid())
+            .unwrap()
+            .patterns[0]
+            .clone();
         let mut values = vec![None; 64];
         values[0] = Some(0.0);
         p.param_lane = Some(ParamLane {
@@ -1203,7 +1230,11 @@ mod tests {
     fn stop_restores_knobs_overridden_by_a_lane() {
         use crate::project::ParamLane;
         let mut e = demo_engine();
-        let mut p = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let mut p = crate::demo::demo_project()
+            .synth(MachineId::Synth1.uid())
+            .unwrap()
+            .patterns[0]
+            .clone();
         p.param_lane = Some(ParamLane {
             param: ParamId::Master(MasterParam::Level),
             values: vec![Some(0.0); 64],
@@ -1215,7 +1246,11 @@ mod tests {
         e.set_synth_pattern(
             0,
             0,
-            crate::demo::demo_project().synths[0].patterns[0].clone(),
+            crate::demo::demo_project()
+                .synth(MachineId::Synth1.uid())
+                .unwrap()
+                .patterns[0]
+                .clone(),
         );
         e.play();
         let (l, _) = render(&mut e, 1.0);
@@ -1225,10 +1260,21 @@ mod tests {
     fn two_bar_demo() -> Project {
         let mut p = crate::demo::demo_project();
         let bar = crate::project::Bar {
-            patterns: [Some(crate::project::PatternRef(0)); crate::machine::MACHINES],
-            ..Default::default()
+            cells: crate::machine::MachineId::ALL
+                .iter()
+                .map(|m| {
+                    let pattern = Some(crate::project::PatternRef(0));
+                    (
+                        m.uid(),
+                        crate::project::Cell {
+                            pattern,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
         };
-        p.song.bars = vec![bar, bar];
+        p.song.bars = vec![bar.clone(), bar];
         p
     }
 
@@ -1336,7 +1382,11 @@ mod tests {
     #[test]
     fn swapping_the_song_mid_bar_resyncs_the_position() {
         let mut e = Engine::from_project(SR, &two_bar_demo());
-        let mut long = crate::demo::demo_project().synths[0].patterns[0].clone();
+        let mut long = crate::demo::demo_project()
+            .synth(MachineId::Synth1.uid())
+            .unwrap()
+            .patterns[0]
+            .clone();
         long.length = 32;
         e.set_synth_pattern(0, 7, long);
         e.set_mode(crate::sequencer::Mode::Song);
@@ -1351,7 +1401,8 @@ mod tests {
         }
         assert_eq!((e.song_bar(), e.song_step()), (1, 19));
         let mut song = two_bar_demo().song;
-        song.bars[0].patterns[0] = Some(crate::project::PatternRef(7));
+        song.bars[0].cell_mut(MachineId::Synth1.uid()).pattern =
+            Some(crate::project::PatternRef(7));
         assert!(e.swap_song(&mut song));
         for _ in 0..10_000 {
             if e.song_step() > 20 {
@@ -1404,12 +1455,14 @@ mod tests {
     fn audition_survives_a_pattern_release_of_the_same_pitch() {
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 4,
-            pitch: 60,
-            vel: 100,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 4,
+                pitch: 60,
+                vel: 100,
+            });
         let mut held = Engine::from_project(SR, &p);
         held.play();
         held.note_on(4, 60, 100);
@@ -1429,13 +1482,15 @@ mod tests {
         use crate::params::OpParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 32,
-            pitch: 60,
-            vel: 120,
-        });
-        p.params.insert(fm_op_param(0, OpParam::Level), 0.0);
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 32,
+                pitch: 60,
+                vel: 120,
+            });
+        p.set_param(fm_op_param(0, OpParam::Level), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
         let (l, _) = render(&mut e, 0.3);
@@ -1450,15 +1505,17 @@ mod tests {
         use crate::params::{FmParam, OpParam};
         use crate::project::Note;
         let mut p = Project::default();
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 32,
-            pitch: 57,
-            vel: 120,
-        });
-        p.params.insert(fm_op_param(1, OpParam::Level), 0.9);
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 32,
+                pitch: 57,
+                vel: 120,
+            });
+        p.set_param(fm_op_param(1, OpParam::Level), 0.9);
         let mut a = Engine::from_project(SR, &p);
-        p.params.insert(fm_param(FmParam::Algorithm), 1.0);
+        p.set_param(fm_param(FmParam::Algorithm), 1.0);
         let mut b = Engine::from_project(SR, &p);
         a.play();
         b.play();
@@ -1514,7 +1571,7 @@ mod tests {
     #[test]
     fn fm_mono_play_keeps_the_audition_and_forgets_pattern_keys() {
         let mut p = tone_slot_project();
-        p.params.insert(fm_param(crate::params::FmParam::Mono), 1.0);
+        p.set_param(fm_param(crate::params::FmParam::Mono), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.poly_on(4, 48, 100, false);
         e.note_on(4, 72, 100);
@@ -1533,15 +1590,17 @@ mod tests {
         use crate::params::OpParam;
         use crate::project::Note;
         let mut p = Project::default();
-        p.params.insert(fm_op_param(0, OpParam::L4), 1.0);
-        p.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 8,
-            pitch: 60,
-            vel: 120,
-        });
+        p.set_param(fm_op_param(0, OpParam::L4), 1.0);
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 8,
+                pitch: 60,
+                vel: 120,
+            });
         let mut bar = crate::project::Bar::default();
-        bar.patterns[MachineId::Fm.index()] = Some(crate::project::PatternRef(0));
+        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];
         p
     }

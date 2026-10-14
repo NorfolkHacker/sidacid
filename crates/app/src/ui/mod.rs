@@ -551,6 +551,8 @@ pub(crate) fn run_frames_in(ctx: &egui::Context, app: &mut SidAcidApp, frames: u
 
 #[cfg(test)]
 mod tests {
+    use crate::six::SixMachines;
+
     #[test]
     fn a_failed_open_retries_the_default_with_a_notice() {
         use crate::audio_select::Choice;
@@ -617,19 +619,19 @@ mod tests {
         let before = app.doc.project.clone();
         app.randomise_synth(0, acid_engine::random::Dice::ALL);
         assert_ne!(
-            app.doc.project.synths[0].patterns[0],
-            before.synths[0].patterns[0]
+            app.doc.project.synth_at(0).patterns[0],
+            before.synth_at(0).patterns[0]
         );
         app.doc.undo();
         assert_eq!(app.doc.project, before);
         app.drum_template(1);
         assert_ne!(
-            app.doc.project.drums[1].patterns[0],
-            before.drums[1].patterns[0]
+            app.doc.project.kit_at(1).patterns[0],
+            before.kit_at(1).patterns[0]
         );
         app.doc.undo();
         // Evolve leaves some seeds' patterns as they were: use one that changes it.
-        let groove = &before.drums[0].patterns[before.selected[2] as usize];
+        let groove = &before.kit_at(0).patterns[before.entry_at(2).selected as usize];
         let seed = (0..100)
             .find(|&s| acid_engine::random::evolve_drums(groove, s) != *groove)
             .expect("some seed evolves the groove");
@@ -650,22 +652,22 @@ mod tests {
             rest: true,
             ..Dice::default()
         };
-        let slot = p.selected[1] as usize;
+        let slot = p.entry_at(1).selected as usize;
         let expected = acid_engine::random::randomise_synth(
-            &p.synths[1].patterns[slot],
+            &p.synth_at(1).patterns[slot],
             rest,
-            &p.drums[1].patterns[3],
+            &p.kit_at(1).patterns[3],
             42,
         );
         let other_groove = acid_engine::random::randomise_synth(
-            &p.synths[1].patterns[slot],
+            &p.synth_at(1).patterns[slot],
             rest,
-            &p.drums[0].patterns[p.selected[2] as usize],
+            &p.kit_at(0).patterns[p.entry_at(2).selected as usize],
             42,
         );
         assert_ne!(expected, other_groove, "the groove matters for this seed");
         app.randomise_synth_seeded(1, rest, 42);
-        assert_eq!(app.doc.project.synths[1].patterns[slot], expected);
+        assert_eq!(app.doc.project.synth_at(1).patterns[slot], expected);
     }
 
     #[test]
@@ -1038,7 +1040,11 @@ mod tests {
             .song
             .bars
             .iter()
-            .map(|b| b.patterns[0].map(|r| r.0))
+            .map(|b| {
+                b.cell(acid_engine::machine::MachineId::Synth1.uid())
+                    .pattern
+                    .map(|r| r.0)
+            })
             .collect();
         assert_eq!(refs, vec![None, Some(9), Some(9), Some(9)]);
     }
@@ -1140,7 +1146,7 @@ mod tests {
     #[test]
     fn piano_roll_view_draws_headless() {
         let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.synths[0].view = acid_engine::project::SeqView::PianoRoll;
+        doc.project.synth_at_mut(0).view = acid_engine::project::SeqView::PianoRoll;
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 2);
     }
@@ -1149,19 +1155,21 @@ mod tests {
     fn note_panels_and_poly_rolls_draw_headless() {
         use acid_engine::project::Note;
         let mut doc = Document::new(Project::default());
-        doc.project.fm.patterns[0].notes.push(Note {
+        doc.project.fm_machine_mut().patterns[0].notes.push(Note {
             start: 0,
             len: 8,
             pitch: 60,
             vel: 100,
         });
-        doc.project.sampler.patterns[0].notes.push(Note {
-            start: 4,
-            len: 300,
-            pitch: 36,
-            vel: 20,
-        });
-        doc.project.sampler.patterns[0].length = 4;
+        doc.project.sampler_machine_mut().patterns[0]
+            .notes
+            .push(Note {
+                start: 4,
+                len: 300,
+                pitch: 36,
+                vel: 20,
+            });
+        doc.project.sampler_machine_mut().patterns[0].length = 4;
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 3);
         assert!(app.view.poly_scrolled.iter().all(|s| *s));
@@ -1215,16 +1223,16 @@ mod tests {
         app.view.focus = 0;
         app.copy_pattern();
         app.view.focus = 1;
-        app.doc.project.selected[1] = 9;
+        app.doc.project.entry_at_mut(1).selected = 9;
         app.paste_pattern();
         assert_eq!(
-            app.doc.project.synths[1].patterns[9],
-            app.doc.project.synths[0].patterns[0]
+            app.doc.project.synth_at(1).patterns[9],
+            app.doc.project.synth_at(0).patterns[0]
         );
         let cmds = app.doc.undo();
         app.send(cmds);
         assert!(
-            app.doc.project.synths[1].patterns[9]
+            app.doc.project.synth_at(1).patterns[9]
                 .steps
                 .iter()
                 .all(|s| s.gate == Gate::Off)
@@ -1235,19 +1243,25 @@ mod tests {
     fn note_patterns_copy_between_fm_and_sampler_but_not_onto_synths() {
         use acid_engine::project::Note;
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.doc.project.fm.patterns[0].notes.push(Note {
-            start: 0,
-            len: 4,
-            pitch: 60,
-            vel: 100,
-        });
+        app.doc.project.fm_machine_mut().patterns[0]
+            .notes
+            .push(Note {
+                start: 0,
+                len: 4,
+                pitch: 60,
+                vel: 100,
+            });
         app.view.focus = 4;
         app.copy_pattern();
         app.view.focus = 5;
         app.paste_pattern();
-        assert_eq!(app.doc.project.sampler.patterns[0].notes.len(), 1);
+        assert_eq!(app.doc.project.sampler_machine().patterns[0].notes.len(), 1);
         app.doc.undo();
-        assert!(app.doc.project.sampler.patterns[0].notes.is_empty());
+        assert!(
+            app.doc.project.sampler_machine().patterns[0]
+                .notes
+                .is_empty()
+        );
         app.view.focus = 0;
         assert!(app.view.message.is_none());
         let before = app.doc.project.clone();
@@ -1357,10 +1371,10 @@ mod tests {
             open,
         ));
         app.view.scroll_accum = [12.0; 2];
-        let project = acid_engine::project::Project {
-            selected: [17, 33, 0, 127, 0, 0],
-            ..Default::default()
-        };
+        let mut project = acid_engine::project::Project::default();
+        for (m, s) in [17, 33, 0, 127, 0, 0].into_iter().enumerate() {
+            project.entry_at_mut(m).selected = s;
+        }
         app.load_document(Document::new(project));
         assert_eq!(app.view.bank, [1, 2, 0, 7, 0, 0]);
         assert!(app.view.touched_knob.is_none());
@@ -1372,7 +1386,7 @@ mod tests {
     #[test]
     fn step_writer_is_dropped_when_its_synth_leaves_step_view() {
         let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.synths[1].view = acid_engine::project::SeqView::PianoRoll;
+        doc.project.synth_at_mut(1).view = acid_engine::project::SeqView::PianoRoll;
         let mut app = SidAcidApp::headless(doc);
         app.view.writers[1] = Some(step_edit::StepWriter::new(0));
         run_frames(&mut app, 1);
@@ -1417,7 +1431,8 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         let bar = |n: u8| {
             let mut b = Bar::default();
-            b.patterns[0] = Some(PatternRef(n));
+            b.cell_mut(acid_engine::machine::MachineId::Synth1.uid())
+                .pattern = Some(PatternRef(n));
             b
         };
         let mut song = app.doc.project.song.clone();
@@ -1445,8 +1460,11 @@ mod tests {
         );
         assert_eq!(app.doc.project.song.bars[6..], [bar(7), bar(8)]);
         app.song_action(SongAction::Insert, None);
-        let selected = app.doc.project.selected.map(|s| Some(PatternRef(s)));
-        assert_eq!(app.doc.project.song.bars[8].patterns, selected);
+        let bar = &app.doc.project.song.bars[8];
+        for m in acid_engine::machine::MachineId::ALL {
+            let selected = app.doc.project.entry_at(m.index()).selected;
+            assert_eq!(bar.cell(m.uid()).pattern, Some(PatternRef(selected)));
+        }
         app.song_action(SongAction::Loop(0, 2), Some((0, 2)));
         app.song_action(SongAction::NoLoop, None);
         assert_eq!(app.doc.project.song.loop_range, None);
@@ -1467,13 +1485,13 @@ mod tests {
         app.apply_song(song, false);
         let before = app.doc.project.song.clone();
         app.pending.clear();
-        let ti = MachineId::Fm.transpose_index().expect("FM transposes");
+        let fm = MachineId::Fm.uid();
         let mut song = before.clone();
-        song.bars[1].transpose[ti] = 5;
+        song.bars[1].cell_mut(fm).transpose = 5;
         app.apply_song(song, false);
         assert!(matches!(
             app.pending.as_slice(),
-            [Command::Song(s)] if s.bars[1].transpose[ti] == 5
+            [Command::Song(s)] if s.bars[1].cell(fm).transpose == 5
         ));
         app.doc.undo();
         assert_eq!(app.doc.project.song, before);
@@ -1500,9 +1518,16 @@ mod tests {
         app.doc.select_pattern(4, 3);
         app.doc.select_pattern(5, 17);
         app.song_action(song_panel::SongAction::Add, None);
-        let bar = app.doc.project.song.bars[0];
-        assert_eq!(bar.patterns[4], Some(acid_engine::project::PatternRef(3)));
-        assert_eq!(bar.patterns[5], Some(acid_engine::project::PatternRef(17)));
+        let bar = &app.doc.project.song.bars[0];
+        use acid_engine::machine::MachineId;
+        assert_eq!(
+            bar.cell(MachineId::Fm.uid()).pattern,
+            Some(acid_engine::project::PatternRef(3))
+        );
+        assert_eq!(
+            bar.cell(MachineId::Sampler.uid()).pattern,
+            Some(acid_engine::project::PatternRef(17))
+        );
         run_frames(&mut app, 2);
     }
 
@@ -1513,13 +1538,16 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         let bank = fm_voices::starter().to_vec();
         app.import_syx_bytes(&bank_sysex(&bank));
-        assert_eq!(app.doc.project.fm.bank.as_ref().map(Vec::len), Some(32));
+        assert_eq!(
+            app.doc.project.fm_machine().bank.as_ref().map(Vec::len),
+            Some(32)
+        );
         assert_eq!(app.view.fm_browser, fm_voices::FmBrowser::Imported);
         app.doc.undo();
-        assert_eq!(app.doc.project.fm.bank, None);
+        assert_eq!(app.doc.project.fm_machine().bank, None);
 
         app.import_syx_bytes(&single_sysex(&bank[5]));
-        assert_eq!(app.doc.project.fm.voice_name, bank[5].name);
+        assert_eq!(app.doc.project.fm_machine().voice_name, bank[5].name);
         let alg = fm_param(FmParam::Algorithm);
         assert!((app.doc.project.param(alg) - bank[5].algorithm as f32 / 31.0).abs() < 1e-6);
 
@@ -1532,7 +1560,7 @@ mod tests {
     #[test]
     fn fm_panel_draws_headless_with_a_bank_and_each_operator() {
         let mut doc = Document::new(Project::default());
-        doc.project.fm.bank = Some(fm_voices::starter().to_vec());
+        doc.project.fm_machine_mut().bank = Some(fm_voices::starter().to_vec());
         let mut app = SidAcidApp::headless(doc);
         app.view.fm_browser = fm_voices::FmBrowser::Imported;
         for op in 0..6 {
@@ -1579,7 +1607,7 @@ mod tests {
         let mut doc = Document::new(Project::default());
         let mut bank = fm_voices::starter().to_vec();
         bank[1].name = bank[0].name.clone();
-        doc.project.fm.bank = Some(bank.clone());
+        doc.project.fm_machine_mut().bank = Some(bank.clone());
         let mut app = SidAcidApp::headless(doc);
         app.view.fm_browser = fm_voices::FmBrowser::Imported;
         // A grid click left a source behind; a direct load must clear it.
@@ -1597,7 +1625,7 @@ mod tests {
         let mut bank = fm_voices::starter().to_vec();
         bank[2].name = bank[0].name.clone();
         let mut doc = Document::new(Project::default());
-        doc.project.fm.bank = Some(bank.clone());
+        doc.project.fm_machine_mut().bank = Some(bank.clone());
         let mut app = SidAcidApp::headless(doc);
         app.view.fm_browser = fm_voices::FmBrowser::Imported;
         app.load_fm_voice(&bank[0]);
@@ -1677,7 +1705,9 @@ mod tests {
         use acid_engine::sampler::slot::SlotMode;
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         app.load_sample_bytes(0, "Break", Some("wav"), &test_wav(2.0));
-        let slot = app.doc.project.sampler.slots[0].as_ref().expect("loaded");
+        let slot = app.doc.project.sampler_machine().slots[0]
+            .as_ref()
+            .expect("loaded");
         assert_eq!(slot.meta.mode, SlotMode::Slice);
         assert_eq!(slot.meta.base_key, 24);
         assert!(slot.meta.slices.len() >= 2);
@@ -1690,14 +1720,14 @@ mod tests {
         let span = slot.meta.slices.len() as u8;
 
         app.load_sample_bytes(1, "Stab", Some("wav"), &test_wav(0.5));
-        let stab = app.doc.project.sampler.slots[1].as_ref().unwrap();
+        let stab = app.doc.project.sampler_machine().slots[1].as_ref().unwrap();
         assert_eq!(stab.meta.mode, SlotMode::Chromatic);
         assert_eq!(stab.meta.base_key, 24 + span, "placed above the break");
         assert_eq!(app.doc.project.param(slot_param(1, SlotParam::Choke)), 0.0);
 
         app.doc.undo();
         assert!(
-            app.doc.project.sampler.slots[1].is_none(),
+            app.doc.project.sampler_machine().slots[1].is_none(),
             "a load is one undo step"
         );
 
@@ -1728,7 +1758,7 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
         app.load_sample_bytes(1, "B", Some("wav"), &test_wav(0.5));
-        let b_base = app.doc.project.sampler.slots[1]
+        let b_base = app.doc.project.sampler_machine().slots[1]
             .as_ref()
             .unwrap()
             .meta
@@ -1736,7 +1766,7 @@ mod tests {
         assert!(!app.edit_slot_meta(1, false, |m| m.base_key = 30));
         assert!(app.view.message.is_some());
         assert_eq!(
-            app.doc.project.sampler.slots[1]
+            app.doc.project.sampler_machine().slots[1]
                 .as_ref()
                 .unwrap()
                 .meta
@@ -1749,7 +1779,7 @@ mod tests {
             m.high_key = 110;
         }));
         app.clear_slot(0);
-        assert!(app.doc.project.sampler.slots[0].is_none());
+        assert!(app.doc.project.sampler_machine().slots[0].is_none());
     }
 
     #[test]
@@ -1772,7 +1802,10 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
         let range = |app: &SidAcidApp| {
-            let m = &app.doc.project.sampler.slots[0].as_ref().unwrap().meta;
+            let m = &app.doc.project.sampler_machine().slots[0]
+                .as_ref()
+                .unwrap()
+                .meta;
             (m.base_key, m.high_key)
         };
         assert_eq!(range(&app), (24, 47));
@@ -1795,7 +1828,7 @@ mod tests {
         app.load_sample_bytes(3, "A", Some("wav"), &test_wav(0.5));
         assert!(app.move_zone(3, 70, false));
         app.load_sample_bytes(5, "B", Some("wav"), &test_wav(0.5));
-        let low = app.doc.project.sampler.slots[5]
+        let low = app.doc.project.sampler_machine().slots[5]
             .as_ref()
             .unwrap()
             .meta
@@ -1830,14 +1863,14 @@ mod tests {
             ..Default::default()
         };
         app.load_dropped_file(&file);
-        let d = app.doc.project.sampler.slots[3]
+        let d = app.doc.project.sampler_machine().slots[3]
             .as_ref()
             .expect("slot 3 is loaded");
         assert_eq!(d.name, "x");
         assert!(
             app.doc
                 .project
-                .sampler
+                .sampler_machine()
                 .slots
                 .iter()
                 .enumerate()
@@ -1854,7 +1887,7 @@ mod tests {
         let cut = &full[..full.len() - 1000];
         app.load_sample_bytes(1, "Cut", Some("wav"), cut);
         assert!(
-            app.doc.project.sampler.slots[1].is_some(),
+            app.doc.project.sampler_machine().slots[1].is_some(),
             "partial audio is kept"
         );
         let msg = app.view.message.clone().expect("the user is told");
@@ -1881,10 +1914,10 @@ mod tests {
                 pcm: vec![0; n],
             };
             assert!(big.is_valid(), "{:?}", big.problem());
-            app.doc.project.sampler.slots[slot] = Some(big);
+            app.doc.project.sampler_machine_mut().slots[slot] = Some(big);
         }
         assert_eq!(
-            app.doc.project.sampler.memory_bytes(),
+            app.doc.project.sampler_machine().memory_bytes(),
             MEMORY_LIMIT - leave * 4
         );
         let before = app.doc.project.clone();
@@ -1901,14 +1934,14 @@ mod tests {
         app.load_sample_bytes(0, "A", Some("wav"), &test_wav(0.5));
         let loaded = app.doc.project.clone();
         app.clear_slot(0);
-        assert!(app.doc.project.sampler.slots[0].is_none());
+        assert!(app.doc.project.sampler_machine().slots[0].is_none());
         let cmds = app.doc.undo();
         app.send(cmds);
         assert_eq!(app.doc.project, loaded, "undo of a clear restores the slot");
         let cmds = app.doc.undo();
         app.send(cmds);
         assert!(
-            app.doc.project.sampler.slots[0].is_none(),
+            app.doc.project.sampler_machine().slots[0].is_none(),
             "undo of the load"
         );
         let cmds = app.doc.redo();
@@ -1971,7 +2004,7 @@ mod tests {
         let cmds = app.doc.apply(Edit::Bpm(100.0), true);
         app.send(cmds);
         app.view.wave_drag = Some((0, sampler_ui::Marker::Start));
-        assert!(app.doc.project.sampler.slots[0].is_none());
+        assert!(app.doc.project.sampler_machine().slots[0].is_none());
         run_frames(&mut app, 1);
         assert_eq!(app.view.wave_drag, None);
         let cmds = app.doc.apply(Edit::Bpm(110.0), true);

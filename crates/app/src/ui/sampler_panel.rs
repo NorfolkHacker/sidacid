@@ -6,6 +6,7 @@ use super::sampler_ui::{
     Marker, frame_to_x, key_name, markers, nearest_marker, peaks, set_marker, x_to_frame, zone_text,
 };
 use super::{SidAcidApp, theme};
+use crate::six::SixMachines;
 use acid_engine::host::Command;
 use acid_engine::machine::MachineId;
 use acid_engine::params::{SamplerParam, SlotParam, sampler_param, slot_param};
@@ -36,7 +37,7 @@ const MARKER_GRAB_PX: f32 = 5.0;
 impl SidAcidApp {
     pub(crate) fn sampler_panel(&mut self, ui: &mut egui::Ui) {
         let m = MachineId::Sampler.index();
-        let slot = self.doc.project.selected[m];
+        let slot = self.doc.project.entry_at(m).selected;
         let title = format!("SAMPLER   {}", PatternRef(slot).label());
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt("sampler")
@@ -67,7 +68,7 @@ impl SidAcidApp {
             .spacing([3.0, 3.0])
             .show(ui, |ui| {
                 for i in 0..SLOTS {
-                    let name = self.doc.project.sampler.slots[i]
+                    let name = self.doc.project.sampler_machine().slots[i]
                         .as_ref()
                         .map_or("·".to_string(), |d| d.name.chars().take(6).collect());
                     let r = ui.add_sized(
@@ -83,7 +84,7 @@ impl SidAcidApp {
                         && r.is_pointer_button_down_on()
                         && ui.input(|inp| inp.pointer.primary_down())
                         && self.view.pad_note.is_none()
-                        && let Some(d) = self.doc.project.sampler.slots[i].as_ref()
+                        && let Some(d) = self.doc.project.sampler_machine().slots[i].as_ref()
                     {
                         let key = match d.meta.mode {
                             SlotMode::Slice => d.meta.base_key,
@@ -117,15 +118,17 @@ impl SidAcidApp {
 
     fn sampler_slot_row(&mut self, ui: &mut egui::Ui) {
         let s = self.view.sampler_slot.min(SLOTS - 1);
-        let info = self.doc.project.sampler.slots[s].as_ref().map(|d| {
-            (
-                d.name.clone(),
-                d.meta.clone(),
-                d.frames(),
-                d.channels,
-                d.sample_rate,
-            )
-        });
+        let info = self.doc.project.sampler_machine().slots[s]
+            .as_ref()
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    d.meta.clone(),
+                    d.frames(),
+                    d.channels,
+                    d.sample_rate,
+                )
+            });
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(format!("Slot {}", s + 1)).strong());
             if ui.button("Load…").clicked() {
@@ -184,7 +187,7 @@ impl SidAcidApp {
                         self.view.sampler_sensitivity = Some(sens);
                     }
                     if ui.button("Detect").clicked()
-                        && let Some(d) = self.doc.project.sampler.slots[s].as_ref()
+                        && let Some(d) = self.doc.project.sampler_machine().slots[s].as_ref()
                     {
                         let pcm: Vec<f32> = d.pcm.iter().map(|&x| x as f32 / 32_768.0).collect();
                         let slices =
@@ -240,7 +243,7 @@ impl SidAcidApp {
 
     fn sampler_waveform(&mut self, ui: &mut egui::Ui) {
         let s = self.view.sampler_slot.min(SLOTS - 1);
-        let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
+        let Some(d) = self.doc.project.sampler_machine().slots[s].as_ref() else {
             // A drag whose slot emptied under it still closes its undo step.
             if self.view.wave_drag.take().is_some() {
                 self.doc.end_gesture();
@@ -260,7 +263,7 @@ impl SidAcidApp {
             let p = peaks(&d.pcm, d.channels as usize, columns);
             self.view.wave_cache.insert(s, (key.0, key.1, key.2, p));
         }
-        let Some(d) = self.doc.project.sampler.slots[s].as_ref() else {
+        let Some(d) = self.doc.project.sampler_machine().slots[s].as_ref() else {
             return;
         };
         let frames = d.frames();

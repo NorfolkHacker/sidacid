@@ -2,14 +2,15 @@
 //! bars and two synth transposes. v1 and v2 named params by machine
 //! position (`LegacyParamId`); v3 names them by machine uid.
 
-use crate::machine::MachineUid;
+use crate::drums::KitKind;
+use crate::machine::{MachineId, MachineUid};
 use crate::params::{
     ChannelParam, DrumParam, FmParam, FxParam, KitParam, MachineParam, MasterParam, OpParam,
     ParamId, SamplerParam, SlotParam, SynthParam,
 };
 use crate::project::{
-    AutoLane, Bar, DrumMachine, FmMachine, ParamLane, PatternRef, Project, SamplerMachine, SeqView,
-    Song, SynthMachine, SynthPattern, SynthStep,
+    AutoLane, Bar, Cell, DrumMachine, DrumPattern, FmMachine, MachineBody, ParamLane, PatternRef,
+    Project, SamplerMachine, SeqView, Song, SynthMachine, SynthPattern, SynthStep,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -123,9 +124,53 @@ impl Default for SynthMachineV2 {
     }
 }
 
+/// The v1/v2 drum machine: no kit kind (the position chose the kit).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DrumMachineV2 {
+    pub patterns: Vec<DrumPattern>,
+}
+
+#[cfg(test)]
+impl Default for DrumMachineV2 {
+    fn default() -> Self {
+        Self {
+            patterns: vec![DrumPattern::default(); crate::project::PATTERNS],
+        }
+    }
+}
+
+/// The v2 bar: one slot per fixed machine, by `MachineId::index`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BarV2 {
+    pub patterns: [Option<PatternRef>; 6],
+    pub mutes: [bool; 6],
+    /// Song transpose for Synth 1, Synth 2, FM (`MachineId::transpose_index`).
+    pub transpose: [i8; 3],
+}
+
+impl BarV2 {
+    /// One cell per fixed machine, on the standard rack's uids.
+    fn upgrade(self) -> Bar {
+        Bar {
+            cells: MachineId::ALL
+                .iter()
+                .map(|&m| {
+                    let i = m.index();
+                    let cell = Cell {
+                        pattern: self.patterns[i],
+                        mute: self.mutes[i],
+                        transpose: m.transpose_index().map_or(0, |t| self.transpose[t]),
+                    };
+                    (m.uid(), cell)
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SongV2 {
-    pub bars: Vec<Bar>,
+    pub bars: Vec<BarV2>,
     pub loop_range: Option<(u16, u16)>,
     pub automation: Vec<LegacyAutoLane>,
 }
@@ -138,7 +183,7 @@ pub(crate) struct ProjectV2 {
     pub bpm: f32,
     pub swing: f32,
     pub synths: [SynthMachineV2; 2],
-    pub drums: [DrumMachine; 2],
+    pub drums: [DrumMachineV2; 2],
     pub fm: FmMachine,
     pub sampler: SamplerMachine,
     pub params: BTreeMap<LegacyParamId, f32>,
@@ -147,24 +192,53 @@ pub(crate) struct ProjectV2 {
 }
 
 impl ProjectV2 {
-    /// A v3 project: the same machines and values, params keyed by uid.
+    /// A v3 project: the six machines as rack entries on uids 1..=6,
+    /// params keyed by uid, bars as per-uid cells.
     pub(crate) fn upgrade(self) -> Project {
         let [s0, s1] = self.synths;
+        let [d0, d1] = self.drums;
+        let kit = |kind, d: DrumMachineV2| {
+            MachineBody::Kit(DrumMachine {
+                kind,
+                patterns: d.patterns,
+            })
+        };
+        let mut bodies = [
+            MachineBody::Synth(s0.upgrade()),
+            MachineBody::Synth(s1.upgrade()),
+            kit(KitKind::K808, d0),
+            kit(KitKind::K909, d1),
+            MachineBody::Fm(self.fm),
+            MachineBody::Sampler(self.sampler),
+        ]
+        .into_iter();
         let mut p = Project {
             name: self.name,
             bpm: self.bpm,
             swing: self.swing,
-            synths: [s0.upgrade(), s1.upgrade()],
-            drums: self.drums,
-            fm: self.fm,
-            sampler: self.sampler,
-            selected: self.selected,
             ..Project::default()
         };
-        p.params
-            .extend(self.params.into_iter().map(|(id, v)| (id.upgrade(), v)));
+        for (m, entry) in p.machines.iter_mut().enumerate() {
+            entry.selected = self.selected[m];
+            if let Some(body) = bodies.next() {
+                entry.body = body;
+            }
+        }
+        for (id, v) in self.params {
+            match id.upgrade() {
+                // Stored even when it doesn't fit, so validation rejects
+                // the damaged file. A position past the six has no entry
+                // and is dropped.
+                ParamId::Machine(uid, mp) => {
+                    if let Some(m) = p.machine_mut(uid) {
+                        m.params.insert(mp, v);
+                    }
+                }
+                global => p.set_param(global, v),
+            }
+        }
         p.song = Song {
-            bars: self.song.bars,
+            bars: self.song.bars.into_iter().map(BarV2::upgrade).collect(),
             loop_range: self.song.loop_range,
             automation: self
                 .song
@@ -198,7 +272,7 @@ pub(crate) struct ProjectV1 {
     pub bpm: f32,
     pub swing: f32,
     pub synths: [SynthMachineV2; 2],
-    pub drums: [DrumMachine; 2],
+    pub drums: [DrumMachineV2; 2],
     pub params: BTreeMap<LegacyParamId, f32>,
     pub selected: [u8; 4],
     pub song: SongV1,
@@ -227,7 +301,7 @@ impl ProjectV1 {
                     .bars
                     .into_iter()
                     .map(|b| {
-                        let mut bar = Bar::default();
+                        let mut bar = BarV2::default();
                         bar.patterns[..4].copy_from_slice(&b.patterns);
                         bar.mutes[..4].copy_from_slice(&b.mutes);
                         bar.transpose[..2].copy_from_slice(&b.transpose);
@@ -303,7 +377,7 @@ mod tests {
             params,
             selected: [0, 1, 2, 3, 4, 5],
             song: SongV2 {
-                bars: vec![Bar::default()],
+                bars: vec![BarV2::default()],
                 loop_range: None,
                 automation: vec![LegacyAutoLane {
                     param: LegacyParamId::FmOp(4, OpParam::R2),
@@ -316,11 +390,20 @@ mod tests {
         assert_eq!(p.version, crate::project::PROJECT_VERSION);
         assert_eq!(p.param(drum_param(1, 2, DrumParam::Decay)), 0.1);
         assert_eq!(p.param(ParamId::Master(MasterParam::Level)), 0.6);
-        assert_eq!(p.params.len(), 589, "missing params filled with defaults");
-        let lane = p.synths[1].patterns[3].param_lane.as_ref().unwrap();
+        let params: usize = p.machines.iter().map(|m| m.params.len()).sum();
+        assert_eq!(
+            params + p.globals.len(),
+            589,
+            "missing params filled with defaults"
+        );
+        let lane = p.synth(MachineUid(2)).unwrap().patterns[3]
+            .param_lane
+            .as_ref()
+            .unwrap();
         assert_eq!(lane.param, synth_param(1, SynthParam::Resonance));
         assert_eq!(p.song.automation[0].param, fm_op_param(4, OpParam::R2));
-        assert_eq!(p.selected, [0, 1, 2, 3, 4, 5]);
+        let selected: Vec<_> = p.machines.iter().map(|m| m.selected).collect();
+        assert_eq!(selected, [0, 1, 2, 3, 4, 5]);
         // Saved again, it is a v3 file that loads as itself.
         assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
     }

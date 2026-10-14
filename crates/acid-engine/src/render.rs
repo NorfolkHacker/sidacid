@@ -153,6 +153,7 @@ pub fn render_patterns_wav(project: &Project, bars: u32, path: &Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MachineId;
     use crate::testutil::rms;
 
     #[test]
@@ -170,10 +171,21 @@ mod tests {
         let mut p = crate::demo::demo_project();
         p.bpm = 120.0;
         let bar = crate::project::Bar {
-            patterns: [Some(crate::project::PatternRef(0)); crate::machine::MACHINES],
-            ..Default::default()
+            cells: crate::machine::MachineId::ALL
+                .iter()
+                .map(|m| {
+                    let pattern = Some(crate::project::PatternRef(0));
+                    (
+                        m.uid(),
+                        crate::project::Cell {
+                            pattern,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
         };
-        p.song.bars = vec![bar, bar];
+        p.song.bars = vec![bar.clone(), bar];
         p
     }
 
@@ -200,16 +212,18 @@ mod tests {
             bpm: 120.0, // 1 bar = 2 s
             ..Project::default()
         };
-        p.fm.patterns[0].notes.push(crate::project::Note {
-            start: 0,
-            len: 8,
-            pitch: 60,
-            vel: 120,
-        });
+        p.fm_mut(MachineId::Fm.uid()).unwrap().patterns[0]
+            .notes
+            .push(crate::project::Note {
+                start: 0,
+                len: 8,
+                pitch: 60,
+                vel: 120,
+            });
         // OP1 releases slowly: the note rings past the song's end.
-        p.params.insert(fm_op_param(0, OpParam::R4), 0.3);
+        p.set_param(fm_op_param(0, OpParam::R4), 0.3);
         let mut bar = crate::project::Bar::default();
-        bar.patterns[crate::machine::MachineId::Fm.index()] = Some(crate::project::PatternRef(0));
+        bar.cell_mut(MachineId::Fm.uid()).pattern = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];
         let (l, _) = render_song(&p, |_| {});
         let sr = EXPORT_SAMPLE_RATE as usize;
@@ -240,7 +254,7 @@ mod tests {
     #[test]
     fn the_song_length_cap_stops_a_runaway_render() {
         let mut p = two_bar_song();
-        let bar = p.song.bars[0];
+        let bar = p.song.bars[0].clone();
         p.song.bars = vec![bar; 999];
         let cap = 2 * CHUNK;
         let (mut n, mut seen) = (0, Vec::new());

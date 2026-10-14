@@ -6,6 +6,7 @@ mod audio_scan;
 mod audio_select;
 mod document;
 mod settings;
+mod six;
 mod ui;
 
 use std::path::Path;

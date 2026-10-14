@@ -89,7 +89,7 @@ impl Default for DrumPatch {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum KitKind {
     K808,
     K909,

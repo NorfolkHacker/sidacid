@@ -2,10 +2,11 @@
 //! counter-line on synth 2, an 808 beat and 909 hats.
 
 use crate::drums::{BD, CH, CP, OH, SD};
+use crate::machine::MachineId;
 use crate::params::{
     ChannelParam, FxParam, MasterParam, ParamId, SynthParam, channel_param, synth_param,
 };
-use crate::project::{DrumHit, Gate, Project, SynthStep};
+use crate::project::{DrumHit, DrumMachine, Gate, Project, SynthMachine, SynthStep};
 
 fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
     SynthStep {
@@ -24,6 +25,14 @@ const REST: SynthStep = SynthStep {
     accent: false,
     slide: false,
 };
+
+fn synth(p: &mut Project, m: MachineId) -> &mut SynthMachine {
+    p.synth_mut(m.uid()).expect("standard rack synth")
+}
+
+fn kit(p: &mut Project, m: MachineId) -> &mut DrumMachine {
+    p.kit_mut(m.uid()).expect("standard rack kit")
+}
 
 pub fn demo_project() -> Project {
     let mut p = Project {
@@ -51,7 +60,7 @@ pub fn demo_project() -> Project {
         REST,
         step(10, -1, false, false),
     ];
-    p.synths[0].patterns[0].steps[..16].copy_from_slice(&acid);
+    synth(&mut p, MachineId::Synth1).patterns[0].steps[..16].copy_from_slice(&acid);
 
     let counter = [
         step(7, 1, false, false),
@@ -71,9 +80,9 @@ pub fn demo_project() -> Project {
         step(0, 1, true, false),
         REST,
     ];
-    p.synths[1].patterns[0].steps[..16].copy_from_slice(&counter);
+    synth(&mut p, MachineId::Synth2).patterns[0].steps[..16].copy_from_slice(&counter);
 
-    let kit808 = &mut p.drums[0].patterns[0];
+    let kit808 = &mut kit(&mut p, MachineId::Kit808).patterns[0];
     for s in [0, 4, 8, 12] {
         kit808.steps[s][BD] = DrumHit::On;
     }
@@ -81,7 +90,7 @@ pub fn demo_project() -> Project {
     kit808.steps[12][CP] = DrumHit::Accent;
     kit808.steps[15][SD] = DrumHit::On;
 
-    let kit909 = &mut p.drums[1].patterns[0];
+    let kit909 = &mut kit(&mut p, MachineId::Kit909).patterns[0];
     for s in 0..16 {
         kit909.steps[s][CH] = if s % 4 == 2 {
             DrumHit::Accent
@@ -94,9 +103,7 @@ pub fn demo_project() -> Project {
         kit909.steps[s][CH] = DrumHit::Off;
     }
 
-    let set = |p: &mut Project, id: ParamId, v: f32| {
-        p.params.insert(id, v);
-    };
+    let set = |p: &mut Project, id: ParamId, v: f32| p.set_param(id, v);
     set(&mut p, synth_param(0, SynthParam::Cutoff), 0.3);
     set(&mut p, synth_param(0, SynthParam::Resonance), 0.85);
     set(&mut p, synth_param(0, SynthParam::EnvMod), 0.7);
@@ -126,8 +133,9 @@ mod tests {
     fn demo_is_valid_and_nonempty() {
         let p = demo_project();
         p.validate().unwrap();
-        assert!(p.synths[0].patterns[0].steps.iter().any(|s| s.slide));
-        assert!(p.synths[0].patterns[0].steps.iter().any(|s| s.accent));
+        let s = &p.synth(MachineId::Synth1.uid()).unwrap().patterns[0];
+        assert!(s.steps.iter().any(|s| s.slide));
+        assert!(s.steps.iter().any(|s| s.accent));
     }
 
     #[test]

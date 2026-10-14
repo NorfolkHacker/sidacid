@@ -5,6 +5,7 @@
 use super::alg_diagram::{env_points, layout};
 use super::fm_voices::{FmBrowser, starter};
 use super::{SidAcidApp, theme};
+use crate::six::SixMachines;
 use acid_engine::fm::algorithms::ALGORITHMS;
 use acid_engine::machine::MachineId;
 use acid_engine::params::{FmParam, OpParam, ParamId, fm_op_param, fm_param, fm_steps, step_index};
@@ -85,11 +86,11 @@ const BOX: egui::Vec2 = vec2(22.0, 16.0);
 impl SidAcidApp {
     pub(crate) fn fm_panel(&mut self, ui: &mut egui::Ui) {
         let m = MachineId::Fm.index();
-        let slot = self.doc.project.selected[m];
+        let slot = self.doc.project.entry_at(m).selected;
         let title = format!(
             "FM   {}   {}",
             PatternRef(slot).label(),
-            self.doc.project.fm.voice_name
+            self.doc.project.fm_machine().voice_name
         );
         egui::CollapsingHeader::new(egui::RichText::new(title).strong())
             .id_salt("fm")
@@ -275,7 +276,7 @@ impl SidAcidApp {
     }
 
     fn fm_voice_browser(&mut self, ui: &mut egui::Ui) {
-        let has_bank = self.doc.project.fm.bank.is_some();
+        let has_bank = self.doc.project.fm_machine().bank.is_some();
         // Undoing an import leaves no bank: show the starter list, so the
         // tab buttons and the grid agree.
         if !has_bank {
@@ -307,7 +308,7 @@ impl SidAcidApp {
                 self.import_syx();
             }
         });
-        let names: Vec<String> = match (self.view.fm_browser, &self.doc.project.fm.bank) {
+        let names: Vec<String> = match (self.view.fm_browser, &self.doc.project.fm_machine().bank) {
             (FmBrowser::Imported, Some(bank)) => bank.iter().map(|v| v.name.clone()).collect(),
             _ => starter().iter().map(|v| v.name.clone()).collect(),
         };
@@ -323,7 +324,7 @@ impl SidAcidApp {
             self.view.fm_voice_src,
             self.view.fm_browser,
             &names,
-            &self.doc.project.fm.voice_name,
+            &self.doc.project.fm_machine().voice_name,
         );
         let mut picked = None;
         egui::Grid::new("fm_voices")
@@ -340,7 +341,7 @@ impl SidAcidApp {
                 }
             });
         if let Some(i) = picked {
-            let voice = match (self.view.fm_browser, &self.doc.project.fm.bank) {
+            let voice = match (self.view.fm_browser, &self.doc.project.fm_machine().bank) {
                 (FmBrowser::Imported, Some(bank)) => bank[i].clone(),
                 _ => starter()[i].clone(),
             };
