@@ -31,3 +31,20 @@ DEFERRED MINORS (task reviews)
 - Small: render.rs double-builds the engine; rack.rs imports engine for MAX_BLOCK;
   GlobalParam::all() rebuilt per element in from_project; Banks passed by value; per-frame
   name clones in mixer/song panels; duplicated all-six-cells test helper.
+
+FROM THE FINAL REVIEW — MUST GO INTO THE PLAN 10b PLAN
+- Removing a machine must also purge other 303s' pattern param_lanes that target it (validate
+  rejects them, so a saved project would not reload), together with its song cells and
+  automation lanes, in one undoable edit. Optionally CompiledSong::compile drops lanes for
+  uids not in the rack.
+- Status::rack_gen resets to 0 on ReplaceEngine (every file load): use a host-level counter
+  that survives it, or reset the UI's counter on load like stops/stops_sent.
+- Uid-addressed document edits expect their machine to exist (document.rs .expect(NO_SYNTH)…):
+  rack edits must live in the same undo history so undo/redo never outlives a machine.
+- The UI must track the engine's uid order itself (last accepted SetRack or load) to build
+  RackSwaps; it can't call Engine::slot_uids on the audio thread.
+- Make Engine::load_project pub(crate) (it queues selections when playing).
+- Add an empty-rack render test; consider a second golden fixture with sampler audio and
+  303 param lanes.
+- For 10c: validate's combined sampler budget (message "exceeds 64 MB") and with_pcm_budget
+  are where the 256 MB pool goes.
