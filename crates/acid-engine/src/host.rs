@@ -6,6 +6,7 @@
 
 use crate::engine::Engine;
 use crate::machine::MACHINES;
+use crate::machine::MAX_MACHINES;
 use crate::params::{CHANNELS, ParamId};
 use crate::project::{DrumPattern, NotePattern, Song, SynthPattern};
 use crate::sampler::sample::SampleData;
@@ -181,8 +182,12 @@ impl EngineHost {
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         self.drain_commands();
         self.engine.process(out_l, out_r);
-        for (acc, m) in self.meters.iter_mut().zip(self.engine.take_meters()) {
-            *acc = acc.max(m);
+        // Interim (until Status is per slot): the first six positions, then
+        // the master.
+        let m = self.engine.take_meters();
+        let meters = m[..CHANNELS].iter().chain(&m[MAX_MACHINES..]);
+        for (acc, m) in self.meters.iter_mut().zip(meters) {
+            *acc = acc.max(*m);
         }
         self.guard_fired |= self.engine.take_guard_fired();
         self.since_status += out_l.len();
@@ -579,13 +584,13 @@ mod tests {
         tx.push(Command::SetParamLive(level, 0.3)).unwrap();
         run(&mut host, 512);
         let e = host.engine();
-        assert_eq!(e.knob(cutoff), 0.125, "SetParam moves the knob");
+        assert_eq!(e.knob(cutoff), Some(0.125), "SetParam moves the knob");
         assert_eq!(e.live_param(cutoff), 0.125);
         assert_eq!(e.swing(), 0.4, "SetSwing");
         assert_eq!(e.current_patterns()[3], 7, "SelectPattern while stopped");
         assert!(e.is_touched(level), "Touch(true)");
         assert_eq!(e.live_param(level), 0.3, "SetParamLive plays the value");
-        assert_ne!(e.knob(level), 0.3, "SetParamLive keeps the knob");
+        assert_ne!(e.knob(level), Some(0.3), "SetParamLive keeps the knob");
         tx.push(Command::Touch(level, false)).unwrap();
         run(&mut host, 512);
         assert!(!host.engine().is_touched(level), "Touch(false)");

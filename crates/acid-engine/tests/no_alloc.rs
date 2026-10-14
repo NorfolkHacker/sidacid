@@ -137,6 +137,30 @@ fn pattern_mode_does_not_allocate() {
 }
 
 #[test]
+fn a_sixteen_slot_rack_does_not_allocate() {
+    use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
+    use acid_engine::project::MachineEntry;
+    let mut p = busy_project();
+    p.machines.swap(0, 3);
+    let types = MachineType::ALL.iter().cycle();
+    for (u, &ty) in (7..=MAX_MACHINES as u16).zip(types) {
+        p.machines
+            .push(MachineEntry::new(MachineUid(u), ty, format!("M{u}")));
+    }
+    p.next_uid = MAX_MACHINES as u16 + 1;
+    p.validate().unwrap();
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+    e.play();
+    let n = count_allocs(|| {
+        e.set_param(ParamId::Master(MasterParam::Level), 0.5);
+        render_seconds(&mut e, &mut l, &mut r, 2.0);
+        e.stop();
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);

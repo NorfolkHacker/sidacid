@@ -15,6 +15,7 @@ mod migrate;
 pub mod mixer;
 pub mod params;
 pub mod project;
+pub mod rack;
 pub mod random;
 pub mod render;
 pub mod sampler;

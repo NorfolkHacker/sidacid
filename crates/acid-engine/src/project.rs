@@ -637,11 +637,6 @@ impl Project {
         if uids.last().is_some_and(|u| self.next_uid <= u.0) {
             return bad("next machine uid is already in use".into());
         }
-        // Interim (until the engine builds any rack): only today's six.
-        let types = self.machines.iter().map(MachineEntry::machine_type);
-        if !types.eq(standard_rack().into_iter().map(|(_, ty, _)| ty)) {
-            return bad("rack layout not supported yet".into());
-        }
         if self.globals.values().any(|v| !v.is_finite()) {
             return bad("invalid parameter value".into());
         }
@@ -885,16 +880,14 @@ mod tests {
     }
 
     #[test]
-    fn interim_rack_layout_must_be_the_standard_six() {
+    fn any_rack_layout_of_up_to_sixteen_validates() {
         let mut p = Project::default();
         p.machines.swap(0, 2);
-        match p.validate() {
-            Err(ProjectError::Invalid(m)) => assert_eq!(m, "rack layout not supported yet"),
-            other => panic!("expected the interim rack error, got {other:?}"),
-        }
-        let mut p = Project::default();
+        p.validate().unwrap();
         p.machines.pop();
-        assert!(p.validate().is_err(), "five machines");
+        p.validate().unwrap();
+        p.machines.clear();
+        p.validate().unwrap();
         let mut p = Project::default();
         let extra: Vec<_> = (0..MAX_MACHINES as u16 - 5)
             .map(|i| MachineEntry::new(MachineUid(7 + i), MachineType::Fm, format!("FM {i}")))
@@ -902,6 +895,8 @@ mod tests {
         p.machines.extend(extra);
         p.next_uid = 100;
         assert!(p.validate().is_err(), "more than MAX_MACHINES");
+        p.machines.pop();
+        p.validate().unwrap();
     }
 
     #[test]

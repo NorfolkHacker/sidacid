@@ -1,13 +1,11 @@
-//! Six channel strips (distortion -> compressor -> level/pan/mute/solo,
-//! post-fader delay and reverb sends), send returns, master compressor,
-//! master level, optional lo-fi, final clip and NaN guard.
+//! Channel strips (distortion -> compressor -> level/pan/mute/solo,
+//! post-fader delay and reverb sends; one per rack slot), send returns,
+//! master compressor, master level, optional lo-fi, final clip and NaN guard.
 
 use crate::fx::{Compressor, Delay, Distortion, LoFi, Reverb};
-use crate::machine::MachineId;
-use crate::params::{
-    CHANNELS, ChannelParam, FxParam, GlobalParam, MachineParam, MasterParam, ParamId,
-    channel_param, exp, on, step_index,
-};
+use crate::machine::MAX_MACHINES;
+use crate::params::{ChannelParam, FxParam, GlobalParam, MasterParam, exp, on, step_index};
+use crate::rack::Slot;
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 
 pub struct StereoBuf {
@@ -24,7 +22,8 @@ impl StereoBuf {
     }
 }
 
-struct ChannelStrip {
+/// One slot's mixer channel.
+pub struct ChannelStrip {
     dist: Distortion,
     comp: Compressor,
     gain: f32,
@@ -37,8 +36,9 @@ struct ChannelStrip {
 }
 
 impl ChannelStrip {
-    fn new(sample_rate: f32) -> Self {
-        Self {
+    /// A strip with every channel param at its default.
+    pub fn new(sample_rate: f32) -> Self {
+        let mut s = Self {
             dist: Distortion::new(sample_rate),
             comp: Compressor::new(sample_rate),
             gain: 1.0,
@@ -48,10 +48,14 @@ impl ChannelStrip {
             solo: false,
             delay_send: 0.0,
             reverb_send: 0.0,
+        };
+        for p in ChannelParam::ALL {
+            s.set(p, crate::params::MachineParam::Channel(p).info().default);
         }
+        s
     }
 
-    fn set(&mut self, p: ChannelParam, v: f32) {
+    pub fn set(&mut self, p: ChannelParam, v: f32) {
         match p {
             ChannelParam::Level => self.gain = v * v * 2.0,
             ChannelParam::Pan => {
@@ -77,8 +81,9 @@ impl ChannelStrip {
     }
 }
 
+/// The shared part of the mix: send effects and the master bus. The
+/// channel strips live in the rack slots.
 pub struct Mixer {
-    strips: Vec<ChannelStrip>,
     delay: Delay,
     reverb: Reverb,
     master_comp: Compressor,
@@ -89,15 +94,12 @@ pub struct Mixer {
     delay_send: StereoBuf,
     reverb_send: StereoBuf,
     wet: StereoBuf,
-    meters: [f32; CHANNELS + 1],
+    meters: [f32; MAX_MACHINES + 1],
 }
 
 impl Mixer {
     pub fn new(sample_rate: f32, max_block: usize) -> Self {
         let mut m = Self {
-            strips: (0..CHANNELS)
-                .map(|_| ChannelStrip::new(sample_rate))
-                .collect(),
             delay: Delay::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             master_comp: Compressor::new(sample_rate),
@@ -108,13 +110,10 @@ impl Mixer {
             delay_send: StereoBuf::new(max_block),
             reverb_send: StereoBuf::new(max_block),
             wet: StereoBuf::new(max_block),
-            meters: [0.0; CHANNELS + 1],
+            meters: [0.0; MAX_MACHINES + 1],
         };
-        let ids = (0..CHANNELS)
-            .flat_map(|c| ChannelParam::ALL.map(|p| channel_param(c, p)))
-            .chain(GlobalParam::all().into_iter().map(ParamId::from));
-        for id in ids {
-            m.set_param(id, id.info().default);
+        for g in GlobalParam::all() {
+            m.set_global(g, g.info().default);
         }
         m
     }
@@ -123,23 +122,16 @@ impl Mixer {
         self.delay.set_bpm(bpm);
     }
 
-    /// Peak levels since the last call: channels 0..CHANNELS post-fader, then
-    /// the master after the final clip. Resets them. Muted (or soloed-out)
-    /// channels read 0.
-    pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
+    /// Peak levels since the last call: slots by rack position post-fader
+    /// (unused positions 0), then the master after the final clip at
+    /// `MAX_MACHINES`. Resets them. Muted (or soloed-out) slots read 0.
+    pub fn take_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
         std::mem::take(&mut self.meters)
     }
 
-    pub fn set_param(&mut self, id: ParamId, v: f32) {
-        match id {
-            ParamId::Machine(uid, MachineParam::Channel(p)) => {
-                if let Some(strip) =
-                    MachineId::from_uid(uid).and_then(|m| self.strips.get_mut(m.index()))
-                {
-                    strip.set(p, v);
-                }
-            }
-            ParamId::Fx(p) => match p {
+    pub fn set_global(&mut self, g: GlobalParam, v: f32) {
+        match g {
+            GlobalParam::Fx(p) => match p {
                 FxParam::DelaySync => self.delay.set_sync(on(v)),
                 FxParam::DelayDivision => self.delay.set_division(step_index(v, 6)),
                 FxParam::DelayMs => self.delay.set_ms(exp(v, 10.0, 2000.0)),
@@ -152,7 +144,7 @@ impl Mixer {
                 FxParam::ReverbWidth => self.reverb.set_width(v),
                 FxParam::ReverbReturn => self.reverb_return = v,
             },
-            ParamId::Master(p) => match p {
+            GlobalParam::Master(p) => match p {
                 MasterParam::CompOn => self.master_comp.on = on(v),
                 MasterParam::CompThreshold => self.master_comp.set_threshold(v),
                 MasterParam::CompRatio => self.master_comp.set_ratio(v),
@@ -162,17 +154,17 @@ impl Mixer {
                 MasterParam::Level => self.master_gain = v * v * 1.5,
                 MasterParam::LoFi => self.lofi.on = on(v),
             },
-            _ => {}
         }
     }
 
-    /// Mixes `n` samples of the channel buffers into `out_l`/`out_r`.
-    /// Precondition: `n` is at most the `max_block` given to `Mixer::new`
-    /// and no longer than any buffer passed in. Returns true when the NaN
+    /// Mixes `n` samples of the slots' buffers, through their strips in
+    /// rack order, into `out_l`/`out_r`. Precondition: `n` is at most the
+    /// `max_block` given to `Mixer::new` and no longer than any buffer
+    /// passed in; at most `MAX_MACHINES` slots. Returns true when the NaN
     /// guard fired (output was silenced and effect state reset).
     pub fn process(
         &mut self,
-        chans: &mut [StereoBuf; CHANNELS],
+        slots: &mut [Slot],
         n: usize,
         out_l: &mut [f32],
         out_r: &mut [f32],
@@ -184,8 +176,11 @@ impl Mixer {
             b.l[..n].fill(0.0);
             b.r[..n].fill(0.0);
         }
-        let any_solo = self.strips.iter().any(|s| s.solo);
-        for (c, (strip, buf)) in self.strips.iter_mut().zip(chans.iter_mut()).enumerate() {
+        let count = slots.len().min(MAX_MACHINES);
+        let slots = &mut slots[..count];
+        let any_solo = slots.iter().any(|s| s.strip.solo);
+        for (c, slot) in slots.iter_mut().enumerate() {
+            let (strip, buf) = (&mut slot.strip, &mut slot.buf);
             let (l, r) = (&mut buf.l[..n], &mut buf.r[..n]);
             strip.dist.process(l, r);
             strip.comp.process(l, r);
@@ -241,15 +236,15 @@ impl Mixer {
             self.delay.reset();
             self.reverb.reset();
             self.master_comp.reset();
-            for s in &mut self.strips {
-                s.comp.reset();
-                s.dist.reset();
+            for s in slots.iter_mut() {
+                s.strip.comp.reset();
+                s.strip.dist.reset();
             }
             return true;
         }
         for v in out_l.iter_mut().chain(out_r.iter_mut()) {
             *v = v.clamp(-1.0, 1.0);
-            self.meters[CHANNELS] = self.meters[CHANNELS].max(v.abs());
+            self.meters[MAX_MACHINES] = self.meters[MAX_MACHINES].max(v.abs());
         }
         false
     }
@@ -258,67 +253,89 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::Project;
     use crate::testutil::{all_finite, peak, rms};
 
     const SR: f32 = 44_100.0;
     const N: usize = 512;
 
-    fn chans_with(ch: usize, value: f32) -> [StereoBuf; CHANNELS] {
-        let mut c: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
-        c[ch].l.fill(value);
-        c[ch].r.fill(value);
-        c
+    /// The standard six slots, all silent.
+    fn slots() -> Vec<Slot> {
+        Project::default()
+            .machines
+            .iter()
+            .map(|e| Slot::from_entry(e, SR))
+            .collect()
     }
 
-    fn run(m: &mut Mixer, chans: &mut [StereoBuf; CHANNELS]) -> (Vec<f32>, Vec<f32>) {
+    fn fill(slots: &mut [Slot], ch: usize, value: f32) {
+        for s in slots.iter_mut() {
+            s.buf.l.fill(0.0);
+            s.buf.r.fill(0.0);
+        }
+        slots[ch].buf.l.fill(value);
+        slots[ch].buf.r.fill(value);
+    }
+
+    fn slots_with(ch: usize, value: f32) -> Vec<Slot> {
+        let mut s = slots();
+        fill(&mut s, ch, value);
+        s
+    }
+
+    fn run(m: &mut Mixer, slots: &mut [Slot]) -> (Vec<f32>, Vec<f32>) {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(chans, N, &mut l, &mut r);
+        m.process(slots, N, &mut l, &mut r);
         (l, r)
     }
 
-    fn guard_fired(m: &mut Mixer, chans: &mut [StereoBuf; CHANNELS]) -> bool {
+    fn guard_fired(m: &mut Mixer, slots: &mut [Slot]) -> bool {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(chans, N, &mut l, &mut r)
+        m.process(slots, N, &mut l, &mut r)
     }
 
     fn quiet_mixer() -> Mixer {
         let mut m = Mixer::new(SR, N);
-        m.set_param(ParamId::Master(MasterParam::CompOn), 0.0);
+        m.set_global(GlobalParam::Master(MasterParam::CompOn), 0.0);
         m
     }
 
     #[test]
     fn channel_reaches_output() {
         let mut m = quiet_mixer();
-        let (l, r) = run(&mut m, &mut chans_with(0, 0.25));
+        let (l, r) = run(&mut m, &mut slots_with(0, 0.25));
         assert!(rms(&l) > 0.1 && rms(&r) > 0.1);
     }
 
     #[test]
     fn mute_silences_channel() {
         let mut m = quiet_mixer();
-        m.set_param(channel_param(1, ChannelParam::Mute), 1.0);
-        let (l, _) = run(&mut m, &mut chans_with(1, 0.25));
+        let mut s = slots_with(1, 0.25);
+        s[1].strip.set(ChannelParam::Mute, 1.0);
+        let (l, _) = run(&mut m, &mut s);
         assert_eq!(peak(&l), 0.0);
     }
 
     #[test]
     fn solo_isolates_channel() {
         let mut m = quiet_mixer();
-        m.set_param(channel_param(2, ChannelParam::Solo), 1.0);
-        let (l, _) = run(&mut m, &mut chans_with(0, 0.25));
+        let mut s = slots_with(0, 0.25);
+        s[2].strip.set(ChannelParam::Solo, 1.0);
+        let (l, _) = run(&mut m, &mut s);
         assert_eq!(peak(&l), 0.0);
-        let (l, _) = run(&mut m, &mut chans_with(2, 0.25));
+        fill(&mut s, 2, 0.25);
+        let (l, _) = run(&mut m, &mut s);
         assert!(peak(&l) > 0.1);
     }
 
     #[test]
     fn hard_left_pan() {
         let mut m = quiet_mixer();
-        m.set_param(channel_param(0, ChannelParam::Pan), 0.0);
-        let (l, r) = run(&mut m, &mut chans_with(0, 0.25));
+        let mut s = slots_with(0, 0.25);
+        s[0].strip.set(ChannelParam::Pan, 0.0);
+        let (l, r) = run(&mut m, &mut s);
         assert!(peak(&l) > 0.1);
         assert!(peak(&r) < 1e-6);
     }
@@ -326,48 +343,59 @@ mod tests {
     #[test]
     fn delay_send_produces_echo() {
         let mut m = quiet_mixer();
-        m.set_param(channel_param(0, ChannelParam::DelaySend), 1.0);
-        m.set_param(ParamId::Fx(FxParam::DelaySync), 0.0);
-        m.set_param(ParamId::Fx(FxParam::DelayMs), 0.0); // 10 ms = 441 samples
-        let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
-        chans[0].l[0] = 0.5;
-        chans[0].r[0] = 0.5;
-        let (l, _) = run(&mut m, &mut chans);
+        m.set_global(GlobalParam::Fx(FxParam::DelaySync), 0.0);
+        m.set_global(GlobalParam::Fx(FxParam::DelayMs), 0.0); // 10 ms = 441 samples
+        let mut s = slots();
+        s[0].strip.set(ChannelParam::DelaySend, 1.0);
+        s[0].buf.l[0] = 0.5;
+        s[0].buf.r[0] = 0.5;
+        let (l, _) = run(&mut m, &mut s);
         assert!(peak(&l[430..460]) > 0.05);
     }
 
     #[test]
     fn output_is_clipped_and_finite() {
         let mut m = quiet_mixer();
-        for c in 0..CHANNELS {
-            m.set_param(channel_param(c, ChannelParam::Level), 1.0);
+        let mut s = slots();
+        for slot in &mut s {
+            slot.strip.set(ChannelParam::Level, 1.0);
+            slot.buf.l.fill(5.0);
+            slot.buf.r.fill(5.0);
         }
-        let mut chans: [StereoBuf; CHANNELS] = std::array::from_fn(|_| StereoBuf::new(N));
-        for c in &mut chans {
-            c.l.fill(5.0);
-            c.r.fill(5.0);
-        }
-        let (l, r) = run(&mut m, &mut chans);
+        let (l, r) = run(&mut m, &mut s);
         assert!(all_finite(&l) && all_finite(&r));
         assert!(peak(&l) <= 1.0);
     }
 
     #[test]
+    fn meters_are_by_position_with_master_last() {
+        let mut m = quiet_mixer();
+        let mut s = slots_with(3, 0.25);
+        run(&mut m, &mut s);
+        let meters = m.take_meters();
+        assert!(meters[3] > 0.1, "{meters:?}");
+        assert!(meters[MAX_MACHINES] > 0.1, "{meters:?}");
+        let others = (0..MAX_MACHINES).filter(|&i| i != 3);
+        assert!(others.into_iter().all(|i| meters[i] == 0.0), "{meters:?}");
+    }
+
+    #[test]
     fn guard_reports_nan_only() {
         let mut m = quiet_mixer();
-        assert!(!guard_fired(&mut m, &mut chans_with(0, 0.25)));
-        assert!(guard_fired(&mut m, &mut chans_with(0, f32::NAN)));
-        assert!(!guard_fired(&mut m, &mut chans_with(0, 0.25)));
+        assert!(!guard_fired(&mut m, &mut slots_with(0, 0.25)));
+        assert!(guard_fired(&mut m, &mut slots_with(0, f32::NAN)));
+        assert!(!guard_fired(&mut m, &mut slots_with(0, 0.25)));
     }
 
     #[test]
     fn nan_input_is_contained() {
         let mut m = quiet_mixer();
-        m.set_param(channel_param(0, ChannelParam::ReverbSend), 1.0);
-        let mut chans = chans_with(0, f32::NAN);
-        let (l, _) = run(&mut m, &mut chans);
+        let mut s = slots_with(0, f32::NAN);
+        s[0].strip.set(ChannelParam::ReverbSend, 1.0);
+        let (l, _) = run(&mut m, &mut s);
         assert!(all_finite(&l));
-        let (l, _) = run(&mut m, &mut chans_with(0, 0.0));
+        fill(&mut s, 0, 0.0);
+        let (l, _) = run(&mut m, &mut s);
         assert!(all_finite(&l), "reverb state was reset");
     }
 }

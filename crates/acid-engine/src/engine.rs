@@ -1,142 +1,82 @@
-//! The whole groovebox: two bass synths, two drum kits, the FM and Sampler
-//! note slots (the FM synth and the sample player), the mixer and the
-//! sequencer, rendered sample-accurately. process() is real-time safe:
-//! no allocation, locking or I/O.
+//! The whole groovebox: a rack of up to `MAX_MACHINES` slots (each a
+//! machine's DSP, knobs, patterns and channel strip), the shared send
+//! effects and master bus, and the sequencer, rendered sample-accurately.
+//! process() is real-time safe: no allocation, locking or I/O.
 
-use crate::drums::{DrumKit, KitKind};
-use crate::fm::FmSynth;
-use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
-use crate::mixer::{Mixer, StereoBuf};
-use crate::params::{
-    CHANNELS, ChannelParam, DRUM_INSTRUMENTS, DrumParam, FM_OPS, FmParam, FxParam, KITS, KitParam,
-    MachineParam, MasterParam, OpParam, ParamId, SAMPLER_SLOTS, SYNTHS, SamplerParam, SlotParam,
-    SynthParam, channel_param, drum_param, fm_op_param, fm_param, kit_param, sampler_param,
-    slot_param, synth_param,
-};
+use crate::machine::{MACHINES, MAX_MACHINES, MachineUid, standard_rack};
+use crate::mixer::Mixer;
+use crate::params::{GlobalParam, MachineParam, ParamId};
 use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
+use crate::rack::{MachineDsp, Slot, SlotPatterns};
+use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
-use crate::sampler::{SLOTS, Sampler};
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
 use crate::song::{Banks, MAX_BARS};
-use crate::synth::BassSynth;
 use std::sync::Arc;
 
 /// Upper bound on sequencer ticks fired without time advancing; guards
 /// against a sequencer that never moves forward.
 const MAX_TICKS_PER_POSITION: usize = 64;
-/// Sequencer event buffer size: never grows on the audio thread. Room for
-/// every param, plus per note machine 128 releases and MAX_NOTES starts.
-const EVENT_RESERVE: usize = 64 + 2 * FLAT_COUNT + NOTE_MACHINES * (128 + MAX_NOTES);
+const GLOBALS: usize = GlobalParam::COUNT;
 
-/// Interim (Tasks 3–4): number of params in the fixed six-machine layout.
-const FLAT_COUNT: usize = 589;
-
-// Old flat-table block bases: synths, kits, channels, fx, master, fm,
-// sampler, fm ops, sampler slots.
-const SYNTH_N: usize = SynthParam::ALL.len();
-const DRUM_N: usize = DrumParam::ALL.len();
-const PER_KIT: usize = DRUM_INSTRUMENTS * DRUM_N + KitParam::ALL.len();
-const KIT_BASE: usize = SYNTHS * SYNTH_N;
-const CHANNEL_BASE: usize = KIT_BASE + KITS * PER_KIT;
-const FX_BASE: usize = CHANNEL_BASE + CHANNELS * ChannelParam::ALL.len();
-const MASTER_BASE: usize = FX_BASE + FxParam::ALL.len();
-const FM_BASE: usize = MASTER_BASE + MasterParam::ALL.len();
-const SAMPLER_BASE: usize = FM_BASE + FmParam::ALL.len();
-const FM_OP_BASE: usize = SAMPLER_BASE + SamplerParam::ALL.len();
-const SLOT_BASE: usize = FM_OP_BASE + FM_OPS * OpParam::ALL.len();
-
-/// Interim (Tasks 3–4): flat position of a param in the fixed six-machine
-/// layout — the same order the old `ParamId::all()` used, so knob storage
-/// and automation behave exactly as before. Replaced by per-slot storage in Task 5.
-fn flat_index(id: ParamId) -> Option<usize> {
-    let (uid, p) = match id {
-        ParamId::Fx(p) => return Some(FX_BASE + p as usize),
-        ParamId::Master(p) => return Some(MASTER_BASE + p as usize),
-        ParamId::Machine(uid, p) => (uid, p),
-    };
-    let m = MachineId::from_uid(uid)?;
-    if !p.fits(m.machine_type()) {
-        return None;
-    }
-    let machine = m.index();
-    Some(match (p, m.kind()) {
-        (MachineParam::Channel(p), _) => {
-            CHANNEL_BASE + machine * ChannelParam::ALL.len() + p as usize
-        }
-        (MachineParam::Synth(p), MachineKind::Synth(s)) => s * SYNTH_N + p as usize,
-        (MachineParam::Drum(i, p), MachineKind::Drum(k)) => {
-            KIT_BASE + k * PER_KIT + i as usize * DRUM_N + p as usize
-        }
-        (MachineParam::Kit(p), MachineKind::Drum(k)) => {
-            KIT_BASE + k * PER_KIT + DRUM_INSTRUMENTS * DRUM_N + p as usize
-        }
-        (MachineParam::Fm(p), _) => FM_BASE + p as usize,
-        (MachineParam::Sampler(p), _) => SAMPLER_BASE + p as usize,
-        (MachineParam::FmOp(op, p), _) => {
-            FM_OP_BASE + op as usize * OpParam::ALL.len() + p as usize
-        }
-        (MachineParam::SamplerSlot(s, p), _) => {
-            SLOT_BASE + s as usize * SlotParam::ALL.len() + p as usize
-        }
-        _ => return None,
-    })
+/// Where a param's knob lives.
+#[derive(Clone, Copy)]
+enum Loc {
+    /// Slot index, knob index.
+    Slot(usize, usize),
+    Global(usize),
 }
 
-/// Interim (Tasks 3–4): every param of the fixed six-machine layout in
-/// `flat_index` order (the old `ParamId::all()` order).
-fn flat_ids() -> Vec<ParamId> {
-    let mut v = Vec::with_capacity(FLAT_COUNT);
-    for s in 0..SYNTHS {
-        v.extend(SynthParam::ALL.map(|p| synth_param(s, p)));
-    }
-    for k in 0..KITS {
-        for i in 0..DRUM_INSTRUMENTS as u8 {
-            v.extend(DrumParam::ALL.map(|p| drum_param(k, i, p)));
+/// The standard six slots' banks, for the six-track sequencer (interim
+/// until the sequencer is keyed by uid). Only valid for the standard rack.
+fn standard_banks(slots: &[Slot]) -> Banks<'_> {
+    fn synth(s: &Slot) -> &[SynthPattern] {
+        match &s.patterns {
+            SlotPatterns::Synth(v) => v,
+            _ => &[],
         }
-        v.extend(KitParam::ALL.map(|p| kit_param(k, p)));
     }
-    for c in 0..CHANNELS {
-        v.extend(ChannelParam::ALL.map(|p| channel_param(c, p)));
+    fn drum(s: &Slot) -> &[DrumPattern] {
+        match &s.patterns {
+            SlotPatterns::Drum(v) => v,
+            _ => &[],
+        }
     }
-    v.extend(FxParam::ALL.map(ParamId::Fx));
-    v.extend(MasterParam::ALL.map(ParamId::Master));
-    v.extend(FmParam::ALL.map(fm_param));
-    v.extend(SamplerParam::ALL.map(sampler_param));
-    for op in 0..FM_OPS as u8 {
-        v.extend(OpParam::ALL.map(|p| fm_op_param(op, p)));
+    fn notes(s: &Slot) -> &[NotePattern] {
+        match &s.patterns {
+            SlotPatterns::Notes(v) => v,
+            _ => &[],
+        }
     }
-    for s in 0..SAMPLER_SLOTS as u8 {
-        v.extend(SlotParam::ALL.map(|p| slot_param(s, p)));
+    Banks {
+        synths: [synth(&slots[0]), synth(&slots[1])],
+        drums: [drum(&slots[2]), drum(&slots[3])],
+        notes: [notes(&slots[4]), notes(&slots[5])],
     }
-    v
 }
 
 pub struct Engine {
     sample_rate: f32,
-    synths: [BassSynth; 2],
-    kits: [DrumKit; 2],
-    fm: FmSynth,
-    /// The sample player behind the Sampler slot.
-    sampler: Sampler,
+    /// The rack, in order; capacity `MAX_MACHINES` so it never grows.
+    slots: Vec<Slot>,
+    /// Send effects and master bus.
     mixer: Mixer,
     seq: Sequencer,
-    synth_patterns: [Vec<SynthPattern>; 2],
-    drum_patterns: [Vec<DrumPattern>; 2],
-    note_patterns: [Vec<NotePattern>; NOTE_MACHINES],
-    chans: [StereoBuf; CHANNELS],
     events: Vec<SeqEvent>,
-    /// Knob values set through `set_param`, indexed by `flat_index`.
-    knobs: Vec<f32>,
-    /// Effective value per param: the knob, or song automation / live
-    /// record value. Lane restores return here.
-    base: Vec<f32>,
-    /// Params held by the user while recording: automation skips them.
-    touched: Vec<bool>,
-    /// `flat_ids()`, so knobs can be re-applied without allocating.
-    ids: Vec<ParamId>,
+    /// `GlobalParam::all()`, so globals re-apply without allocating.
+    global_ids: [GlobalParam; GLOBALS],
+    global_knobs: [f32; GLOBALS],
+    global_base: [f32; GLOBALS],
+    global_touched: [bool; GLOBALS],
+    /// Every knob in the rack plus the globals: bounds song lanes.
+    param_count: usize,
+    /// Interim (until the sequencer is keyed by uid): the rack is today's
+    /// six machines in order, so the six-track sequencer can play it.
+    /// Otherwise slots render but no patterns play.
+    standard_layout: bool,
     guard_fired: bool,
-    song: crate::project::Song,
+    song: Song,
     /// The song ended by itself and no transport command came since: the
     /// next `stop` counts as the first one (it only releases).
     ended_by_song: bool,
@@ -146,152 +86,229 @@ impl Engine {
     pub const MAX_BLOCK: usize = 512;
 
     pub fn new(sample_rate: f32) -> Self {
-        Self {
-            sample_rate,
-            synths: [BassSynth::new(sample_rate), BassSynth::new(sample_rate)],
-            kits: [
-                DrumKit::new(KitKind::K808, sample_rate),
-                DrumKit::new(KitKind::K909, sample_rate),
-            ],
-            fm: FmSynth::new(sample_rate),
-            sampler: Sampler::new(sample_rate),
-            mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
-            seq: Sequencer::new(sample_rate),
-            synth_patterns: [
-                vec![SynthPattern::default(); PATTERNS],
-                vec![SynthPattern::default(); PATTERNS],
-            ],
-            drum_patterns: [
-                vec![DrumPattern::default(); PATTERNS],
-                vec![DrumPattern::default(); PATTERNS],
-            ],
-            note_patterns: std::array::from_fn(|_| vec![NotePattern::default(); PATTERNS]),
-            chans: std::array::from_fn(|_| StereoBuf::new(Self::MAX_BLOCK)),
-            events: Vec::with_capacity(EVENT_RESERVE),
-            knobs: flat_ids().iter().map(|id| id.info().default).collect(),
-            base: flat_ids().iter().map(|id| id.info().default).collect(),
-            touched: vec![false; FLAT_COUNT],
-            ids: flat_ids(),
-            guard_fired: false,
-            song: crate::project::Song::default(),
-            ended_by_song: false,
-        }
+        Self::from_project(sample_rate, &Project::default())
     }
 
-    /// Not real-time safe (clones patterns); call while stopped or from
-    /// a non-audio thread before handing the engine to the audio thread.
+    /// Builds an engine with a project loaded. Allocates; call off the
+    /// audio thread.
+    pub fn from_project(sample_rate: f32, p: &Project) -> Engine {
+        let global_ids: [GlobalParam; GLOBALS] = std::array::from_fn(|i| GlobalParam::all()[i]);
+        let defaults = global_ids.map(|g| g.info().default);
+        let mut e = Self {
+            sample_rate,
+            slots: Vec::with_capacity(MAX_MACHINES),
+            mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
+            seq: Sequencer::new(sample_rate),
+            events: Vec::new(),
+            global_ids,
+            global_knobs: defaults,
+            global_base: defaults,
+            global_touched: [false; GLOBALS],
+            param_count: GLOBALS,
+            standard_layout: false,
+            guard_fired: false,
+            song: Song::default(),
+            ended_by_song: false,
+        };
+        e.load_project(p);
+        e
+    }
+
+    /// Rebuilds the rack from `p` (one slot per machine, in rack order, at
+    /// most `MAX_MACHINES`) and loads its globals, song, tempo and pattern
+    /// selection. Not real-time safe: call while stopped or from a
+    /// non-audio thread before handing the engine to the audio thread.
     pub fn load_project(&mut self, p: &Project) {
-        let synths = [MachineId::Synth1, MachineId::Synth2];
-        let kits = [MachineId::Kit808, MachineId::Kit909];
-        for s in 0..2 {
-            if let Some(m) = p.synth(synths[s].uid()) {
-                self.synth_patterns[s] = m.patterns.clone();
-            }
-            if let Some(m) = p.kit(kits[s].uid()) {
-                self.drum_patterns[s] = m.patterns.clone();
-            }
-        }
-        for (n, m) in [MachineId::Fm, MachineId::Sampler].into_iter().enumerate() {
-            if let Some(pats) = p.note_patterns(m.uid()) {
-                self.note_patterns[n] = pats.clone();
-            }
-        }
-        for id in flat_ids() {
+        self.slots.clear();
+        self.slots.extend(
+            p.machines
+                .iter()
+                .take(MAX_MACHINES)
+                .map(|m| Slot::from_entry(m, self.sample_rate)),
+        );
+        let standard = standard_rack();
+        self.standard_layout = self.slots.len() == standard.len()
+            && self
+                .slots
+                .iter()
+                .zip(standard)
+                .all(|(s, (uid, ty, _))| s.uid == uid && s.ty == ty);
+        self.param_count = GLOBALS + self.slots.iter().map(|s| s.knobs.len()).sum::<usize>();
+        // Room for every param (automation and lane events), plus per
+        // machine 128 releases and MAX_NOTES starts: never grows on the
+        // audio thread.
+        let reserve = 64 + 2 * self.param_count + MAX_MACHINES * (128 + MAX_NOTES);
+        self.events = Vec::with_capacity(reserve);
+        for i in 0..GLOBALS {
+            let id = ParamId::from(self.global_ids[i]);
             self.set_param(id, p.param(id));
-        }
-        let slots = p.sampler(MachineId::Sampler.uid()).map(|s| &s.slots);
-        for i in 0..SLOTS {
-            let data = slots.and_then(|s| s.get(i)).and_then(Option::as_ref);
-            let mut sample = data.map(|d| Arc::new(d.to_sample()));
-            self.sampler.swap_sample(i, &mut sample);
-            let mut play = data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta));
-            self.sampler.swap_play(i, &mut play);
         }
         self.song = p.song.clone();
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
-        for m in MachineId::ALL {
-            if let Some(e) = p.machine(m.uid()) {
-                self.seq.select(m.index(), e.selected);
+        if self.standard_layout {
+            for (i, m) in p.machines.iter().enumerate() {
+                self.seq.select(i, m.selected);
             }
+        }
+    }
+
+    /// The rack's uids in order.
+    pub fn slot_uids(&self) -> Vec<MachineUid> {
+        self.slots.iter().map(|s| s.uid).collect()
+    }
+
+    /// How many slots the rack holds without reallocating.
+    pub fn slot_capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
+    /// The saved knob position of a param; `None` for a uid not in the
+    /// rack or a param that doesn't fit its machine.
+    pub fn knob(&self, id: ParamId) -> Option<f32> {
+        Some(match self.locate(id)? {
+            Loc::Slot(s, i) => self.slots[s].knobs[i],
+            Loc::Global(g) => self.global_knobs[g],
+        })
+    }
+
+    fn locate(&self, id: ParamId) -> Option<Loc> {
+        match id {
+            ParamId::Machine(uid, p) => {
+                let s = self.slots.iter().position(|s| s.uid == uid)?;
+                Some(Loc::Slot(s, self.slots[s].index_of(p)?))
+            }
+            ParamId::Fx(_) | ParamId::Master(_) => Some(Loc::Global(id.global()?.index())),
+        }
+    }
+
+    fn base_mut(&mut self, loc: Loc) -> &mut f32 {
+        match loc {
+            Loc::Slot(s, i) => &mut self.slots[s].base[i],
+            Loc::Global(g) => &mut self.global_base[g],
+        }
+    }
+
+    fn knob_at(&self, loc: Loc) -> f32 {
+        match loc {
+            Loc::Slot(s, i) => self.slots[s].knobs[i],
+            Loc::Global(g) => self.global_knobs[g],
+        }
+    }
+
+    fn touched_at(&self, loc: Loc) -> bool {
+        match loc {
+            Loc::Slot(s, i) => self.slots[s].touched[i],
+            Loc::Global(g) => self.global_touched[g],
         }
     }
 
     /// Out-of-range ids and non-finite values are ignored; values are
     /// clamped to 0..=1. The value is remembered as the knob position.
     pub fn set_param(&mut self, id: ParamId, v: f32) {
-        let Some(i) = flat_index(id) else { return };
+        let Some(loc) = self.locate(id) else { return };
         if !v.is_finite() {
             return;
         }
         let v = v.clamp(0.0, 1.0);
-        self.knobs[i] = v;
-        self.base[i] = v;
-        self.apply_param(id, v);
+        match loc {
+            Loc::Slot(s, i) => self.slots[s].knobs[i] = v,
+            Loc::Global(g) => self.global_knobs[g] = v,
+        }
+        *self.base_mut(loc) = v;
+        self.apply_at(loc, v);
+    }
+
+    /// Sends a (clamped) value to the slot's DSP or strip, or the mixer.
+    fn apply_at(&mut self, loc: Loc, v: f32) {
+        match loc {
+            Loc::Slot(s, i) => {
+                let slot = &mut self.slots[s];
+                let p: MachineParam = slot.params[i];
+                slot.apply(p, v);
+            }
+            Loc::Global(g) => self.mixer.set_global(self.global_ids[g], v),
+        }
     }
 
     /// Applies a value without remembering it (param-lane overrides).
     fn apply_param(&mut self, id: ParamId, v: f32) {
-        if flat_index(id).is_none() || !v.is_finite() {
+        let Some(loc) = self.locate(id) else { return };
+        if !v.is_finite() {
             return;
         }
-        let v = v.clamp(0.0, 1.0);
-        let ParamId::Machine(uid, p) = id else {
-            return self.mixer.set_param(id, v);
-        };
-        let Some(kind) = MachineId::from_uid(uid).map(MachineId::kind) else {
-            return;
-        };
-        match (p, kind) {
-            (MachineParam::Synth(p), MachineKind::Synth(s)) => self.synths[s].set_param(p, v),
-            (MachineParam::Drum(i, p), MachineKind::Drum(k)) => {
-                self.kits[k].set_param(i as usize, p, v)
-            }
-            (MachineParam::Kit(p), MachineKind::Drum(k)) => self.kits[k].set_kit_param(p, v),
-            (MachineParam::Fm(p), _) => self.fm.set_param(p, v),
-            (MachineParam::FmOp(op, p), _) => self.fm.set_op_param(op as usize, p, v),
-            (MachineParam::Sampler(p), _) => self.sampler.set_param(p, v),
-            (MachineParam::SamplerSlot(s, p), _) => self.sampler.set_slot_param(s as usize, p, v),
-            _ => self.mixer.set_param(id, v),
-        }
+        self.apply_at(loc, v.clamp(0.0, 1.0));
     }
 
     fn restore_param(&mut self, id: ParamId) {
-        if let Some(i) = flat_index(id) {
-            let v = self.base[i];
-            self.apply_param(id, v);
+        if let Some(loc) = self.locate(id) {
+            let v = *self.base_mut(loc);
+            self.apply_at(loc, v);
         }
     }
 
     fn restore_all_knobs(&mut self) {
-        for i in 0..FLAT_COUNT {
-            let (id, v) = (self.ids[i], self.knobs[i]);
-            self.apply_param(id, v);
+        for s in 0..self.slots.len() {
+            for i in 0..self.slots[s].knobs.len() {
+                let v = self.slots[s].knobs[i];
+                self.apply_at(Loc::Slot(s, i), v);
+            }
         }
+        for g in 0..GLOBALS {
+            self.apply_at(Loc::Global(g), self.global_knobs[g]);
+        }
+    }
+
+    fn samplers(&mut self) -> impl Iterator<Item = &mut Sampler> {
+        self.slots.iter_mut().filter_map(|s| match &mut s.dsp {
+            MachineDsp::Sampler(x) => Some(&mut **x),
+            _ => None,
+        })
+    }
+
+    /// The first Sampler in the rack (today's single Sampler machine).
+    fn first_sampler(&mut self) -> Option<&mut Sampler> {
+        self.samplers().next()
     }
 
     pub fn set_bpm(&mut self, bpm: f32) {
         self.seq.set_bpm(bpm);
-        self.mixer.set_bpm(self.seq.bpm());
-        self.sampler.set_bpm(self.seq.bpm());
+        let bpm = self.seq.bpm();
+        self.mixer.set_bpm(bpm);
+        for s in self.samplers() {
+            s.set_bpm(bpm);
+        }
     }
 
-    /// Exchanges a sampler slot's audio (real-time safe; the old sample
-    /// comes back for disposal off the audio thread).
+    /// Exchanges a slot's audio on the rack's first Sampler (real-time
+    /// safe; the old sample comes back for disposal off the audio thread).
     pub fn swap_sampler_sample(
         &mut self,
         slot: usize,
         sample: &mut Option<Arc<SampleData>>,
     ) -> bool {
-        self.sampler.swap_sample(slot, sample)
+        self.first_sampler()
+            .is_some_and(|s| s.swap_sample(slot, sample))
     }
 
     pub fn swap_sampler_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
-        self.sampler.swap_play(slot, play)
+        self.first_sampler()
+            .is_some_and(|s| s.swap_play(slot, play))
     }
 
     pub fn set_swing(&mut self, swing: f32) {
         self.seq.set_swing(swing);
+    }
+
+    /// Releases the note machines' pattern notes (auditions keep sounding).
+    fn note_machines_pattern_off(&mut self) {
+        for s in &mut self.slots {
+            match &mut s.dsp {
+                MachineDsp::Fm(f) => f.pattern_off(),
+                MachineDsp::Sampler(x) => x.pattern_off(),
+                _ => {}
+            }
+        }
     }
 
     /// Starts (or restarts) the transport. Pattern notes still sounding
@@ -300,13 +317,12 @@ impl Engine {
         self.ended_by_song = false;
         self.seq.play();
         // The sequencer drops its held-note masks without emitting releases.
-        self.fm.pattern_off();
-        self.sampler.pattern_off();
+        self.note_machines_pattern_off();
     }
 
-    /// Audition: starts a note on note machine `machine` (4 = FM,
-    /// 5 = Sampler) right away, playing or not. Other machines, pitches
-    /// above 127 and velocity 0 are ignored.
+    /// Audition: starts a note on the FM or Sampler machine at rack
+    /// position `machine` right away, playing or not. Other machines,
+    /// pitches above 127 and velocity 0 are ignored.
     pub fn note_on(&mut self, machine: usize, pitch: u8, vel: u8) {
         self.poly_on(machine, pitch, vel, true);
     }
@@ -320,17 +336,17 @@ impl Engine {
         if pitch > 127 || vel == 0 {
             return;
         }
-        match MachineId::from_index(machine) {
-            Some(MachineId::Fm) => self.fm.note_on(pitch, vel.min(127), live),
-            Some(MachineId::Sampler) => self.sampler.note_on(pitch, vel.min(127), live),
+        match self.slots.get_mut(machine).map(|s| &mut s.dsp) {
+            Some(MachineDsp::Fm(f)) => f.note_on(pitch, vel.min(127), live),
+            Some(MachineDsp::Sampler(s)) => s.note_on(pitch, vel.min(127), live),
             _ => {}
         }
     }
 
     fn poly_off(&mut self, machine: usize, pitch: u8, live: bool) {
-        match MachineId::from_index(machine) {
-            Some(MachineId::Fm) => self.fm.note_off(pitch, live),
-            Some(MachineId::Sampler) => self.sampler.note_off(pitch, live),
+        match self.slots.get_mut(machine).map(|s| &mut s.dsp) {
+            Some(MachineDsp::Fm(f)) => f.note_off(pitch, live),
+            Some(MachineDsp::Sampler(s)) => s.note_off(pitch, live),
             _ => {}
         }
     }
@@ -344,8 +360,11 @@ impl Engine {
         let cut = !self.seq.is_playing() && !self.ended_by_song;
         self.ended_by_song = false;
         if cut {
-            self.fm.reset();
-            self.sampler.reset();
+            for s in &mut self.slots {
+                if matches!(s.dsp, MachineDsp::Fm(_) | MachineDsp::Sampler(_)) {
+                    s.reset();
+                }
+            }
         }
         self.end_playback();
     }
@@ -354,51 +373,60 @@ impl Engine {
     /// note machines' pattern notes (auditions keep sounding).
     fn end_playback(&mut self) {
         self.seq.stop();
-        for s in &mut self.synths {
-            s.note_off();
+        for s in &mut self.slots {
+            if let MachineDsp::Synth(x) = &mut s.dsp {
+                x.note_off();
+            }
         }
-        self.fm.pattern_off();
-        self.sampler.pattern_off();
-        self.base.copy_from_slice(&self.knobs);
-        self.touched.fill(false);
+        self.note_machines_pattern_off();
+        for s in &mut self.slots {
+            s.base.copy_from_slice(&s.knobs);
+            s.touched.fill(false);
+        }
+        self.global_base = self.global_knobs;
+        self.global_touched = [false; GLOBALS];
         self.restore_all_knobs();
     }
 
     /// Plays a value without changing the saved knob (record mode).
     pub fn set_param_live(&mut self, id: ParamId, v: f32) {
-        let Some(i) = flat_index(id) else { return };
+        let Some(loc) = self.locate(id) else { return };
         if !v.is_finite() {
             return;
         }
         let v = v.clamp(0.0, 1.0);
-        self.base[i] = v;
-        self.apply_param(id, v);
+        *self.base_mut(loc) = v;
+        self.apply_at(loc, v);
     }
 
     /// While touched, song automation for `id` is not applied.
     pub fn touch(&mut self, id: ParamId, on: bool) {
-        if let Some(i) = flat_index(id) {
-            self.touched[i] = on;
+        match self.locate(id) {
+            Some(Loc::Slot(s, i)) => self.slots[s].touched[i] = on,
+            Some(Loc::Global(g)) => self.global_touched[g] = on,
+            None => {}
         }
     }
 
     fn apply_automation(&mut self, id: ParamId, v: f32) {
-        let Some(i) = flat_index(id) else { return };
-        if self.touched[i] || !v.is_finite() {
+        let Some(loc) = self.locate(id) else { return };
+        if self.touched_at(loc) || !v.is_finite() {
             return;
         }
-        self.base[i] = v.clamp(0.0, 1.0);
-        self.apply_param(id, self.base[i]);
+        let v = v.clamp(0.0, 1.0);
+        *self.base_mut(loc) = v;
+        self.apply_at(loc, v);
     }
 
     /// No automation applies here yet: back to the knob (unless held).
     fn reset_automation(&mut self, id: ParamId) {
-        let Some(i) = flat_index(id) else { return };
-        if self.touched[i] {
+        let Some(loc) = self.locate(id) else { return };
+        if self.touched_at(loc) {
             return;
         }
-        self.base[i] = self.knobs[i];
-        self.apply_param(id, self.knobs[i]);
+        let v = self.knob_at(loc);
+        *self.base_mut(loc) = v;
+        self.apply_at(loc, v);
     }
 
     /// Swaps in a new song (real-time safe). An invalid song leaves both
@@ -410,11 +438,11 @@ impl Engine {
             .flat_map(|b| &b.cells)
             .filter_map(|(_, c)| c.pattern)
             .all(|r| (r.0 as usize) < PATTERNS);
-        let lanes_ok = song.automation.len() <= FLAT_COUNT
+        let lanes_ok = song.automation.len() <= self.param_count
             && song
                 .automation
                 .iter()
-                .all(|l| flat_index(l.param).is_some());
+                .all(|l| self.locate(l.param).is_some());
         if song.bars.len() > MAX_BARS || !refs_ok || !lanes_ok {
             return false;
         }
@@ -446,19 +474,17 @@ impl Engine {
     /// The value a param currently plays at (knob, automation or live).
     #[cfg(test)]
     pub(crate) fn live_param(&self, id: ParamId) -> f32 {
-        flat_index(id).map_or(0.0, |i| self.base[i])
-    }
-
-    /// The saved knob position of a param.
-    #[cfg(test)]
-    pub(crate) fn knob(&self, id: ParamId) -> f32 {
-        flat_index(id).map_or(0.0, |i| self.knobs[i])
+        match self.locate(id) {
+            Some(Loc::Slot(s, i)) => self.slots[s].base[i],
+            Some(Loc::Global(g)) => self.global_base[g],
+            None => 0.0,
+        }
     }
 
     /// Whether a knob is held against automation.
     #[cfg(test)]
     pub(crate) fn is_touched(&self, id: ParamId) -> bool {
-        flat_index(id).is_some_and(|i| self.touched[i])
+        self.locate(id).is_some_and(|l| self.touched_at(l))
     }
 
     #[cfg(test)]
@@ -477,33 +503,54 @@ impl Engine {
         }
     }
 
-    /// Builds an engine with a project loaded. Allocates; call off the
-    /// audio thread.
-    pub fn from_project(sample_rate: f32, p: &Project) -> Engine {
-        let mut e = Engine::new(sample_rate);
-        e.load_project(p);
-        e
-    }
-
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
 
-    /// Swaps `p` with the stored pattern (real-time safe). An invalid
-    /// target or malformed pattern leaves both untouched and returns false.
+    /// The `n`th slot (in rack order) whose patterns are of the kind
+    /// `pick` accepts.
+    fn nth_bank<T>(
+        &mut self,
+        n: usize,
+        pick: fn(&mut SlotPatterns) -> Option<&mut Vec<T>>,
+    ) -> Option<&mut Vec<T>> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| pick(&mut s.patterns))
+            .nth(n)
+    }
+
+    /// Swaps `p` with the stored pattern of the `synth`th 303 (real-time
+    /// safe). An invalid target or malformed pattern leaves both untouched
+    /// and returns false.
     pub fn swap_synth_pattern(&mut self, synth: usize, slot: u8, p: &mut SynthPattern) -> bool {
-        if synth >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+        if slot as usize >= PATTERNS || !p.is_well_formed() {
             return false;
         }
-        std::mem::swap(&mut self.synth_patterns[synth][slot as usize], p);
+        let bank = self.nth_bank(synth, |b| match b {
+            SlotPatterns::Synth(v) => Some(v),
+            _ => None,
+        });
+        let Some(stored) = bank.and_then(|b| b.get_mut(slot as usize)) else {
+            return false;
+        };
+        std::mem::swap(stored, p);
         true
     }
 
+    /// Like `swap_synth_pattern`, on the `kit`th drum kit.
     pub fn swap_drum_pattern(&mut self, kit: usize, slot: u8, p: &mut DrumPattern) -> bool {
-        if kit >= 2 || slot as usize >= PATTERNS || !p.is_well_formed() {
+        if slot as usize >= PATTERNS || !p.is_well_formed() {
             return false;
         }
-        std::mem::swap(&mut self.drum_patterns[kit][slot as usize], p);
+        let bank = self.nth_bank(kit, |b| match b {
+            SlotPatterns::Drum(v) => Some(v),
+            _ => None,
+        });
+        let Some(stored) = bank.and_then(|b| b.get_mut(slot as usize)) else {
+            return false;
+        };
+        std::mem::swap(stored, p);
         true
     }
 
@@ -524,17 +571,21 @@ impl Engine {
         p
     }
 
-    /// Swaps `p` into note machine `machine` (4 = FM, 5 = Sampler).
-    /// Real-time safe. An invalid target or malformed pattern leaves both
-    /// untouched and returns false.
+    /// Swaps `p` into the note machine (FM or Sampler) at rack position
+    /// `machine`. Real-time safe. An invalid target or malformed pattern
+    /// leaves both untouched and returns false.
     pub fn swap_note_pattern(&mut self, machine: usize, slot: u8, p: &mut NotePattern) -> bool {
-        let Some(MachineKind::Notes(n)) = kind_of(machine) else {
-            return false;
-        };
         if slot as usize >= PATTERNS || !p.is_well_formed() {
             return false;
         }
-        std::mem::swap(&mut self.note_patterns[n][slot as usize], p);
+        let Some(SlotPatterns::Notes(bank)) = self.slots.get_mut(machine).map(|s| &mut s.patterns)
+        else {
+            return false;
+        };
+        let Some(stored) = bank.get_mut(slot as usize) else {
+            return false;
+        };
+        std::mem::swap(stored, p);
         true
     }
 
@@ -552,8 +603,8 @@ impl Engine {
         std::array::from_fn(|m| self.seq.queued_pattern(m))
     }
 
-    /// See `Mixer::take_meters`.
-    pub fn take_meters(&mut self) -> [f32; CHANNELS + 1] {
+    /// See `Mixer::take_meters`: by rack position, master at `MAX_MACHINES`.
+    pub fn take_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
         self.mixer.take_meters()
     }
 
@@ -584,53 +635,68 @@ impl Engine {
         }
     }
 
+    /// Applies one sequencer event. Machine indices are rack positions of
+    /// the standard layout (the only layout the sequencer plays for now).
+    fn handle_event(&mut self, ev: SeqEvent) {
+        match ev {
+            SeqEvent::Note {
+                synth,
+                midi,
+                accent,
+                legato,
+            } => {
+                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(synth).map(|s| &mut s.dsp) {
+                    s.note_on(midi, accent, legato);
+                }
+            }
+            SeqEvent::NoteOff { synth } => {
+                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(synth).map(|s| &mut s.dsp) {
+                    s.note_off();
+                }
+            }
+            SeqEvent::Drum { kit, inst, accent } => {
+                if let Some(MachineDsp::Kit(k)) = self.slots.get_mut(2 + kit).map(|s| &mut s.dsp) {
+                    k.trigger(inst, accent);
+                }
+            }
+            SeqEvent::Param { id, value } => self.apply_param(id, value),
+            SeqEvent::ParamRestore { id } => self.restore_param(id),
+            SeqEvent::Automation { id, value } => self.apply_automation(id, value),
+            SeqEvent::AutomationReset { id } => self.reset_automation(id),
+            SeqEvent::PolyOn {
+                machine,
+                pitch,
+                vel,
+            } => self.poly_on(machine, pitch, vel, false),
+            SeqEvent::PolyOff { machine, pitch } => self.poly_off(machine, pitch, false),
+        }
+    }
+
     fn process_block(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let n = out_l.len();
-        for c in &mut self.chans {
-            c.l[..n].fill(0.0);
-            c.r[..n].fill(0.0);
+        for s in &mut self.slots {
+            s.buf.l[..n].fill(0.0);
+            s.buf.r[..n].fill(0.0);
         }
         let mut pos = 0;
         let mut ticks_here = 0;
         while pos < n {
+            if !self.standard_layout {
+                // Interim: the six-track sequencer can't play this rack.
+                for s in &mut self.slots {
+                    s.render(pos..n);
+                }
+                break;
+            }
             let until = self.seq.samples_to_next_tick();
             if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
                 ticks_here += 1;
                 self.events.clear();
-                self.seq.tick(
-                    Banks::new(
-                        &self.synth_patterns,
-                        &self.drum_patterns,
-                        &self.note_patterns,
-                    ),
-                    &self.song,
-                    &mut self.events,
-                );
+                self.seq
+                    .tick(standard_banks(&self.slots), &self.song, &mut self.events);
                 for i in 0..self.events.len() {
-                    match self.events[i] {
-                        SeqEvent::Note {
-                            synth,
-                            midi,
-                            accent,
-                            legato,
-                        } => self.synths[synth].note_on(midi, accent, legato),
-                        SeqEvent::NoteOff { synth } => self.synths[synth].note_off(),
-                        SeqEvent::Drum { kit, inst, accent } => {
-                            self.kits[kit].trigger(inst, accent)
-                        }
-                        SeqEvent::Param { id, value } => self.apply_param(id, value),
-                        SeqEvent::ParamRestore { id } => self.restore_param(id),
-                        SeqEvent::Automation { id, value } => self.apply_automation(id, value),
-                        SeqEvent::AutomationReset { id } => self.reset_automation(id),
-                        SeqEvent::PolyOn {
-                            machine,
-                            pitch,
-                            vel,
-                        } => self.poly_on(machine, pitch, vel, false),
-                        SeqEvent::PolyOff { machine, pitch } => {
-                            self.poly_off(machine, pitch, false)
-                        }
-                    }
+                    let ev = self.events[i];
+                    self.handle_event(ev);
                 }
                 if self.seq.take_ended() {
                     self.end_playback();
@@ -645,34 +711,17 @@ impl Engine {
             } else {
                 until.min(n - pos)
             };
-            let span = pos..pos + run;
-            for s in 0..2 {
-                let c = &mut self.chans[s];
-                self.synths[s].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
+            for s in &mut self.slots {
+                s.render(pos..pos + run);
             }
-            for k in 0..2 {
-                let c = &mut self.chans[2 + k];
-                self.kits[k].render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
-            }
-            let c = &mut self.chans[MachineId::Fm.index()];
-            self.fm
-                .render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
-            let c = &mut self.chans[MachineId::Sampler.index()];
-            self.sampler
-                .render(&mut c.l[span.clone()], &mut c.r[span.clone()]);
             self.seq.advance(run);
             pos += run;
         }
-        if self.mixer.process(&mut self.chans, n, out_l, out_r) {
+        if self.mixer.process(&mut self.slots, n, out_l, out_r) {
             self.guard_fired = true;
-            for s in &mut self.synths {
+            for s in &mut self.slots {
                 s.reset();
             }
-            for k in &mut self.kits {
-                k.reset();
-            }
-            self.fm.reset();
-            self.sampler.reset();
         }
     }
 }
@@ -681,24 +730,151 @@ impl Engine {
 #[allow(clippy::field_reassign_with_default)] // tests tweak one field of a default pattern
 mod tests {
     use super::*;
+    use crate::fm::FmSynth;
+    use crate::machine::{MAX_MACHINES, MachineId, MachineType, MachineUid};
+    use crate::params::{
+        ChannelParam, DrumParam, FmParam, KitParam, MasterParam, OpParam, SynthParam,
+        channel_param, drum_param, fm_op_param, fm_param, kit_param, slot_param, synth_param,
+    };
+    use crate::project::MachineEntry;
     use crate::testutil::{all_finite, peak, rms};
 
     #[test]
-    fn flat_ids_and_flat_index_round_trip() {
-        let ids = flat_ids();
-        assert_eq!(ids.len(), FLAT_COUNT);
-        for (i, &id) in ids.iter().enumerate() {
-            assert_eq!(flat_index(id), Some(i), "{id:?}");
+    fn every_param_of_the_standard_rack_has_its_own_knob() {
+        let mut e = Engine::new(SR);
+        let ids: Vec<ParamId> = crate::machine::standard_rack()
+            .into_iter()
+            .flat_map(|(uid, ty, _)| {
+                MachineParam::all_for(ty)
+                    .into_iter()
+                    .map(move |p| ParamId::Machine(uid, p))
+            })
+            .chain(GlobalParam::all().into_iter().map(ParamId::from))
+            .collect();
+        assert_eq!(ids.len(), 589, "the old flat table's size");
+        assert_eq!(e.param_count, ids.len());
+        for (n, &id) in ids.iter().enumerate() {
+            e.set_param(id, (n % 97) as f32 / 97.0);
         }
-        let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), FLAT_COUNT);
-        assert_eq!(flat_index(synth_param(2, SynthParam::Tune)), None);
-        assert_eq!(flat_index(drum_param(0, 8, DrumParam::Tune)), None);
-        assert_eq!(flat_index(fm_op_param(6, OpParam::On)), None);
-        assert_eq!(flat_index(channel_param(6, ChannelParam::Level)), None);
+        for (n, &id) in ids.iter().enumerate() {
+            assert_eq!(e.knob(id), Some((n % 97) as f32 / 97.0), "{id:?}");
+        }
+        assert_eq!(e.knob(synth_param(2, SynthParam::Tune)), None);
+        assert_eq!(e.knob(drum_param(0, 8, DrumParam::Tune)), None);
+        assert_eq!(e.knob(fm_op_param(6, OpParam::On)), None);
+        assert_eq!(e.knob(channel_param(6, ChannelParam::Level)), None);
+    }
+
+    #[test]
+    fn a_non_standard_rack_renders_but_plays_no_patterns() {
+        let mut p = crate::demo::demo_project();
+        p.machines.swap(0, 1);
+        let mut e = Engine::from_project(SR, &p);
+        assert!(!e.standard_layout);
+        e.play();
+        let (l, r) = render(&mut e, 0.5);
+        assert!(all_finite(&l) && all_finite(&r));
+        assert_eq!(
+            peak(&l),
+            0.0,
+            "no patterns play until the sequencer is keyed by uid"
+        );
+        let mut s = Engine::from_project(SR, &crate::demo::demo_project());
+        assert!(s.standard_layout);
+        s.play();
+        let (l, _) = render(&mut s, 0.5);
+        assert!(peak(&l) > 0.01, "the standard rack sequences");
+    }
+
+    #[test]
+    fn any_rack_layout_builds_and_renders() {
+        let mut p = Project::default();
+        p.machines.swap(0, 3); // 909 first
+        let e = MachineEntry::new(MachineUid(7), MachineType::Sampler, "Sampler 2".into());
+        p.machines.push(e);
+        p.next_uid = 8;
+        p.validate().unwrap();
+        let mut eng = Engine::from_project(48000.0, &p);
+        assert_eq!(
+            eng.slot_uids(),
+            vec![4, 2, 3, 1, 5, 6, 7]
+                .into_iter()
+                .map(MachineUid)
+                .collect::<Vec<_>>()
+        );
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        eng.process(&mut l, &mut r);
+    }
+
+    #[test]
+    fn params_reach_the_slot_with_that_uid() {
+        let mut eng = Engine::new(48000.0);
+        let id = ParamId::Machine(MachineUid(2), MachineParam::Synth(SynthParam::Cutoff));
+        eng.set_param(id, 0.123);
+        assert_eq!(eng.knob(id), Some(0.123));
+        let other = ParamId::Machine(MachineUid(1), MachineParam::Synth(SynthParam::Cutoff));
+        assert_ne!(eng.knob(other), Some(0.123));
+        assert_eq!(
+            eng.knob(ParamId::Machine(
+                MachineUid(99),
+                MachineParam::Synth(SynthParam::Cutoff)
+            )),
+            None
+        );
+        // A param that doesn't fit the machine type is ignored.
+        eng.set_param(
+            ParamId::Machine(MachineUid(2), MachineParam::Fm(FmParam::Volume)),
+            0.5,
+        );
+    }
+
+    #[test]
+    fn sixteen_machines_fit_without_reallocating() {
+        let mut p = Project::default();
+        for u in 7..=16u16 {
+            p.machines.push(MachineEntry::new(
+                MachineUid(u),
+                MachineType::Synth,
+                format!("Synth {u}"),
+            ));
+        }
+        p.next_uid = 17;
+        p.validate().unwrap();
+        let eng = Engine::from_project(48000.0, &p);
+        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
+        let mut too_many = p.clone();
+        too_many.machines.push(MachineEntry::new(
+            MachineUid(17),
+            MachineType::Fm,
+            "FM 2".into(),
+        ));
+        too_many.next_uid = 18;
+        assert!(too_many.validate().is_err());
     }
 
     const SR: f32 = 44_100.0;
+
+    impl Engine {
+        fn fm(&self) -> &FmSynth {
+            self.slots
+                .iter()
+                .find_map(|s| match &s.dsp {
+                    MachineDsp::Fm(f) => Some(&**f),
+                    _ => None,
+                })
+                .unwrap()
+        }
+
+        fn sampler(&self) -> &Sampler {
+            self.slots
+                .iter()
+                .find_map(|s| match &s.dsp {
+                    MachineDsp::Sampler(x) => Some(&**x),
+                    _ => None,
+                })
+                .unwrap()
+        }
+    }
 
     fn render(e: &mut Engine, seconds: f32) -> (Vec<f32>, Vec<f32>) {
         let n = (seconds * SR) as usize;
@@ -1188,8 +1364,8 @@ mod tests {
             m[..4].iter().all(|v| *v > 0.01),
             "both synths and kits: {m:?}"
         );
-        assert!(m[CHANNELS] > 0.01, "{m:?}");
-        assert!(m[CHANNELS] <= 1.0 + 1e-6, "master is post-clip");
+        assert!(m[MAX_MACHINES] > 0.01, "{m:?}");
+        assert!(m[MAX_MACHINES] <= 1.0 + 1e-6, "master is post-clip");
         e.stop();
         render(&mut e, 5.0);
         e.take_meters();
@@ -1204,7 +1380,10 @@ mod tests {
         e.play();
         render(&mut e, 0.1);
         assert!(!e.take_guard_fired());
-        e.synths[0].poison();
+        match &mut e.slots[0].dsp {
+            MachineDsp::Synth(s) => s.poison(),
+            _ => unreachable!(),
+        }
         let (l, r) = render(&mut e, 0.05);
         assert!(
             all_finite(&l) && all_finite(&r),
@@ -1559,13 +1738,21 @@ mod tests {
             e.poly_on(machine, 60, 100, false);
         }
         e.play();
-        assert_eq!(e.fm.sounding(), vec![72], "play released the pattern note");
-        assert_eq!(e.sampler.held_keys(), vec![72], "on the sampler too");
+        assert_eq!(
+            e.fm().sounding(),
+            vec![72],
+            "play released the pattern note"
+        );
+        assert_eq!(e.sampler().held_keys(), vec![72], "on the sampler too");
         e.poly_on(4, 60, 100, false);
         e.poly_on(5, 60, 100, false);
         e.stop();
-        assert_eq!(e.fm.sounding(), vec![72], "stop released the pattern note");
-        assert_eq!(e.sampler.held_keys(), vec![72]);
+        assert_eq!(
+            e.fm().sounding(),
+            vec![72],
+            "stop released the pattern note"
+        );
+        assert_eq!(e.sampler().held_keys(), vec![72]);
     }
 
     #[test]
@@ -1576,10 +1763,10 @@ mod tests {
         e.poly_on(4, 48, 100, false);
         e.note_on(4, 72, 100);
         e.play();
-        assert_eq!(e.fm.sounding(), vec![72], "the audition keeps sounding");
+        assert_eq!(e.fm().sounding(), vec![72], "the audition keeps sounding");
         e.note_off(4, 72);
         assert!(
-            e.fm.sounding().is_empty(),
+            e.fm().sounding().is_empty(),
             "no glide back to a pattern key the sequencer forgot"
         );
     }
@@ -1642,9 +1829,9 @@ mod tests {
             e.note_on(machine, 60, 100);
             e.note_off(machine, 60);
         }
-        assert_eq!(e.fm.sounding(), vec![60], "the pattern voice is held");
-        assert_eq!(e.fm.active_voices(), 2, "the audition voice is releasing");
-        assert_eq!(e.sampler.held_keys(), vec![60]);
+        assert_eq!(e.fm().sounding(), vec![60], "the pattern voice is held");
+        assert_eq!(e.fm().active_voices(), 2, "the audition voice is releasing");
+        assert_eq!(e.sampler().held_keys(), vec![60]);
         let (l, _) = render(&mut e, 0.5);
         assert!(tail(&l) > 0.01, "the pattern notes still sound");
     }
@@ -1656,17 +1843,17 @@ mod tests {
             e.poly_on(machine, 60, 100, false);
             e.poly_on(machine, 60, 100, false);
         }
-        assert_eq!(e.fm.sounding(), vec![60, 60]);
-        assert_eq!(e.sampler.held_keys(), vec![60, 60]);
+        assert_eq!(e.fm().sounding(), vec![60, 60]);
+        assert_eq!(e.sampler().held_keys(), vec![60, 60]);
         for machine in [4, 5] {
             e.poly_off(machine, 60, false);
         }
-        assert!(e.fm.sounding().is_empty(), "one PolyOff releases both");
+        assert!(e.fm().sounding().is_empty(), "one PolyOff releases both");
         assert!(
-            e.sampler.held_keys().is_empty(),
+            e.sampler().held_keys().is_empty(),
             "one PolyOff releases both"
         );
         render(&mut e, 1.0);
-        assert_eq!(e.fm.active_voices() + e.sampler.active_voices(), 0);
+        assert_eq!(e.fm().active_voices() + e.sampler().active_voices(), 0);
     }
 }
