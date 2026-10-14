@@ -20,8 +20,7 @@ DEFERRED MINORS (task reviews)
   (unreachable); names stored untrimmed.
 - Document: MergeKey::Rack is shared (would merge if apply(..,true)/record() were ever used
   for rack edits); rename default-name logic duplicated with Project::rename_machine.
-- App: commit_rename applies mid-draw (safe); voice_source_before can create a stray panel;
-  the refused-rack guard ignores a second refusal at the same generation.
+- App: commit_rename applies mid-draw (safe); voice_source_before can create a stray panel.
 
 FROM THE FINAL REVIEW
 - A removed synth whose param lane was overriding another machine's knob mid-step leaves that
