@@ -450,3 +450,61 @@ fn host_commands_and_rendering_do_not_allocate() {
         "every swapped-out or refused pattern comes back to be freed"
     );
 }
+
+#[test]
+fn a_rack_swap_through_the_host_does_not_allocate() {
+    use acid_engine::machine::MachineType;
+    use acid_engine::project::MachineEntry;
+    use acid_engine::rack::RackSwap;
+    let p = busy_project();
+    let (mut host, mut tx, mut rx) = host::channel(Engine::from_project(SR, &p));
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    // Remove the 808, move the FM first, add a Sampler.
+    let mut q = p.clone();
+    q.machines.retain(|m| m.uid != MachineUid(3));
+    let fm = q.machines.remove(3);
+    q.machines.insert(0, fm);
+    q.machines.push(MachineEntry::new(
+        MachineUid(7),
+        MachineType::Sampler,
+        "S2".into(),
+    ));
+    q.next_uid = 8;
+    q.song.bars.iter_mut().for_each(|b| {
+        b.cells.retain(|(u, _)| *u != MachineUid(3));
+    });
+    q.validate().unwrap();
+    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    // And a malformed one (a repeated uid), refused without allocating.
+    let mut bad = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    bad.order[1] = bad.order[0];
+    tx.push(Command::SetMode(Mode::Song)).ok().unwrap();
+    tx.push(Command::Play).ok().unwrap();
+    let n = count_allocs(|| {
+        for _ in 0..50 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    assert!(tx.push(Command::SetRack(bad)).is_ok());
+    assert!(tx.push(Command::SetRack(swap)).is_ok());
+    let n = count_allocs(|| {
+        for _ in 0..400 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    assert_eq!(
+        host.engine().slot_uids(),
+        [5, 1, 2, 4, 6, 7].map(MachineUid).to_vec()
+    );
+    let mut racks = 0;
+    while let Ok(e) = rx.pop() {
+        if let Event::DisposeRack(b) = e {
+            racks += 1;
+            drop(b);
+        }
+    }
+    assert_eq!(racks, 2, "both swaps come back to be freed");
+    assert!(l.iter().any(|v| *v != 0.0) || r.iter().any(|v| *v != 0.0));
+}

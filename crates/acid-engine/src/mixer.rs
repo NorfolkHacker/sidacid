@@ -5,7 +5,7 @@
 use crate::fx::{Compressor, Delay, Distortion, LoFi, Reverb};
 use crate::machine::MAX_MACHINES;
 use crate::params::{ChannelParam, FxParam, GlobalParam, MasterParam, exp, on, step_index};
-use crate::rack::Slot;
+use crate::rack::{RackMap, Slot};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 
 pub struct StereoBuf {
@@ -19,6 +19,18 @@ impl StereoBuf {
             l: vec![0.0; len],
             r: vec![0.0; len],
         }
+    }
+}
+
+/// Moves per-position slot meters (`meters[..MAX_MACHINES]`) to the new
+/// positions in `map`; new slots read 0, the master entry is kept.
+pub fn remap_meters(meters: &mut [f32; MAX_MACHINES + 1], map: &RackMap) {
+    let old = *meters;
+    for (m, from) in meters.iter_mut().zip(map) {
+        *m = from
+            .and_then(|o| old.get(o).filter(|_| o < MAX_MACHINES))
+            .copied()
+            .unwrap_or(0.0);
     }
 }
 
@@ -127,6 +139,11 @@ impl Mixer {
     /// `MAX_MACHINES`. Resets them. Muted (or soloed-out) slots read 0.
     pub fn take_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
         std::mem::take(&mut self.meters)
+    }
+
+    /// Rack edit: slot meters follow their machine to its new position.
+    pub fn rearrange(&mut self, map: &RackMap) {
+        remap_meters(&mut self.meters, map);
     }
 
     pub fn set_global(&mut self, g: GlobalParam, v: f32) {

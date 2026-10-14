@@ -8,7 +8,8 @@ use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::{ChannelStrip, StereoBuf};
 use crate::params::MachineParam;
 use crate::project::{
-    AutoLane, DrumPattern, MachineBody, MachineEntry, NotePattern, PatternRef, Song, SynthPattern,
+    AutoLane, DrumPattern, MachineBody, MachineEntry, NotePattern, PatternRef, Project, Song,
+    SynthPattern,
 };
 use crate::sampler::slot::SlotPlay;
 use crate::sampler::{SLOTS, Sampler};
@@ -201,6 +202,56 @@ impl CompiledSong {
             loop_range: song.loop_range,
             automation: song.automation.clone(),
         }
+    }
+}
+
+/// Where each new rack position's slot came from: its old position, or
+/// `None` for a fresh slot (and for positions past the rack).
+pub type RackMap = [Option<usize>; MAX_MACHINES];
+
+/// A rack edit for the audio thread (`Command::SetRack`): everything the
+/// new rack needs that the engine doesn't already hold, built on the UI
+/// thread. After `Engine::set_rack` it carries what left the engine (the
+/// old slot `Vec` in `into`, unused `fresh` slots, the old song) back for
+/// disposal.
+pub struct RackSwap {
+    /// New rack order, at most `MAX_MACHINES`.
+    pub order: Vec<MachineUid>,
+    /// Same length as `order`: a new slot, or `None` to move the slot the
+    /// engine already has for that uid.
+    pub fresh: Vec<Option<Slot>>,
+    /// Empty, capacity `MAX_MACHINES`: the new rack is moved into it.
+    pub into: Vec<Slot>,
+    /// The song compiled for `order`.
+    pub song: Box<CompiledSong>,
+    /// Pattern selection per new position; taken (at once, not queued)
+    /// by fresh slots only. Surviving slots keep their track state.
+    pub selected: [u8; MAX_MACHINES],
+}
+
+impl RackSwap {
+    /// UI-thread helper: builds a swap from the project (after a rack
+    /// edit) and the uids the engine has now. Only machines not in
+    /// `current` get new slots. Allocates.
+    pub fn build(project: &Project, current: &[MachineUid], sample_rate: f32) -> Box<RackSwap> {
+        let machines = &project.machines[..project.machines.len().min(MAX_MACHINES)];
+        let order: Vec<MachineUid> = machines.iter().map(|m| m.uid).collect();
+        let fresh = machines
+            .iter()
+            .map(|m| (!current.contains(&m.uid)).then(|| Slot::from_entry(m, sample_rate)))
+            .collect();
+        let mut selected = [0; MAX_MACHINES];
+        for (s, m) in selected.iter_mut().zip(machines) {
+            *s = m.selected;
+        }
+        let song = Box::new(CompiledSong::compile(&project.song, &order));
+        Box::new(RackSwap {
+            order,
+            fresh,
+            into: Vec::with_capacity(MAX_MACHINES),
+            song,
+            selected,
+        })
     }
 }
 

@@ -8,7 +8,7 @@
 use crate::machine::MAX_MACHINES;
 use crate::params::ParamId;
 use crate::project::{DrumHit, Gate, PatternRef, SynthPattern, TICKS_PER_STEP, steps_of};
-use crate::rack::CompiledSong;
+use crate::rack::{CompiledSong, RackMap};
 use crate::song::{
     Bank, Banks, DEFAULT_BAR_STEPS, compiled_bar_start_step, compiled_bar_steps, value_at,
 };
@@ -378,6 +378,31 @@ impl Sequencer {
             // The bar got shorter than where we are: the next bar start
             // must find its position afresh.
             self.seek = true;
+        }
+    }
+
+    /// Rack edit (real-time safe): track `p` takes the state of old track
+    /// `map[p]`, so surviving machines keep their position, pattern, queue
+    /// and held notes. New machines at `p < len` get a fresh track on
+    /// pattern `selected[p]` at once (silent until the next bar while a
+    /// song plays); positions past `len` are cleared.
+    pub fn rearrange(&mut self, map: &RackMap, len: usize, selected: &[u8; MAX_MACHINES]) {
+        let (old_tracks, old_chosen) = (self.tracks, self.chosen);
+        let song_playing = self.playing && self.mode == Mode::Song;
+        for pos in 0..MAX_MACHINES {
+            let old = map[pos].filter(|&o| o < MAX_MACHINES && pos < len);
+            (self.tracks[pos], self.chosen[pos]) = match old {
+                Some(o) => (old_tracks[o], old_chosen[o]),
+                None if pos < len => {
+                    let t = Track {
+                        pattern: selected[pos],
+                        silent: song_playing,
+                        ..Track::default()
+                    };
+                    (t, selected[pos])
+                }
+                None => (Track::default(), 0),
+            };
         }
     }
 

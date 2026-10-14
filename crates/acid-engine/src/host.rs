@@ -6,9 +6,10 @@
 
 use crate::engine::Engine;
 use crate::machine::{MAX_MACHINES, MachineUid};
+use crate::mixer::remap_meters;
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
-use crate::rack::CompiledSong;
+use crate::rack::{CompiledSong, RackSwap};
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::Mode;
@@ -69,6 +70,10 @@ pub enum Command {
     Touch(ParamId, bool),
     /// Sound follows the knob without changing its saved value (record mode).
     SetParamLive(ParamId, f32),
+    /// A rack edit: the new order plus the slots the engine lacks. Comes
+    /// back as `DisposeRack` with what left the engine (or untouched, if
+    /// malformed).
+    SetRack(Box<RackSwap>),
     /// Audition: play a note on a note machine now.
     NoteOn {
         uid: MachineUid,
@@ -112,8 +117,8 @@ pub struct Status {
     /// UI counts the Stops it sends the same way: a status that has not
     /// caught up predates its latest Stop.
     pub stops: u32,
-    /// Rack generation this status reports on (0 until racks can change
-    /// while running).
+    /// Rack generation this status reports on: the engine's count of
+    /// `SetRack`s taken (wrapping). Per-position arrays describe that rack.
     pub rack_gen: u32,
 }
 
@@ -127,6 +132,9 @@ pub enum Event {
     DisposeSong(Box<CompiledSong>),
     DisposeSample(Option<Arc<SampleData>>),
     DisposeSlotPlay(Box<SlotPlay>),
+    /// After `SetRack`: the old slot `Vec` (in `into`) with the removed
+    /// machines, unused fresh slots and the old song.
+    DisposeRack(Box<RackSwap>),
 }
 
 pub struct EngineHost {
@@ -264,6 +272,12 @@ impl EngineHost {
                 Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
+                Command::SetRack(mut swap) => {
+                    if let Some(map) = self.engine.set_rack(&mut swap) {
+                        remap_meters(&mut self.meters, &map);
+                    }
+                    self.dispose(Event::DisposeRack(swap));
+                }
                 Command::NoteOn { uid, pitch, vel } => self.engine.note_on(uid, pitch, vel),
                 Command::NoteOff { uid, pitch } => self.engine.note_off(uid, pitch),
             }
@@ -294,7 +308,7 @@ impl EngineHost {
             song_step: self.engine.song_step(),
             song_rejected: self.song_rejected,
             stops: self.stops,
-            rack_gen: 0,
+            rack_gen: self.engine.rack_gen(),
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
@@ -363,6 +377,29 @@ mod tests {
         assert!(
             std::iter::from_fn(|| rx.pop().ok()).any(|e| matches!(e, Event::DisposePattern(_)))
         );
+    }
+
+    #[test]
+    fn a_rack_swap_reports_its_generation_and_comes_back_for_disposal() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let mut q = crate::demo::demo_project();
+        q.machines.retain(|m| m.uid != MachineUid(3));
+        let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+        tx.push(Command::SetRack(swap)).unwrap();
+        run(&mut host, SR as usize / 30);
+        let (mut rack, mut gens) = (None, Vec::new());
+        while let Ok(e) = rx.pop() {
+            match e {
+                Event::DisposeRack(b) => rack = Some(b),
+                Event::Status(s) => gens.push(s.rack_gen),
+                _ => {}
+            }
+        }
+        let rack = rack.expect("the swap comes back");
+        assert_eq!(rack.into.len(), 1);
+        assert_eq!(rack.into[0].uid, MachineUid(3));
+        assert!(!gens.is_empty() && gens.iter().all(|&g| g == 1), "{gens:?}");
+        assert_eq!(host.engine().slot_uids().len(), 5);
     }
 
     #[test]
