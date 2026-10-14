@@ -132,6 +132,7 @@ mod tests {
     use crate::document::Document;
     use crate::test_rack::*;
     use acid_engine::params::{FmParam, MachineParam};
+    use eframe::egui;
 
     #[test]
     fn randomising_the_fm_voice_is_one_undo_step_and_keeps_the_rest() {
@@ -166,5 +167,68 @@ mod tests {
         assert_eq!(fm.patterns, before.fm(FM).unwrap().patterns, "the sequence is untouched");
         app.doc.undo();
         assert_eq!(app.doc.project, before);
+    }
+
+    /// Screen y of the first drawn text starting with `prefix`.
+    fn text_y(shapes: &[egui::epaint::ClippedShape], prefix: &str) -> Option<f32> {
+        fn walk(shape: &egui::Shape, prefix: &str) -> Option<f32> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text.starts_with(prefix) => Some(t.pos.y),
+                egui::Shape::Vec(v) => v.iter().find_map(|s| walk(s, prefix)),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|c| walk(&c.shape, prefix))
+    }
+
+    #[test]
+    fn randomising_does_not_move_the_rack() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(636.0, 1044.0));
+        let mut time = 0.0;
+        let mut frame = |app: &mut SidAcidApp, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| app.ui(ctx)).shapes
+        };
+        // Scroll the rack (pointer on its right margin, clear of any roll)
+        // until the FM header is on screen, then let the scroll settle.
+        let pointer = egui::pos2(625.0, 700.0);
+        let mut header = None;
+        for _ in 0..200 {
+            let shapes = frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -40.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            header = text_y(&shapes, "FM   A01");
+            if header.is_some_and(|y| y < 900.0) {
+                break;
+            }
+        }
+        assert!(header.is_some(), "FM header not reached");
+        let mut settled = |app: &mut SidAcidApp| {
+            let mut y = None;
+            for _ in 0..180 {
+                y = text_y(&frame(app, vec![]), "FM   A01");
+            }
+            y
+        };
+        let before = settled(&mut app);
+        assert!(before.is_some(), "FM header scrolled out of view");
+        app.randomise_fm_voice_seeded(FM, 5);
+        assert_eq!(settled(&mut app), before);
     }
 }
