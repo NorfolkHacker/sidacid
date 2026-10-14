@@ -430,13 +430,13 @@ impl SidAcidApp {
         let mut cmds = Vec::new();
         if let Some((m, p)) = before {
             cmds.push(Command::NoteOff {
-                machine: m as u8,
+                uid: crate::six::machine_uid(m),
                 pitch: p,
             });
         }
         if let Some((m, p)) = now {
             cmds.push(Command::NoteOn {
-                machine: m as u8,
+                uid: crate::six::machine_uid(m),
                 pitch: p,
                 vel: NEW_VEL,
             });
@@ -457,10 +457,11 @@ mod tests {
         SidAcidApp::headless(Document::new(Project::default()))
     }
 
-    fn cmd(c: &Command) -> (bool, u8, u8) {
+    /// (on, machine uid, pitch); the FM machine is uid 5.
+    fn cmd(c: &Command) -> (bool, u16, u8) {
         match c {
-            Command::NoteOn { machine, pitch, .. } => (true, *machine, *pitch),
-            Command::NoteOff { machine, pitch } => (false, *machine, *pitch),
+            Command::NoteOn { uid, pitch, .. } => (true, uid.0, *pitch),
+            Command::NoteOff { uid, pitch } => (false, uid.0, *pitch),
             _ => panic!("unexpected command"),
         }
     }
@@ -474,7 +475,7 @@ mod tests {
         let seen: Vec<_> = app.pending.iter().map(cmd).collect();
         assert_eq!(
             seen,
-            [(true, 4, 60), (false, 4, 60), (true, 4, 62), (false, 4, 62)]
+            [(true, 5, 60), (false, 5, 60), (true, 5, 62), (false, 5, 62)]
         );
         assert_eq!(app.view.audition, None);
     }
@@ -503,7 +504,7 @@ mod tests {
         assert_eq!(app.view.poly_drag, [None; 2]);
         assert_eq!(
             app.pending.iter().map(cmd).collect::<Vec<_>>(),
-            [(false, 4, 60)]
+            [(false, 5, 60)]
         );
     }
 
@@ -525,7 +526,7 @@ mod tests {
             .filter(|c| matches!(c, Command::NoteOff { .. }))
             .map(cmd)
             .collect();
-        assert_eq!(offs, [(false, 4, 60)], "the held key's NoteOff is sent");
+        assert_eq!(offs, [(false, 5, 60)], "the held key's NoteOff is sent");
         // The drag's gesture is closed: the next merge is a new undo step.
         app.doc.apply(Edit::Bpm(110.0), true);
         app.doc.undo();

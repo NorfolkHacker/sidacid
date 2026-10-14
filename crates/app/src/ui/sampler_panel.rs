@@ -91,7 +91,7 @@ impl SidAcidApp {
                             SlotMode::Chromatic => d.meta.root,
                         };
                         self.send(vec![Command::NoteOn {
-                            machine: MachineId::Sampler.index() as u8,
+                            uid: MachineId::Sampler.uid(),
                             pitch: key,
                             vel: 110,
                         }]);
@@ -109,7 +109,7 @@ impl SidAcidApp {
             && !ui.input(|i| i.pointer.primary_down())
         {
             self.send(vec![Command::NoteOff {
-                machine: MachineId::Sampler.index() as u8,
+                uid: MachineId::Sampler.uid(),
                 pitch: key,
             }]);
             self.view.pad_note = None;

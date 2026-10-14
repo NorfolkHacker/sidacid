@@ -5,7 +5,7 @@
 //! freed on the UI thread, never on the audio thread.
 
 use crate::engine::Engine;
-use crate::machine::MAX_MACHINES;
+use crate::machine::{MAX_MACHINES, MachineUid};
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
 use crate::rack::CompiledSong;
@@ -24,38 +24,41 @@ const DISPOSAL_RESERVE: usize = 256;
 /// Weight of the newest CPU-load sample in the smoothed value.
 const CPU_SMOOTHING: f32 = 0.1;
 
+/// One pattern of any machine type, for `Command::Pattern`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternData {
+    Synth(SynthPattern),
+    Drum(DrumPattern),
+    Notes(NotePattern),
+}
+
 pub enum Command {
     SetParam(ParamId, f32),
     SetBpm(f32),
     SetSwing(f32),
     Play,
     Stop,
+    /// Selects (or, while playing, queues) pattern `slot` on machine `uid`.
     SelectPattern {
-        machine: u8,
+        uid: MachineUid,
         slot: u8,
     },
+    /// Stores `pattern` at `index` of machine `uid`'s bank. The old
+    /// pattern (or this one, if refused) comes back as `DisposePattern`.
+    Pattern {
+        uid: MachineUid,
+        index: u8,
+        pattern: Box<PatternData>,
+    },
     SamplerSample {
+        uid: MachineUid,
         slot: u8,
         sample: Option<Arc<SampleData>>,
     },
     SamplerPlay {
+        uid: MachineUid,
         slot: u8,
         play: Box<SlotPlay>,
-    },
-    SynthPattern {
-        synth: u8,
-        slot: u8,
-        pattern: Box<SynthPattern>,
-    },
-    DrumPattern {
-        kit: u8,
-        slot: u8,
-        pattern: Box<DrumPattern>,
-    },
-    NotePattern {
-        machine: u8,
-        slot: u8,
-        pattern: Box<NotePattern>,
     },
     ReplaceEngine(Box<Engine>),
     SetMode(Mode),
@@ -68,12 +71,12 @@ pub enum Command {
     SetParamLive(ParamId, f32),
     /// Audition: play a note on a note machine now.
     NoteOn {
-        machine: u8,
+        uid: MachineUid,
         pitch: u8,
         vel: u8,
     },
     NoteOff {
-        machine: u8,
+        uid: MachineUid,
         pitch: u8,
     },
 }
@@ -119,9 +122,7 @@ pub struct Status {
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Status(Status),
-    DisposeSynthPattern(Box<SynthPattern>),
-    DisposeDrumPattern(Box<DrumPattern>),
-    DisposeNotePattern(Box<NotePattern>),
+    DisposePattern(Box<PatternData>),
     DisposeEngine(Box<Engine>),
     DisposeSong(Box<CompiledSong>),
     DisposeSample(Option<Arc<SampleData>>),
@@ -219,43 +220,31 @@ impl EngineHost {
                     self.engine.stop();
                     self.stops = self.stops.wrapping_add(1);
                 }
-                Command::SelectPattern { machine, slot } => {
-                    self.engine.select_pattern(machine as usize, slot)
+                Command::SelectPattern { uid, slot } => self.engine.select_pattern(uid, slot),
+                Command::Pattern {
+                    uid,
+                    index,
+                    mut pattern,
+                } => {
+                    self.engine.swap_pattern(uid, index, &mut pattern);
+                    self.dispose(Event::DisposePattern(pattern));
                 }
-                Command::SamplerSample { slot, mut sample } => {
-                    self.engine.swap_sampler_sample(slot as usize, &mut sample);
+                Command::SamplerSample {
+                    uid,
+                    slot,
+                    mut sample,
+                } => {
+                    self.engine
+                        .swap_sampler_sample(uid, slot as usize, &mut sample);
                     self.dispose(Event::DisposeSample(sample));
                 }
-                Command::SamplerPlay { slot, mut play } => {
-                    self.engine.swap_sampler_play(slot as usize, &mut play);
+                Command::SamplerPlay {
+                    uid,
+                    slot,
+                    mut play,
+                } => {
+                    self.engine.swap_sampler_play(uid, slot as usize, &mut play);
                     self.dispose(Event::DisposeSlotPlay(play));
-                }
-                Command::SynthPattern {
-                    synth,
-                    slot,
-                    mut pattern,
-                } => {
-                    self.engine
-                        .swap_synth_pattern(synth as usize, slot, &mut pattern);
-                    self.dispose(Event::DisposeSynthPattern(pattern));
-                }
-                Command::DrumPattern {
-                    kit,
-                    slot,
-                    mut pattern,
-                } => {
-                    self.engine
-                        .swap_drum_pattern(kit as usize, slot, &mut pattern);
-                    self.dispose(Event::DisposeDrumPattern(pattern));
-                }
-                Command::NotePattern {
-                    machine,
-                    slot,
-                    mut pattern,
-                } => {
-                    self.engine
-                        .swap_note_pattern(machine as usize, slot, &mut pattern);
-                    self.dispose(Event::DisposeNotePattern(pattern));
                 }
                 Command::ReplaceEngine(mut engine) => {
                     std::mem::swap(&mut self.engine, &mut engine);
@@ -275,14 +264,8 @@ impl EngineHost {
                 Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
-                Command::NoteOn {
-                    machine,
-                    pitch,
-                    vel,
-                } => self.engine.note_on(machine as usize, pitch, vel),
-                Command::NoteOff { machine, pitch } => {
-                    self.engine.note_off(machine as usize, pitch)
-                }
+                Command::NoteOn { uid, pitch, vel } => self.engine.note_on(uid, pitch, vel),
+                Command::NoteOff { uid, pitch } => self.engine.note_off(uid, pitch),
             }
         }
     }
@@ -326,6 +309,7 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MachineUid;
 
     const SR: f32 = 44_100.0;
 
@@ -344,6 +328,44 @@ mod tests {
     }
 
     #[test]
+    fn commands_for_an_unknown_uid_are_ignored_and_disposed() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        tx.push(Command::Pattern {
+            uid: MachineUid(99),
+            index: 0,
+            pattern: Box::new(PatternData::Synth(Default::default())),
+        })
+        .unwrap();
+        tx.push(Command::NoteOn {
+            uid: MachineUid(99),
+            pitch: 60,
+            vel: 100,
+        })
+        .unwrap();
+        run(&mut host, 512);
+        assert!(
+            std::iter::from_fn(|| rx.pop().ok()).any(|e| matches!(e, Event::DisposePattern(_)))
+        );
+    }
+
+    #[test]
+    fn a_pattern_of_the_wrong_type_is_refused() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let before = host.engine().pattern_len(MachineUid(3), 0); // 808 drum pattern length
+        tx.push(Command::Pattern {
+            uid: MachineUid(3),
+            index: 0,
+            pattern: Box::new(PatternData::Synth(Default::default())),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        assert_eq!(host.engine().pattern_len(MachineUid(3), 0), before);
+        assert!(
+            std::iter::from_fn(|| rx.pop().ok()).any(|e| matches!(e, Event::DisposePattern(_)))
+        );
+    }
+
+    #[test]
     fn commands_reach_the_engine() {
         let (mut host, mut tx, _rx) = host_with_demo();
         tx.push(Command::SetBpm(140.0)).unwrap();
@@ -358,16 +380,19 @@ mod tests {
     #[test]
     fn replaced_pattern_comes_back_for_disposal() {
         let (mut host, mut tx, mut rx) = host_with_demo();
-        tx.push(Command::SynthPattern {
-            synth: 0,
-            slot: 0,
-            pattern: Box::new(SynthPattern::default()),
+        tx.push(Command::Pattern {
+            uid: MachineUid(1),
+            index: 0,
+            pattern: Box::new(PatternData::Synth(SynthPattern::default())),
         })
         .unwrap();
         run(&mut host, 512);
         let mut found = false;
         while let Ok(ev) = rx.pop() {
-            if let Event::DisposeSynthPattern(old) = ev {
+            if let Event::DisposePattern(old) = ev {
+                let PatternData::Synth(old) = *old else {
+                    panic!("the synth pattern comes back")
+                };
                 assert!(
                     old.steps
                         .iter()
@@ -390,17 +415,20 @@ mod tests {
             }))
         };
         tx.push(Command::SamplerSample {
+            uid: MachineUid(6),
             slot: 0,
             sample: mk(),
         })
         .unwrap();
         run(&mut host, 512);
         tx.push(Command::SamplerSample {
+            uid: MachineUid(6),
             slot: 0,
             sample: mk(),
         })
         .unwrap();
         tx.push(Command::SamplerPlay {
+            uid: MachineUid(6),
             slot: 0,
             play: Box::new(SlotPlay::EMPTY),
         })
@@ -475,10 +503,10 @@ mod tests {
     fn full_event_ring_does_not_panic() {
         let (mut host, mut tx, _rx) = host_with_demo();
         for i in 0..2000 {
-            tx.push(Command::DrumPattern {
-                kit: 0,
-                slot: (i % 128) as u8,
-                pattern: Box::new(DrumPattern::default()),
+            tx.push(Command::Pattern {
+                uid: MachineUid(3),
+                index: (i % 128) as u8,
+                pattern: Box::new(PatternData::Drum(DrumPattern::default())),
             })
             .unwrap();
         }
@@ -489,15 +517,15 @@ mod tests {
     fn disposals_land_even_when_the_ui_never_reads_events() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         run(&mut host, SR as usize * 60);
-        tx.push(Command::SynthPattern {
-            synth: 0,
-            slot: 0,
-            pattern: Box::new(SynthPattern::default()),
+        tx.push(Command::Pattern {
+            uid: MachineUid(1),
+            index: 0,
+            pattern: Box::new(PatternData::Synth(SynthPattern::default())),
         })
         .unwrap();
         run(&mut host, 512);
-        let disposed = std::iter::from_fn(|| rx.pop().ok())
-            .any(|e| matches!(e, Event::DisposeSynthPattern(_)));
+        let disposed =
+            std::iter::from_fn(|| rx.pop().ok()).any(|e| matches!(e, Event::DisposePattern(_)));
         assert!(disposed);
     }
 
@@ -584,7 +612,7 @@ mod tests {
         tx.push(Command::SetParam(cutoff, 0.125)).unwrap();
         tx.push(Command::SetSwing(0.4)).unwrap();
         tx.push(Command::SelectPattern {
-            machine: 3,
+            uid: MachineUid(4),
             slot: 7,
         })
         .unwrap();
@@ -603,26 +631,29 @@ mod tests {
         run(&mut host, 512);
         assert!(!host.engine().is_touched(level), "Touch(false)");
 
-        tx.push(Command::DrumPattern {
-            kit: 1,
-            slot: 0,
-            pattern: Box::new(DrumPattern::default()),
+        tx.push(Command::Pattern {
+            uid: MachineUid(4),
+            index: 0,
+            pattern: Box::new(PatternData::Drum(DrumPattern::default())),
         })
         .unwrap();
-        tx.push(Command::NotePattern {
-            machine: 4,
-            slot: 2,
-            pattern: Box::new(NotePattern::default()),
+        tx.push(Command::Pattern {
+            uid: MachineUid(5),
+            index: 2,
+            pattern: Box::new(PatternData::Notes(NotePattern::default())),
         })
         .unwrap();
         run(&mut host, 512);
         let events: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
         let old_drums = events.iter().find_map(|e| match e {
-            Event::DisposeDrumPattern(p) => Some(p),
+            Event::DisposePattern(p) => match &**p {
+                PatternData::Drum(p) => Some(p),
+                _ => None,
+            },
             _ => None,
         });
         assert_eq!(
-            old_drums.map(|p| **p
+            old_drums.map(|p| *p
                 == crate::demo::demo_project()
                     .kit(crate::machine::MachineId::Kit909.uid())
                     .unwrap()
@@ -631,23 +662,23 @@ mod tests {
             "the replaced drum pattern comes back"
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::DisposeNotePattern(_))),
+            events.iter().any(
+                |e| matches!(e, Event::DisposePattern(p) if matches!(**p, PatternData::Notes(_)))
+            ),
             "the replaced note pattern comes back"
         );
 
         run_peak(&mut host, SR as usize);
         assert!(run_peak(&mut host, 2048) < 1e-4, "stopped and quiet");
         tx.push(Command::NoteOn {
-            machine: 4,
+            uid: MachineUid(5),
             pitch: 60,
             vel: 110,
         })
         .unwrap();
         assert!(run_peak(&mut host, 4096) > 0.01, "NoteOn auditions");
         tx.push(Command::NoteOff {
-            machine: 4,
+            uid: MachineUid(5),
             pitch: 60,
         })
         .unwrap();

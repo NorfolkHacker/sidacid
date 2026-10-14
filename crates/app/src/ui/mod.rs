@@ -1949,6 +1949,7 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(
             c,
             Command::SamplerSample {
+                uid: acid_engine::machine::MachineUid(6),
                 slot: 0,
                 sample: Some(_)
             }
@@ -2029,10 +2030,16 @@ mod tests {
             .flushed
             .iter()
             .filter_map(|c| match c {
-                Command::NoteOff { machine, pitch } => Some((*machine, *pitch)),
+                Command::NoteOff { uid, pitch } => Some((*uid, *pitch)),
                 _ => None,
             })
             .collect();
-        assert_eq!(offs, vec![(5, 36), (4, 60)]);
+        assert_eq!(
+            offs,
+            vec![
+                (acid_engine::machine::MachineId::Sampler.uid(), 36),
+                (acid_engine::machine::MachineId::Fm.uid(), 60)
+            ]
+        );
     }
 }

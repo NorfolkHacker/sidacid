@@ -186,13 +186,13 @@ impl SidAcidApp {
         let mut cmds = Vec::new();
         if let Some(pitch) = self.view.pad_note.take() {
             cmds.push(Command::NoteOff {
-                machine: acid_engine::machine::MachineId::Sampler.index() as u8,
+                uid: acid_engine::machine::MachineId::Sampler.uid(),
                 pitch,
             });
         }
         if let Some((machine, pitch)) = self.view.audition.take() {
             cmds.push(Command::NoteOff {
-                machine: machine as u8,
+                uid: crate::six::machine_uid(machine),
                 pitch,
             });
         }

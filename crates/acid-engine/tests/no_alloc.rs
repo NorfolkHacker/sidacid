@@ -3,10 +3,12 @@
 //! thread while armed.
 
 use acid_engine::engine::Engine;
-use acid_engine::host::{self, Command, Event};
-use acid_engine::machine::MachineId;
+use acid_engine::host::{self, Command, Event, PatternData};
+use acid_engine::machine::{MachineId, MachineUid};
 use acid_engine::params::{MasterParam, ParamId, fm_param, sampler_param, slot_param};
-use acid_engine::project::{Bar, Note, NotePattern, PatternRef, Project};
+use acid_engine::project::{
+    Bar, DrumPattern, Note, NotePattern, PatternRef, Project, SynthPattern,
+};
 use acid_engine::rack::CompiledSong;
 use acid_engine::sequencer::Mode;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -55,6 +57,8 @@ fn count_allocs(f: impl FnOnce()) -> usize {
 }
 
 const SR: f32 = 48_000.0;
+const FM: MachineUid = MachineUid(5);
+const SAMPLER: MachineUid = MachineUid(6);
 
 /// The demo groove plus chords on the FM and a riff on the sampler, a
 /// 4-bar looped song using every machine, and master-level automation.
@@ -246,14 +250,15 @@ fn audition_and_pattern_swaps_do_not_allocate() {
         pitch: 60,
         vel: 100,
     });
+    let mut replacement = PatternData::Notes(replacement);
     e.play();
     let n = count_allocs(|| {
-        e.note_on(4, 72, 110);
-        e.note_on(5, 40, 110);
+        e.note_on(FM, 72, 110);
+        e.note_on(SAMPLER, 40, 110);
         render_seconds(&mut e, &mut l, &mut r, 0.5);
-        assert!(e.swap_note_pattern(4, 0, &mut replacement));
-        e.note_off(4, 72);
-        e.note_off(5, 40);
+        assert!(e.swap_pattern(FM, 0, &mut replacement));
+        e.note_off(FM, 72);
+        e.note_off(SAMPLER, 40);
         render_seconds(&mut e, &mut l, &mut r, 1.0);
         e.stop();
         render_seconds(&mut e, &mut l, &mut r, 0.5);
@@ -282,12 +287,12 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
     let n = count_allocs(|| {
         // 20 held notes on 16 voices: the last four steal
         for k in 40..60 {
-            e.note_on(5, k, 100);
+            e.note_on(SAMPLER, k, 100);
             render_seconds(&mut e, &mut l, &mut r, 0.01);
         }
-        assert!(e.swap_sampler_play(0, &mut markers));
+        assert!(e.swap_sampler_play(SAMPLER, 0, &mut markers));
         render_seconds(&mut e, &mut l, &mut r, 0.2);
-        assert!(e.swap_sampler_play(0, &mut zone));
+        assert!(e.swap_sampler_play(SAMPLER, 0, &mut zone));
         render_seconds(&mut e, &mut l, &mut r, 0.1);
     });
     assert_eq!(n, 0);
@@ -310,11 +315,11 @@ fn a_steal_by_a_note_shorter_than_its_fade_does_not_allocate() {
     let n = count_allocs(|| {
         // 16 held pad notes fill the voices; each tick steals one.
         for k in 36..52 {
-            e.note_on(5, k, 100);
+            e.note_on(SAMPLER, k, 100);
         }
         render_seconds(&mut e, &mut l, &mut r, 0.05);
         for _ in 0..4 {
-            e.note_on(5, 60, 100);
+            e.note_on(SAMPLER, 60, 100);
             render_seconds(&mut e, &mut l, &mut r, 0.01);
         }
     });
@@ -356,21 +361,54 @@ fn host_commands_and_rendering_do_not_allocate() {
         pitch: 62,
         vel: 90,
     });
+    let sample = Some(std::sync::Arc::new(
+        acid_engine::sampler::sample::SampleData {
+            sample_rate: 44_100,
+            left: vec![0.25; 256].into(),
+            right: None,
+        },
+    ));
     let commands = [
         Command::Play,
         Command::NoteOn {
-            machine: 5,
+            uid: SAMPLER,
             pitch: 60,
             vel: 100,
         },
-        Command::NotePattern {
-            machine: 4,
-            slot: 0,
-            pattern: Box::new(replacement),
+        Command::Pattern {
+            uid: FM,
+            index: 0,
+            pattern: Box::new(PatternData::Notes(replacement)),
+        },
+        Command::Pattern {
+            uid: MachineUid(1),
+            index: 0,
+            pattern: Box::new(PatternData::Synth(SynthPattern::default())),
+        },
+        Command::Pattern {
+            uid: MachineUid(3),
+            index: 0,
+            pattern: Box::new(PatternData::Drum(DrumPattern::default())),
+        },
+        // Refused (wrong type): the box still goes back to be freed.
+        Command::Pattern {
+            uid: MachineUid(3),
+            index: 1,
+            pattern: Box::new(PatternData::Notes(NotePattern::default())),
         },
         Command::NoteOff {
-            machine: 5,
+            uid: SAMPLER,
             pitch: 60,
+        },
+        Command::SamplerSample {
+            uid: SAMPLER,
+            slot: 1,
+            sample,
+        },
+        Command::SamplerPlay {
+            uid: SAMPLER,
+            slot: 1,
+            play: Box::new(acid_engine::sampler::slot::SlotPlay::EMPTY),
         },
         Command::SetMode(Mode::Song),
         Command::Song(Box::new(CompiledSong::compile(
@@ -390,8 +428,12 @@ fn host_commands_and_rendering_do_not_allocate() {
     assert_eq!(n, 0);
     let mut disposed = 0;
     let mut songs = 0;
+    let mut sampler_boxes = 0;
     while let Ok(e) = rx.pop() {
-        if matches!(e, Event::DisposeNotePattern(_)) {
+        if matches!(e, Event::DisposeSample(_) | Event::DisposeSlotPlay(_)) {
+            sampler_boxes += 1;
+        }
+        if matches!(e, Event::DisposePattern(_)) {
             disposed += 1;
         }
         if matches!(e, Event::DisposeSong(_)) {
@@ -400,7 +442,11 @@ fn host_commands_and_rendering_do_not_allocate() {
     }
     assert_eq!(songs, 1, "the replaced song comes back to be freed");
     assert_eq!(
-        disposed, 1,
-        "the swapped-out pattern comes back to be freed"
+        sampler_boxes, 2,
+        "the replaced slot data comes back to be freed"
+    );
+    assert_eq!(
+        disposed, 4,
+        "every swapped-out or refused pattern comes back to be freed"
     );
 }

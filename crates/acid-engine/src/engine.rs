@@ -3,10 +3,11 @@
 //! effects and master bus, and the sequencer, rendered sample-accurately.
 //! process() is real-time safe: no allocation, locking or I/O.
 
+use crate::host::PatternData;
 use crate::machine::{MAX_MACHINES, MachineUid};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
-use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, SynthPattern};
+use crate::project::{MAX_NOTES, PATTERNS, Project};
 use crate::rack::{CompiledSong, MachineDsp, Slot, SlotPatterns};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
@@ -248,9 +249,18 @@ impl Engine {
         })
     }
 
-    /// The first Sampler in the rack (today's single Sampler machine).
-    fn first_sampler(&mut self) -> Option<&mut Sampler> {
-        self.samplers().next()
+    /// Rack position of machine `uid`.
+    fn position(&self, uid: MachineUid) -> Option<usize> {
+        self.slots.iter().position(|s| s.uid == uid)
+    }
+
+    /// The Sampler machine `uid`; `None` for an unknown uid or another type.
+    fn sampler_with(&mut self, uid: MachineUid) -> Option<&mut Sampler> {
+        let pos = self.position(uid)?;
+        match &mut self.slots[pos].dsp {
+            MachineDsp::Sampler(x) => Some(&mut **x),
+            _ => None,
+        }
     }
 
     pub fn set_bpm(&mut self, bpm: f32) {
@@ -262,19 +272,23 @@ impl Engine {
         }
     }
 
-    /// Exchanges a slot's audio on the rack's first Sampler (real-time
-    /// safe; the old sample comes back for disposal off the audio thread).
+    /// Exchanges a slot's audio on Sampler machine `uid` (real-time safe;
+    /// the old sample comes back for disposal off the audio thread). An
+    /// unknown uid, another machine type or a bad slot leaves `sample`
+    /// unchanged and returns false.
     pub fn swap_sampler_sample(
         &mut self,
+        uid: MachineUid,
         slot: usize,
         sample: &mut Option<Arc<SampleData>>,
     ) -> bool {
-        self.first_sampler()
+        self.sampler_with(uid)
             .is_some_and(|s| s.swap_sample(slot, sample))
     }
 
-    pub fn swap_sampler_play(&mut self, slot: usize, play: &mut SlotPlay) -> bool {
-        self.first_sampler()
+    /// Like `swap_sampler_sample`, for a slot's play data.
+    pub fn swap_sampler_play(&mut self, uid: MachineUid, slot: usize, play: &mut SlotPlay) -> bool {
+        self.sampler_with(uid)
             .is_some_and(|s| s.swap_play(slot, play))
     }
 
@@ -302,16 +316,20 @@ impl Engine {
         self.note_machines_pattern_off();
     }
 
-    /// Audition: starts a note on the FM or Sampler machine at rack
-    /// position `machine` right away, playing or not. Other machines,
-    /// pitches above 127 and velocity 0 are ignored.
-    pub fn note_on(&mut self, machine: usize, pitch: u8, vel: u8) {
-        self.poly_on(machine, pitch, vel, true);
+    /// Audition: starts a note on FM or Sampler machine `uid` right away,
+    /// playing or not. Unknown uids, other machines, pitches above 127 and
+    /// velocity 0 are ignored.
+    pub fn note_on(&mut self, uid: MachineUid, pitch: u8, vel: u8) {
+        if let Some(pos) = self.position(uid) {
+            self.poly_on(pos, pitch, vel, true);
+        }
     }
 
     /// Audition release: only releases auditioned notes.
-    pub fn note_off(&mut self, machine: usize, pitch: u8) {
-        self.poly_off(machine, pitch, true);
+    pub fn note_off(&mut self, uid: MachineUid, pitch: u8) {
+        if let Some(pos) = self.position(uid) {
+            self.poly_off(pos, pitch, true);
+        }
     }
 
     fn poly_on(&mut self, machine: usize, pitch: u8, vel: u8, live: bool) {
@@ -478,10 +496,12 @@ impl Engine {
         self.seq.is_playing()
     }
 
-    /// Selects pattern `slot` for the machine at rack position `pos`.
-    /// Ignores positions past the rack and `slot >= 128`.
-    pub fn select_pattern(&mut self, pos: usize, slot: u8) {
-        if pos < self.slots.len() && (slot as usize) < PATTERNS {
+    /// Selects pattern `slot` for machine `uid` (queued while playing).
+    /// Ignores unknown uids and `slot >= 128`.
+    pub fn select_pattern(&mut self, uid: MachineUid, slot: u8) {
+        if let Some(pos) = self.position(uid)
+            && (slot as usize) < PATTERNS
+        {
             self.seq.select(pos, slot);
         }
     }
@@ -490,96 +510,38 @@ impl Engine {
         self.sample_rate
     }
 
-    /// The `n`th slot (in rack order) whose patterns are of the kind
-    /// `pick` accepts.
-    fn nth_bank<T>(
-        &mut self,
-        n: usize,
-        pick: fn(&mut SlotPatterns) -> Option<&mut Vec<T>>,
-    ) -> Option<&mut Vec<T>> {
-        self.slots
-            .iter_mut()
-            .filter_map(|s| pick(&mut s.patterns))
-            .nth(n)
-    }
-
-    /// Swaps `p` with the stored pattern of the `synth`th 303 (real-time
-    /// safe). An invalid target or malformed pattern leaves both untouched
-    /// and returns false.
-    pub fn swap_synth_pattern(&mut self, synth: usize, slot: u8, p: &mut SynthPattern) -> bool {
-        if slot as usize >= PATTERNS || !p.is_well_formed() {
+    /// Swaps `p` with pattern `index` of machine `uid`'s bank (real-time
+    /// safe). An unknown uid, a pattern of another type than the machine
+    /// plays, `index >= PATTERNS` or a malformed pattern leaves both
+    /// untouched and returns false.
+    pub fn swap_pattern(&mut self, uid: MachineUid, index: u8, p: &mut PatternData) -> bool {
+        let i = index as usize;
+        let Some(pos) = self.position(uid).filter(|_| i < PATTERNS) else {
             return false;
-        }
-        let bank = self.nth_bank(synth, |b| match b {
-            SlotPatterns::Synth(v) => Some(v),
+        };
+        let swapped = match (&mut self.slots[pos].patterns, p) {
+            (SlotPatterns::Synth(bank), PatternData::Synth(p)) if p.is_well_formed() => {
+                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+            }
+            (SlotPatterns::Drum(bank), PatternData::Drum(p)) if p.is_well_formed() => {
+                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+            }
+            (SlotPatterns::Notes(bank), PatternData::Notes(p)) if p.is_well_formed() => {
+                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+            }
             _ => None,
-        });
-        let Some(stored) = bank.and_then(|b| b.get_mut(slot as usize)) else {
-            return false;
         };
-        std::mem::swap(stored, p);
-        true
+        swapped.is_some()
     }
 
-    /// Like `swap_synth_pattern`, on the `kit`th drum kit.
-    pub fn swap_drum_pattern(&mut self, kit: usize, slot: u8, p: &mut DrumPattern) -> bool {
-        if slot as usize >= PATTERNS || !p.is_well_formed() {
-            return false;
+    /// The `length` of pattern `index` of machine `uid`.
+    pub fn pattern_len(&self, uid: MachineUid, index: u8) -> Option<u8> {
+        let i = index as usize;
+        match &self.slots[self.position(uid)?].patterns {
+            SlotPatterns::Synth(bank) => bank.get(i).map(|p| p.length),
+            SlotPatterns::Drum(bank) => bank.get(i).map(|p| p.length),
+            SlotPatterns::Notes(bank) => bank.get(i).map(|p| p.length),
         }
-        let bank = self.nth_bank(kit, |b| match b {
-            SlotPatterns::Drum(v) => Some(v),
-            _ => None,
-        });
-        let Some(stored) = bank.and_then(|b| b.get_mut(slot as usize)) else {
-            return false;
-        };
-        std::mem::swap(stored, p);
-        true
-    }
-
-    /// Stores `p` and returns the old pattern. An invalid target or a
-    /// malformed pattern is not stored: `p` is handed back unchanged.
-    pub fn set_synth_pattern(
-        &mut self,
-        synth: usize,
-        slot: u8,
-        mut p: SynthPattern,
-    ) -> SynthPattern {
-        self.swap_synth_pattern(synth, slot, &mut p);
-        p
-    }
-
-    pub fn set_drum_pattern(&mut self, kit: usize, slot: u8, mut p: DrumPattern) -> DrumPattern {
-        self.swap_drum_pattern(kit, slot, &mut p);
-        p
-    }
-
-    /// Swaps `p` into the note machine (FM or Sampler) at rack position
-    /// `machine`. Real-time safe. An invalid target or malformed pattern
-    /// leaves both untouched and returns false.
-    pub fn swap_note_pattern(&mut self, machine: usize, slot: u8, p: &mut NotePattern) -> bool {
-        if slot as usize >= PATTERNS || !p.is_well_formed() {
-            return false;
-        }
-        let Some(SlotPatterns::Notes(bank)) = self.slots.get_mut(machine).map(|s| &mut s.patterns)
-        else {
-            return false;
-        };
-        let Some(stored) = bank.get_mut(slot as usize) else {
-            return false;
-        };
-        std::mem::swap(stored, p);
-        true
-    }
-
-    pub fn set_note_pattern(
-        &mut self,
-        machine: usize,
-        slot: u8,
-        mut p: NotePattern,
-    ) -> NotePattern {
-        self.swap_note_pattern(machine, slot, &mut p);
-        p
     }
 
     /// By rack position.
@@ -711,7 +673,20 @@ mod tests {
         channel_param, drum_param, fm_op_param, fm_param, kit_param, slot_param, synth_param,
     };
     use crate::project::MachineEntry;
+    use crate::project::{DrumPattern, NotePattern, SynthPattern};
     use crate::testutil::{all_finite, peak, rms};
+
+    /// Uid of the standard rack's machine at position `pos`.
+    fn pos_uid(pos: usize) -> MachineUid {
+        MachineId::ALL[pos].uid()
+    }
+
+    /// Stores `p` and returns the old pattern, or `p` itself if refused.
+    fn set_pattern(e: &mut Engine, uid: MachineUid, index: u8, p: PatternData) -> PatternData {
+        let mut p = p;
+        e.swap_pattern(uid, index, &mut p);
+        p
+    }
 
     #[test]
     fn every_param_of_the_standard_rack_has_its_own_knob() {
@@ -785,8 +760,8 @@ mod tests {
         let mut p = Project::default();
         p.machines[1].selected = 4;
         let mut eng = Engine::from_project(SR, &p);
-        eng.select_pattern(0, 9);
-        eng.select_pattern(5, 7);
+        eng.select_pattern(MachineUid(1), 9);
+        eng.select_pattern(MachineUid(6), 7);
         let mut q = Project::default();
         q.machines.truncate(3);
         q.machines[2].selected = 2;
@@ -1041,17 +1016,27 @@ mod tests {
     #[test]
     fn sampler_audition_and_slot_swaps() {
         let mut e = Engine::from_project(SR, &sampler_project());
-        e.note_on(5, 38, 100);
+        e.note_on(pos_uid(5), 38, 100);
         let (l, _) = render(&mut e, 0.1);
         assert!(peak(&l) > 0.01, "audition plays slice 3");
         let mut none = None;
-        assert!(e.swap_sampler_sample(0, &mut none));
+        assert!(
+            !e.swap_sampler_sample(pos_uid(4), 0, &mut none),
+            "not a sampler"
+        );
+        assert!(!e.swap_sampler_sample(MachineUid(99), 0, &mut none));
+        assert!(none.is_none(), "refused swaps leave the sample alone");
+        assert!(e.swap_sampler_sample(pos_uid(5), 0, &mut none));
         assert!(none.is_some());
         let (l, _) = render(&mut e, 0.05);
         assert!(peak(&l) < 1e-3, "slot emptied");
         let mut play = crate::sampler::slot::SlotPlay::EMPTY;
-        assert!(e.swap_sampler_play(0, &mut play));
-        assert!(!e.swap_sampler_play(16, &mut play));
+        assert!(e.swap_sampler_play(pos_uid(5), 0, &mut play));
+        assert!(!e.swap_sampler_play(pos_uid(5), 16, &mut play));
+        assert!(
+            !e.swap_sampler_play(pos_uid(0), 0, &mut play),
+            "not a sampler"
+        );
     }
 
     #[test]
@@ -1065,7 +1050,7 @@ mod tests {
         p.sampler_mut(MachineId::Sampler.uid()).unwrap().slots[0] = Some(tone_slot(meta));
         p.set_param(slot_param(0, crate::params::SlotParam::Release), 1.0);
         let mut e = Engine::from_project(SR, &p);
-        e.note_on(5, 60, 100);
+        e.note_on(pos_uid(5), 60, 100);
         render(&mut e, 0.1);
         e.stop();
         e.stop();
@@ -1113,15 +1098,15 @@ mod tests {
     #[test]
     fn live_notes_audition_while_stopped() {
         let mut e = Engine::from_project(SR, &tone_slot_project());
-        e.note_on(0, 60, 100);
-        e.note_on(4, 200, 100);
-        e.note_on(5, 60, 0);
+        e.note_on(pos_uid(0), 60, 100);
+        e.note_on(pos_uid(4), 200, 100);
+        e.note_on(pos_uid(5), 60, 0);
         let (l, _) = render(&mut e, 0.05);
         assert_eq!(peak(&l), 0.0, "bad machine, pitch and velocity are ignored");
-        e.note_on(5, 60, 100);
+        e.note_on(pos_uid(5), 60, 100);
         let (l, _) = render(&mut e, 0.1);
         assert!(peak(&l) > 0.01);
-        e.note_off(5, 60);
+        e.note_off(pos_uid(5), 60);
         render(&mut e, 0.3);
         let (l, _) = render(&mut e, 0.05);
         assert!(peak(&l) < 1e-4);
@@ -1156,9 +1141,9 @@ mod tests {
         p.set_param(fm_op_param(0, OpParam::L4), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
-        e.note_on(4, 60, 100);
+        e.note_on(pos_uid(4), 60, 100);
         render(&mut e, 0.1);
-        e.note_off(4, 60);
+        e.note_off(pos_uid(4), 60);
         e.stop();
         render(&mut e, 0.3);
         let (l, _) = render(&mut e, 0.05);
@@ -1187,8 +1172,8 @@ mod tests {
         e.play();
         render(&mut e, 0.2);
         e.play();
-        let mut empty = NotePattern::default();
-        assert!(e.swap_note_pattern(4, 0, &mut empty));
+        let mut empty = PatternData::Notes(NotePattern::default());
+        assert!(e.swap_pattern(pos_uid(4), 0, &mut empty));
         render(&mut e, 0.3);
         let (l, _) = render(&mut e, 0.05);
         assert!(peak(&l) < 1e-4, "no voice hangs after a restart");
@@ -1210,11 +1195,11 @@ mod tests {
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.1);
-        let mut empty = NotePattern {
+        let mut empty = PatternData::Notes(NotePattern {
             length: 64,
             ..NotePattern::default()
-        };
-        assert!(e.swap_note_pattern(4, 0, &mut empty));
+        });
+        assert!(e.swap_pattern(pos_uid(4), 0, &mut empty));
         render(&mut e, 0.5);
         let (l, _) = render(&mut e, 0.05);
         assert!(
@@ -1309,13 +1294,27 @@ mod tests {
     #[test]
     fn pattern_replacement_returns_old_pattern() {
         let mut e = demo_engine();
-        let old = e.set_synth_pattern(0, 0, SynthPattern::default());
+        let PatternData::Synth(old) = set_pattern(
+            &mut e,
+            pos_uid(0),
+            0,
+            PatternData::Synth(SynthPattern::default()),
+        ) else {
+            panic!("a synth pattern comes back")
+        };
         assert!(
             old.steps
                 .iter()
                 .any(|s| s.gate != crate::project::Gate::Off)
         );
-        let old_drums = e.set_drum_pattern(0, 0, DrumPattern::default());
+        let PatternData::Drum(old_drums) = set_pattern(
+            &mut e,
+            pos_uid(2),
+            0,
+            PatternData::Drum(DrumPattern::default()),
+        ) else {
+            panic!("a drum pattern comes back")
+        };
         assert!(
             old_drums
                 .steps
@@ -1349,8 +1348,8 @@ mod tests {
     fn out_of_range_indices_are_ignored() {
         let mut e = demo_engine();
         e.play();
-        e.select_pattern(0, 200);
-        e.select_pattern(9, 0);
+        e.select_pattern(pos_uid(0), 200);
+        e.select_pattern(MachineUid(99), 0);
         e.set_param(drum_param(0, 9, DrumParam::Tune), 0.5);
         e.set_param(synth_param(7, SynthParam::Cutoff), 0.5);
         e.set_param(channel_param(6, ChannelParam::Level), 0.5);
@@ -1366,24 +1365,35 @@ mod tests {
         e.play();
         let mut short = SynthPattern::default();
         short.steps.truncate(3);
-        let back = e.set_synth_pattern(0, 0, short.clone());
-        assert_eq!(back, short);
+        let short = PatternData::Synth(short);
+        assert_eq!(set_pattern(&mut e, pos_uid(0), 0, short.clone()), short);
         let mut zero = DrumPattern::default();
         zero.length = 0;
-        assert_eq!(e.set_drum_pattern(0, 0, zero.clone()), zero);
+        let zero = PatternData::Drum(zero);
+        assert_eq!(set_pattern(&mut e, pos_uid(2), 0, zero.clone()), zero);
         let mut lane = SynthPattern::default();
         lane.param_lane = Some(crate::project::ParamLane {
             param: ParamId::Fx(crate::params::FxParam::DelayMs),
             values: vec![None; 2],
         });
-        assert_eq!(e.set_synth_pattern(0, 0, lane.clone()), lane);
+        let lane = PatternData::Synth(lane);
+        assert_eq!(set_pattern(&mut e, pos_uid(0), 0, lane.clone()), lane);
+        let synth = PatternData::Synth(SynthPattern::default());
         assert_eq!(
-            e.set_synth_pattern(2, 0, SynthPattern::default()),
-            SynthPattern::default()
+            set_pattern(&mut e, MachineUid(99), 0, synth.clone()),
+            synth,
+            "unknown uid"
         );
         assert_eq!(
-            e.set_drum_pattern(0, 200, DrumPattern::default()),
-            DrumPattern::default()
+            set_pattern(&mut e, pos_uid(2), 0, synth.clone()),
+            synth,
+            "a synth pattern on a kit"
+        );
+        let drums = PatternData::Drum(DrumPattern::default());
+        assert_eq!(
+            set_pattern(&mut e, pos_uid(2), 200, drums.clone()),
+            drums,
+            "index past the bank"
         );
         let (l, _) = render(&mut e, 1.0);
         assert!(all_finite(&l) && rms(&l) > 0.02, "still playing the demo");
@@ -1427,7 +1437,7 @@ mod tests {
             param: ParamId::Master(MasterParam::Level),
             values,
         });
-        e.set_synth_pattern(0, 0, p);
+        set_pattern(&mut e, pos_uid(0), 0, PatternData::Synth(p));
         e.play();
         let (l, _) = render(&mut e, 0.5);
         // Step 0 (about 5500 samples at the demo's 128 BPM + swing) is silent...
@@ -1453,19 +1463,26 @@ mod tests {
     #[test]
     fn swap_exchanges_patterns_and_rejects_bad_ones() {
         let mut e = demo_engine();
-        let mut p = SynthPattern::default();
-        assert!(e.swap_synth_pattern(0, 0, &mut p));
+        let mut p = PatternData::Synth(SynthPattern::default());
+        assert!(e.swap_pattern(pos_uid(0), 0, &mut p));
+        let PatternData::Synth(p) = p else {
+            panic!("a synth pattern comes back")
+        };
         assert!(
             p.steps.iter().any(|s| s.gate != crate::project::Gate::Off),
             "got the old pattern back"
         );
         let mut bad = SynthPattern::default();
         bad.steps.pop();
-        assert!(!e.swap_synth_pattern(0, 1, &mut bad));
-        assert_eq!(bad.steps.len(), 63, "rejected pattern is untouched");
-        let mut d = DrumPattern::default();
-        assert!(e.swap_drum_pattern(1, 0, &mut d));
-        assert!(!e.swap_drum_pattern(2, 0, &mut d));
+        let mut bad = PatternData::Synth(bad);
+        assert!(!e.swap_pattern(pos_uid(0), 1, &mut bad));
+        assert!(
+            matches!(&bad, PatternData::Synth(b) if b.steps.len() == 63),
+            "rejected pattern is untouched"
+        );
+        let mut d = PatternData::Drum(DrumPattern::default());
+        assert!(e.swap_pattern(pos_uid(3), 0, &mut d));
+        assert!(!e.swap_pattern(pos_uid(4), 0, &mut d), "not a kit");
     }
 
     #[test]
@@ -1515,7 +1532,7 @@ mod tests {
     fn queued_patterns_are_reported() {
         let mut e = demo_engine();
         e.play();
-        e.select_pattern(3, 5);
+        e.select_pattern(pos_uid(3), 5);
         let mut want = [None; MAX_MACHINES];
         want[3] = Some(5);
         assert_eq!(e.queued_patterns(), want);
@@ -1534,18 +1551,21 @@ mod tests {
             param: ParamId::Master(MasterParam::Level),
             values: vec![Some(0.0); 64],
         });
-        e.set_synth_pattern(0, 0, p);
+        set_pattern(&mut e, pos_uid(0), 0, PatternData::Synth(p));
         e.play();
         render(&mut e, 0.3);
         e.stop();
-        e.set_synth_pattern(
+        set_pattern(
+            &mut e,
+            pos_uid(0),
             0,
-            0,
-            crate::demo::demo_project()
-                .synth(MachineId::Synth1.uid())
-                .unwrap()
-                .patterns[0]
-                .clone(),
+            PatternData::Synth(
+                crate::demo::demo_project()
+                    .synth(MachineId::Synth1.uid())
+                    .unwrap()
+                    .patterns[0]
+                    .clone(),
+            ),
         );
         e.play();
         let (l, _) = render(&mut e, 1.0);
@@ -1683,7 +1703,7 @@ mod tests {
             .patterns[0]
             .clone();
         long.length = 32;
-        e.set_synth_pattern(0, 7, long);
+        set_pattern(&mut e, pos_uid(0), 7, PatternData::Synth(long));
         e.set_mode(crate::sequencer::Mode::Song);
         e.play();
         let mut l = [0.0; 64];
@@ -1723,7 +1743,7 @@ mod tests {
 
     #[test]
     fn note_patterns_swap_and_report() {
-        use crate::project::{Note, NotePattern};
+        use crate::project::Note;
         let mut e = demo_engine();
         let mut p = NotePattern::default();
         p.notes.push(Note {
@@ -1732,16 +1752,20 @@ mod tests {
             pitch: 60,
             vel: 100,
         });
-        assert!(e.swap_note_pattern(4, 2, &mut p));
-        assert!(p.notes.is_empty(), "got the old, empty pattern back");
-        assert!(!e.swap_note_pattern(0, 2, &mut p), "not a note machine");
-        let mut bad = NotePattern {
+        let mut p = PatternData::Notes(p);
+        assert!(e.swap_pattern(pos_uid(4), 2, &mut p));
+        assert!(
+            matches!(&p, PatternData::Notes(n) if n.notes.is_empty()),
+            "got the old, empty pattern back"
+        );
+        assert!(!e.swap_pattern(pos_uid(0), 2, &mut p), "not a note machine");
+        let mut bad = PatternData::Notes(NotePattern {
             length: 0,
             ..NotePattern::default()
-        };
-        assert!(!e.swap_note_pattern(5, 0, &mut bad));
+        });
+        assert!(!e.swap_pattern(pos_uid(5), 0, &mut bad));
         e.play();
-        e.select_pattern(5, 9);
+        e.select_pattern(pos_uid(5), 9);
         assert_eq!(e.queued_patterns()[5], Some(9));
         assert_eq!(e.current_patterns().len(), MAX_MACHINES);
     }
@@ -1760,7 +1784,7 @@ mod tests {
             });
         let mut held = Engine::from_project(SR, &p);
         held.play();
-        held.note_on(4, 60, 100);
+        held.note_on(pos_uid(4), 60, 100);
         let (l, _) = render(&mut held, 0.5);
         assert!(
             peak(&l[l.len() - 2000..]) > 0.01,
@@ -1828,7 +1852,7 @@ mod tests {
     fn play_and_stop_keep_auditions_sounding() {
         for machine in [4, 5] {
             let mut e = Engine::from_project(SR, &tone_slot_project());
-            e.note_on(machine, 60, 100);
+            e.note_on(pos_uid(machine), 60, 100);
             render(&mut e, 0.05);
             e.play();
             let (l, _) = render(&mut e, 0.3);
@@ -1836,7 +1860,7 @@ mod tests {
             e.stop();
             let (l, _) = render(&mut e, 0.3);
             assert!(tail(&l) > 0.01, "machine {machine}: audition survives stop");
-            e.note_off(machine, 60);
+            e.note_off(pos_uid(machine), 60);
             render(&mut e, 0.5);
             let (l, _) = render(&mut e, 0.05);
             assert!(
@@ -1850,7 +1874,7 @@ mod tests {
     fn play_and_stop_release_pattern_notes_under_an_audition() {
         let mut e = Engine::from_project(SR, &tone_slot_project());
         for machine in [4, 5] {
-            e.note_on(machine, 72, 100);
+            e.note_on(pos_uid(machine), 72, 100);
             e.poly_on(machine, 60, 100, false);
         }
         e.play();
@@ -1877,10 +1901,10 @@ mod tests {
         p.set_param(fm_param(crate::params::FmParam::Mono), 1.0);
         let mut e = Engine::from_project(SR, &p);
         e.poly_on(4, 48, 100, false);
-        e.note_on(4, 72, 100);
+        e.note_on(pos_uid(4), 72, 100);
         e.play();
         assert_eq!(e.fm().sounding(), vec![72], "the audition keeps sounding");
-        e.note_off(4, 72);
+        e.note_off(pos_uid(4), 72);
         assert!(
             e.fm().sounding().is_empty(),
             "no glide back to a pattern key the sequencer forgot"
@@ -1942,8 +1966,8 @@ mod tests {
         let mut e = Engine::from_project(SR, &tone_slot_project());
         for machine in [4, 5] {
             e.poly_on(machine, 60, 100, false);
-            e.note_on(machine, 60, 100);
-            e.note_off(machine, 60);
+            e.note_on(pos_uid(machine), 60, 100);
+            e.note_off(pos_uid(machine), 60);
         }
         assert_eq!(e.fm().sounding(), vec![60], "the pattern voice is held");
         assert_eq!(e.fm().active_voices(), 2, "the audition voice is releasing");

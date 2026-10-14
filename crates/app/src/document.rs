@@ -2,9 +2,9 @@
 //! applying one returns the engine `Command`s that bring the audio
 //! thread in line. Undo stores the inverse edit.
 
-use crate::six::SixMachines;
+use crate::six::{SixMachines, kit_uid, machine_uid, synth_uid};
 use acid_engine::fm::sysex::Dx7Voice;
-use acid_engine::host::Command;
+use acid_engine::host::{Command, PatternData};
 use acid_engine::params::ParamId;
 use acid_engine::project::{
     DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
@@ -473,7 +473,7 @@ impl Document {
             self.unsaved_selection = true;
         }
         vec![Command::SelectPattern {
-            machine: machine as u8,
+            uid: machine_uid(machine),
             slot,
         }]
     }
@@ -689,27 +689,31 @@ impl Document {
             Edit::SynthStep { synth, slot, .. }
             | Edit::SynthLength { synth, slot, .. }
             | Edit::SynthTranspose { synth, slot, .. }
-            | Edit::SynthPattern { synth, slot, .. } => vec![Command::SynthPattern {
-                synth: *synth as u8,
-                slot: *slot,
-                pattern: Box::new(p.synth_at(*synth).patterns[*slot as usize].clone()),
+            | Edit::SynthPattern { synth, slot, .. } => vec![Command::Pattern {
+                uid: synth_uid(*synth),
+                index: *slot,
+                pattern: Box::new(PatternData::Synth(
+                    p.synth_at(*synth).patterns[*slot as usize].clone(),
+                )),
             }],
             Edit::DrumHit { kit, slot, .. }
             | Edit::DrumLength { kit, slot, .. }
             | Edit::DrumPattern { kit, slot, .. } => {
-                vec![Command::DrumPattern {
-                    kit: *kit as u8,
-                    slot: *slot,
-                    pattern: Box::new(p.kit_at(*kit).patterns[*slot as usize].clone()),
+                vec![Command::Pattern {
+                    uid: kit_uid(*kit),
+                    index: *slot,
+                    pattern: Box::new(PatternData::Drum(
+                        p.kit_at(*kit).patterns[*slot as usize].clone(),
+                    )),
                 }]
             }
             Edit::NotePattern { machine, slot, .. } | Edit::NoteLength { machine, slot, .. } => {
-                vec![Command::NotePattern {
-                    machine: *machine as u8,
-                    slot: *slot,
-                    pattern: Box::new(
+                vec![Command::Pattern {
+                    uid: machine_uid(*machine),
+                    index: *slot,
+                    pattern: Box::new(PatternData::Notes(
                         p.notes_at(*machine).expect("note machine")[*slot as usize].clone(),
-                    ),
+                    )),
                 }]
             }
             Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
@@ -728,10 +732,12 @@ impl Document {
                 let data = p.sampler_machine().slots[*slot].as_ref();
                 let mut cmds = vec![
                     Command::SamplerSample {
+                        uid: acid_engine::machine::MachineId::Sampler.uid(),
                         slot: *slot as u8,
                         sample: data.map(|d| Arc::new(d.to_sample())),
                     },
                     Command::SamplerPlay {
+                        uid: acid_engine::machine::MachineId::Sampler.uid(),
                         slot: *slot as u8,
                         play: Box::new(
                             data.map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
@@ -746,6 +752,7 @@ impl Document {
                 cmds
             }
             Edit::SlotMeta { slot, .. } => vec![Command::SamplerPlay {
+                uid: acid_engine::machine::MachineId::Sampler.uid(),
                 slot: *slot as u8,
                 play: Box::new(
                     p.sampler_machine().slots[*slot]
@@ -761,6 +768,7 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acid_engine::machine::MachineUid;
     use acid_engine::params::{ParamId, SynthParam, synth_param};
     use acid_engine::project::{DrumHit, Gate, SeqView, SynthStep};
 
@@ -1094,13 +1102,13 @@ mod tests {
         );
         match cmds.as_slice() {
             [
-                Command::SynthPattern {
-                    synth: 0,
-                    slot: 3,
+                Command::Pattern {
+                    uid: MachineUid(1),
+                    index: 3,
                     pattern,
                 },
-            ] => assert_eq!(pattern.length, 7),
-            _ => panic!("expected one SynthPattern command"),
+            ] => assert!(matches!(&**pattern, PatternData::Synth(p) if p.length == 7)),
+            _ => panic!("expected one Pattern command for Synth 1"),
         }
         let cmds = d.apply(
             Edit::DrumLength {
@@ -1112,11 +1120,11 @@ mod tests {
         );
         assert!(matches!(
             cmds.as_slice(),
-            [Command::DrumPattern {
-                kit: 1,
-                slot: 2,
-                ..
-            }]
+            [Command::Pattern {
+                uid: MachineUid(4),
+                index: 2,
+                pattern,
+            }] if matches!(**pattern, PatternData::Drum(_))
         ));
     }
 
@@ -1142,7 +1150,8 @@ mod tests {
         assert_eq!(d.project.sampler_machine().patterns[7], p);
         assert!(matches!(
             cmds.as_slice(),
-            [Command::NotePattern { machine: 5, slot: 7, pattern }] if **pattern == p
+            [Command::Pattern { uid: MachineUid(6), index: 7, pattern }]
+                if **pattern == PatternData::Notes(p.clone())
         ));
         d.apply(
             Edit::NoteLength {
@@ -1253,7 +1262,7 @@ mod tests {
         assert!(matches!(
             cmds.as_slice(),
             [Command::SelectPattern {
-                machine: 2,
+                uid: MachineUid(3),
                 slot: 17
             }]
         ));
@@ -1286,11 +1295,19 @@ mod tests {
         assert!(matches!(
             cmds[0],
             Command::SamplerSample {
+                uid: MachineUid(6),
                 slot: 2,
                 sample: Some(_)
             }
         ));
-        assert!(matches!(cmds[1], Command::SamplerPlay { slot: 2, .. }));
+        assert!(matches!(
+            cmds[1],
+            Command::SamplerPlay {
+                uid: MachineUid(6),
+                slot: 2,
+                ..
+            }
+        ));
         assert!(matches!(cmds[2], Command::SetParam(id, v) if id == choke && v == 1.0));
         let mut meta = d.project.sampler_machine().slots[2]
             .as_ref()

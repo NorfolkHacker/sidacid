@@ -3,7 +3,7 @@
 //! A loaded or new project always holds the standard six (validation
 //! enforces it for now), so a missing machine is a bug.
 
-use acid_engine::machine::MachineId;
+use acid_engine::machine::{MachineId, MachineUid};
 use acid_engine::project::{
     DrumMachine, FmMachine, MachineEntry, NotePattern, Project, SamplerMachine, SynthMachine,
 };
@@ -11,6 +11,21 @@ use acid_engine::project::{
 const SYNTHS: [MachineId; 2] = [MachineId::Synth1, MachineId::Synth2];
 const KITS: [MachineId; 2] = [MachineId::Kit808, MachineId::Kit909];
 const MISSING: &str = "the standard rack holds this machine";
+
+/// Uid of synth `s` (0 = Synth 1, 1 = Synth 2).
+pub fn synth_uid(s: usize) -> MachineUid {
+    SYNTHS[s].uid()
+}
+
+/// Uid of kit `k` (0 = 808, 1 = 909).
+pub fn kit_uid(k: usize) -> MachineUid {
+    KITS[k].uid()
+}
+
+/// Uid of machine `m` (by `MachineId::index`).
+pub fn machine_uid(m: usize) -> MachineUid {
+    MachineId::ALL[m].uid()
+}
 
 pub trait SixMachines {
     fn synth_at(&self, s: usize) -> &SynthMachine;
