@@ -67,6 +67,8 @@ pub enum SeqEvent {
 
 /// Sequencer ticks per step: the step's quarters.
 const SUBS: u8 = 4;
+// Note tracks advance one tick per sequencer tick.
+const _: () = assert!(TICKS_PER_STEP == SUBS as u16);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Track {
@@ -383,26 +385,98 @@ impl Sequencer {
 
     /// Rack edit (real-time safe): track `p` takes the state of old track
     /// `map[p]`, so surviving machines keep their position, pattern, queue
-    /// and held notes. New machines at `p < len` get a fresh track on
-    /// pattern `selected[p]` at once (silent until the next bar while a
-    /// song plays); positions past `len` are cleared.
-    pub fn rearrange(&mut self, map: &RackMap, len: usize, selected: &[u8; MAX_MACHINES]) {
+    /// and held notes. New machines (positions `banks` fills that `map`
+    /// doesn't) get a fresh track on pattern `selected[p]`, in phase with
+    /// the others (see `join`); positions past the rack are cleared.
+    /// `song` is the song for the new rack.
+    pub fn rearrange(
+        &mut self,
+        map: &RackMap,
+        banks: Banks<'_>,
+        song: &CompiledSong,
+        selected: &[u8; MAX_MACHINES],
+    ) {
         let (old_tracks, old_chosen) = (self.tracks, self.chosen);
-        let song_playing = self.playing && self.mode == Mode::Song;
         for pos in 0..MAX_MACHINES {
-            let old = map[pos].filter(|&o| o < MAX_MACHINES && pos < len);
+            let in_rack = banks.slots[pos].is_some();
+            let old = map[pos].filter(|&o| o < MAX_MACHINES && in_rack);
             (self.tracks[pos], self.chosen[pos]) = match old {
                 Some(o) => (old_tracks[o], old_chosen[o]),
-                None if pos < len => {
+                None if in_rack => {
                     let t = Track {
                         pattern: selected[pos],
-                        silent: song_playing,
                         ..Track::default()
                     };
                     (t, selected[pos])
                 }
                 None => (Track::default(), 0),
             };
+            if old.is_none() && in_rack {
+                self.join(pos, banks, song);
+            }
+        }
+    }
+
+    /// Puts the fresh track at `pos` where it would be had it played from
+    /// the start. Pattern mode: at the global step (tick, for note tracks)
+    /// modulo its pattern's length, as the tracks that never switched are.
+    /// Song mode: on the current bar's cell (pattern, mute, transpose) at
+    /// the bar's step, shorter patterns looping as in `load_bar`. Stopped:
+    /// nothing to do. A step whose start tick has passed sounds from the
+    /// next step on.
+    fn join(&mut self, pos: usize, banks: Banks<'_>, song: &CompiledSong) {
+        if !self.playing {
+            return;
+        }
+        let sub = self.sub as u64;
+        // The next tick to run, counted from the start of play or the bar.
+        let next_tick = if self.mode == Mode::Song {
+            let Some(bar) = song.bars.get(self.song_bar) else {
+                // Past the end: the next step start ends the song.
+                self.tracks[pos].silent = true;
+                return;
+            };
+            // The step counters advance on quarter 2, so on quarter 3 they
+            // are one step ahead of the ticks.
+            let step_ticks = self.bar_step as u64 * SUBS as u64;
+            let Some(tick) = (if sub == 3 {
+                step_ticks.checked_sub(1)
+            } else {
+                Some(step_ticks + sub)
+            }) else {
+                // The bar just ended: its last tick is still to run, and
+                // the next bar's start loads every track.
+                self.tracks[pos].silent = true;
+                return;
+            };
+            let t = &mut self.tracks[pos];
+            match bar.patterns[pos] {
+                Some(PatternRef(slot)) if (slot as usize) < banks.bank_len(pos) => {
+                    t.pattern = slot;
+                    t.silent = bar.mutes[pos];
+                }
+                _ => t.silent = true,
+            }
+            t.transpose_add = if banks.transposes(pos) {
+                bar.transpose[pos]
+            } else {
+                0
+            };
+            tick
+        } else {
+            self.global_step * SUBS as u64 + sub
+        };
+        let t = &mut self.tracks[pos];
+        let len = banks.length(pos, t.pattern).unwrap_or(1) as u64;
+        if matches!(banks.slots[pos], Some(Bank::Notes(_))) {
+            let ticks = len * TICKS_PER_STEP as u64;
+            t.pos = (next_tick % ticks) as u16;
+            // As `note_ticks` leaves it: the step of the last tick run.
+            let last = next_tick.checked_sub(1).map_or(0, |k| k % ticks);
+            t.step = (last / TICKS_PER_STEP as u64) as usize;
+        } else {
+            // Quarter 3 sees the step already advanced: round up.
+            t.step = ((next_tick + 1) / SUBS as u64 % len) as usize;
         }
     }
 

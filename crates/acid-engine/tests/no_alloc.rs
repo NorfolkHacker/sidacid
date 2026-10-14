@@ -518,3 +518,33 @@ fn a_rack_swap_through_the_host_does_not_allocate() {
     assert_eq!(racks, 2, "both swaps come back to be freed");
     assert!(l.iter().any(|v| *v != 0.0) || r.iter().any(|v| *v != 0.0));
 }
+
+#[test]
+fn machines_joining_mid_pattern_do_not_allocate() {
+    use acid_engine::machine::MachineType;
+    use acid_engine::project::MachineEntry;
+    use acid_engine::rack::RackSwap;
+    let p = busy_project();
+    let (mut host, mut tx, _rx) = host::channel(Engine::from_project(SR, &p));
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    let mut q = p.clone();
+    for (uid, ty) in [(7, MachineType::Synth), (8, MachineType::Fm)] {
+        q.machines
+            .push(MachineEntry::new(MachineUid(uid), ty, format!("M{uid}")));
+    }
+    q.next_uid = 9;
+    q.validate().unwrap();
+    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    tx.push(Command::Play).ok().unwrap();
+    for _ in 0..77 {
+        host.process(&mut l, &mut r);
+    }
+    assert!(tx.push(Command::SetRack(swap)).is_ok());
+    let n = count_allocs(|| {
+        for _ in 0..200 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    assert_eq!(host.engine().slot_uids().len(), q.machines.len());
+}

@@ -656,9 +656,12 @@ impl Project {
             return bad("sampler audio exceeds 64 MB".into());
         }
         for bar in &self.song.bars {
-            for (uid, cell) in &bar.cells {
+            for (i, (uid, cell)) in bar.cells.iter().enumerate() {
                 if self.machine(*uid).is_none() {
                     return bad("song bar names a machine not in the rack".into());
+                }
+                if bar.cells[..i].iter().any(|(u, _)| u == uid) {
+                    return bad("song bar names a machine twice".into());
                 }
                 if cell.pattern.is_some_and(|r| r.0 as usize >= PATTERNS) {
                     return bad("song references a pattern out of range".into());
@@ -855,6 +858,18 @@ mod tests {
     fn v3_round_trips() {
         let p = crate::demo::demo_project();
         assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
+    }
+
+    #[test]
+    fn a_bar_may_not_name_a_machine_twice() {
+        let mut p = Project::default();
+        p.song.bars.push(Bar {
+            cells: vec![
+                (MachineUid(1), Cell::default()),
+                (MachineUid(1), Cell::default()),
+            ],
+        });
+        assert!(p.validate().unwrap_err().to_string().contains("twice"));
     }
 
     #[test]

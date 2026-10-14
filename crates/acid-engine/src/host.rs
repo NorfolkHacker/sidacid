@@ -113,12 +113,16 @@ pub struct Status {
     /// A `Command::Song` was refused (an invalid song) since the previous
     /// status; the engine kept its old song.
     pub song_rejected: bool,
+    /// A `Command::SetRack` was refused (malformed) since the previous
+    /// status; the engine kept its rack.
+    pub rack_rejected: bool,
     /// `Command::Stop`s taken since this engine was loaded (wrapping). The
     /// UI counts the Stops it sends the same way: a status that has not
     /// caught up predates its latest Stop.
     pub stops: u32,
-    /// Rack generation this status reports on: the engine's count of
-    /// `SetRack`s taken (wrapping). Per-position arrays describe that rack.
+    /// Rack generation this status reports on: the host's count of racks
+    /// taken, i.e. accepted `SetRack`s plus `ReplaceEngine`s (wrapping;
+    /// never reset). Per-position arrays describe that rack.
     pub rack_gen: u32,
 }
 
@@ -146,6 +150,9 @@ pub struct EngineHost {
     meters: [f32; MAX_MACHINES + 1],
     guard_fired: bool,
     song_rejected: bool,
+    rack_rejected: bool,
+    /// Racks taken: accepted `SetRack`s plus `ReplaceEngine`s (wrapping).
+    rack_gen: u32,
     cpu: f32,
     cpu_peak: f32,
     overruns: u32,
@@ -172,6 +179,8 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         meters: [0.0; MAX_MACHINES + 1],
         guard_fired: false,
         song_rejected: false,
+        rack_rejected: false,
+        rack_gen: 0,
         cpu: 0.0,
         cpu_peak: 0.0,
         overruns: 0,
@@ -261,6 +270,8 @@ impl EngineHost {
                     self.meters = [0.0; MAX_MACHINES + 1];
                     self.guard_fired = false;
                     self.song_rejected = false;
+                    self.rack_rejected = false;
+                    self.rack_gen = self.rack_gen.wrapping_add(1);
                     self.since_status = 0;
                     self.stops = 0;
                 }
@@ -273,8 +284,12 @@ impl EngineHost {
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
                 Command::SetRack(mut swap) => {
-                    if let Some(map) = self.engine.set_rack(&mut swap) {
-                        remap_meters(&mut self.meters, &map);
+                    match self.engine.set_rack(&mut swap) {
+                        Some(map) => {
+                            remap_meters(&mut self.meters, &map);
+                            self.rack_gen = self.rack_gen.wrapping_add(1);
+                        }
+                        None => self.rack_rejected = true,
                     }
                     self.dispose(Event::DisposeRack(swap));
                 }
@@ -307,8 +322,9 @@ impl EngineHost {
             song_bar: self.engine.song_bar().min(u16::MAX as usize) as u16,
             song_step: self.engine.song_step(),
             song_rejected: self.song_rejected,
+            rack_rejected: self.rack_rejected,
             stops: self.stops,
-            rack_gen: self.engine.rack_gen(),
+            rack_gen: self.rack_gen,
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
@@ -316,6 +332,7 @@ impl EngineHost {
             self.cpu_peak = 0.0;
             self.guard_fired = false;
             self.song_rejected = false;
+            self.rack_rejected = false;
         }
     }
 }
@@ -400,6 +417,59 @@ mod tests {
         assert_eq!(rack.into[0].uid, MachineUid(3));
         assert!(!gens.is_empty() && gens.iter().all(|&g| g == 1), "{gens:?}");
         assert_eq!(host.engine().slot_uids().len(), 5);
+    }
+
+    #[test]
+    fn rack_generation_counts_swaps_and_engine_replacements() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let last_gen = |rx: &mut rtrb::Consumer<Event>| {
+            std::iter::from_fn(|| rx.pop().ok())
+                .filter_map(|e| match e {
+                    Event::Status(s) => Some(s.rack_gen),
+                    _ => None,
+                })
+                .last()
+        };
+        run(&mut host, 2048);
+        assert_eq!(last_gen(&mut rx), Some(0));
+        let p = crate::demo::demo_project();
+        tx.push(Command::ReplaceEngine(Box::new(Engine::from_project(
+            SR, &p,
+        ))))
+        .unwrap();
+        run(&mut host, 2048);
+        assert_eq!(last_gen(&mut rx), Some(1), "a new engine is a new rack");
+        let mut q = p.clone();
+        q.machines.pop();
+        let swap = crate::rack::RackSwap::build(&q, &host.engine().slot_uids(), SR);
+        tx.push(Command::SetRack(swap)).unwrap();
+        run(&mut host, 2048);
+        assert_eq!(last_gen(&mut rx), Some(2));
+    }
+
+    #[test]
+    fn a_refused_rack_swap_is_reported_once() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let mut p = crate::demo::demo_project();
+        let extra = crate::project::MachineEntry::new(
+            crate::machine::MachineUid(7),
+            crate::machine::MachineType::Fm,
+            "FM 2".into(),
+        );
+        p.machines.push(extra);
+        p.next_uid = 8;
+        let mut swap = crate::rack::RackSwap::build(&p, &host.engine().slot_uids(), SR);
+        // Malformed: uid 7 is neither a fresh slot nor in the engine.
+        swap.fresh[6] = None;
+        tx.push(Command::SetRack(swap)).unwrap();
+        run(&mut host, 2048);
+        let flags: Vec<bool> = std::iter::from_fn(|| rx.pop().ok())
+            .filter_map(|e| match e {
+                Event::Status(s) => Some(s.rack_rejected),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags.iter().filter(|f| **f).count(), 1);
     }
 
     #[test]

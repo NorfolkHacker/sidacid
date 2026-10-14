@@ -98,8 +98,6 @@ pub struct Engine {
     /// The song ended by itself and no transport command came since: the
     /// next `stop` counts as the first one (it only releases).
     ended_by_song: bool,
-    /// Rack edits taken (`set_rack`), wrapping.
-    rack_gen: u32,
 }
 
 impl Engine {
@@ -128,7 +126,6 @@ impl Engine {
             guard_fired: false,
             song: CompiledSong::default(),
             ended_by_song: false,
-            rack_gen: 0,
         };
         e.load_project(p);
         e
@@ -138,7 +135,7 @@ impl Engine {
     /// most `MAX_MACHINES`) and loads its globals, song, tempo and pattern
     /// selection. Not real-time safe: call while stopped or from a
     /// non-audio thread before handing the engine to the audio thread.
-    pub fn load_project(&mut self, p: &Project) {
+    pub(crate) fn load_project(&mut self, p: &Project) {
         self.slots.clear();
         self.slots.extend(
             p.machines
@@ -170,11 +167,6 @@ impl Engine {
     /// The rack's uids in order.
     pub fn slot_uids(&self) -> Vec<MachineUid> {
         self.slots.iter().map(|s| s.uid).collect()
-    }
-
-    /// Rack edits taken since this engine was built (wrapping).
-    pub fn rack_gen(&self) -> u32 {
-        self.rack_gen
     }
 
     /// Where each new position's slot comes from, and the new rack's
@@ -226,7 +218,8 @@ impl Engine {
     /// Swaps in a new rack (real-time safe: nothing is built, dropped or
     /// allocated). Surviving machines move to their new positions with
     /// their voices, knobs, patterns and sequencer tracks; fresh slots
-    /// come in on their selected pattern. Afterwards `swap.into` holds the
+    /// come in on their selected pattern (on their bar's cell while a song
+    /// plays), in phase with the running tracks. Afterwards `swap.into` holds the
     /// old slot `Vec` with the removed machines, `swap.fresh` any unused
     /// slots and `swap.song` the old song, all for disposal off the audio
     /// thread. A malformed swap changes nothing and returns `None`;
@@ -255,11 +248,15 @@ impl Engine {
         }
         std::mem::swap(&mut self.slots, &mut swap.into);
         self.param_count = GLOBALS + self.slots.iter().map(|s| s.knobs.len()).sum::<usize>();
-        self.seq.rearrange(&map, self.slots.len(), &swap.selected);
-        self.mixer.rearrange(&map);
         std::mem::swap(&mut self.song, &mut swap.song);
+        self.seq.rearrange(
+            &map,
+            Banks::of_slots(&self.slots),
+            &self.song,
+            &swap.selected,
+        );
+        self.mixer.rearrange(&map);
         self.seq.resync();
-        self.rack_gen = self.rack_gen.wrapping_add(1);
         Some(map)
     }
 
@@ -782,8 +779,8 @@ mod tests {
     use crate::params::{
         ChannelParam, DrumParam, FmParam, KitParam, MasterParam, OpParam, SynthParam,
     };
-    use crate::project::MachineEntry;
     use crate::project::{DrumPattern, NotePattern, SynthPattern};
+    use crate::project::{MachineBody, MachineEntry};
     use crate::rack::RackSwap;
     use crate::testutil::{all_finite, peak, rms};
 
@@ -1083,7 +1080,100 @@ mod tests {
         );
         assert_eq!(swap.into.len(), 1, "the 909 came back for disposal");
         assert_eq!(swap.into[0].uid, MachineUid(4));
-        assert_eq!(eng.rack_gen(), 1);
+    }
+
+    #[test]
+    fn a_machine_added_while_playing_joins_in_phase() {
+        let p = crate::demo::demo_project();
+        let mut eng = Engine::from_project(48000.0, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 48000], vec![0.0; 48000]); // ~1 s: well past step 0
+        eng.process(&mut l, &mut r);
+        let mut q = p.clone();
+        let mut e = MachineEntry::new(MachineUid(7), MachineType::Synth, "Synth 3".into());
+        if let MachineBody::Synth(s) = &mut e.body {
+            s.patterns[0] = q.synth(MachineUid(1)).unwrap().patterns[0].clone();
+        }
+        q.machines.push(e);
+        q.next_uid = 8;
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        eng.set_rack(&mut swap);
+        assert_eq!(
+            eng.playhead()[6],
+            eng.playhead()[0],
+            "same pattern length, same step"
+        );
+    }
+
+    #[test]
+    fn a_note_machine_added_while_playing_joins_in_phase() {
+        let p = crate::demo::demo_project();
+        let mut eng = Engine::from_project(48000.0, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 30000], vec![0.0; 30000]);
+        eng.process(&mut l, &mut r);
+        let mut q = p.clone();
+        q.machines.push(MachineEntry::new(
+            MachineUid(7),
+            MachineType::Fm,
+            "FM 2".into(),
+        ));
+        q.next_uid = 8;
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        eng.set_rack(&mut swap).unwrap();
+        // Position 4 is the demo's FM, on the same default pattern.
+        assert_ne!(eng.playhead()[4], 0, "past step 0");
+        assert_eq!(eng.playhead()[6], eng.playhead()[4]);
+        // And they stay together.
+        eng.process(&mut l, &mut r);
+        assert_eq!(eng.playhead()[6], eng.playhead()[4]);
+    }
+
+    #[test]
+    fn a_machine_added_during_a_song_plays_its_cell_at_once() {
+        let mut p = crate::demo::demo_project();
+        let mut bar = crate::project::Bar::default();
+        bar.cell_mut(MachineUid(1)).pattern = Some(crate::project::PatternRef(0));
+        p.song.bars = vec![bar.clone(), bar];
+        let mut eng = Engine::from_project(48000.0, &p);
+        eng.set_mode(Mode::Song);
+        eng.play();
+        // ~1 s at 128 bpm: mid first bar.
+        let (mut l, mut r) = (vec![0.0; 48000], vec![0.0; 48000]);
+        eng.process(&mut l, &mut r);
+        assert_eq!(eng.song_bar(), 0);
+        let mut q = p.clone();
+        let mut e = MachineEntry::new(MachineUid(7), MachineType::Synth, "Synth 3".into());
+        if let MachineBody::Synth(s) = &mut e.body {
+            s.patterns[2] = q.synth(MachineUid(1)).unwrap().patterns[0].clone();
+        }
+        q.machines.push(e);
+        q.next_uid = 8;
+        for b in &mut q.song.bars {
+            b.cell_mut(MachineUid(7)).pattern = Some(crate::project::PatternRef(2));
+        }
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        eng.set_rack(&mut swap).unwrap();
+        assert_eq!(
+            eng.current_patterns()[6],
+            2,
+            "the bar's cell, not the selection"
+        );
+        assert_eq!(eng.playhead()[6], eng.playhead()[0]);
+        eng.take_meters();
+        let (mut l, mut r) = (vec![0.0; 12000], vec![0.0; 12000]);
+        eng.process(&mut l, &mut r);
+        assert_eq!(eng.song_bar(), 0, "still the same bar");
+        assert!(eng.take_meters()[6] > 0.0, "sounds before the next bar");
+    }
+
+    #[test]
+    fn an_empty_rack_renders_silence() {
+        let mut p = Project::default();
+        p.machines.clear();
+        p.validate().unwrap();
+        let (l, r) = crate::render::render_patterns(&p, 1);
+        assert!(!l.is_empty() && l.iter().chain(&r).all(|s| s.abs() < 1e-6));
     }
 
     #[test]
@@ -1156,7 +1246,6 @@ mod tests {
             let fresh = swap.fresh.iter().filter(|s| s.is_some()).count();
             assert!(eng.set_rack(&mut swap).is_none());
             assert_eq!(eng.slot_uids(), before);
-            assert_eq!(eng.rack_gen(), 0);
             assert!(swap.into.is_empty());
             assert_eq!(swap.fresh.iter().filter(|s| s.is_some()).count(), fresh);
         }
