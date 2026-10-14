@@ -2,6 +2,8 @@
 //! always gives the same pattern, so tests are deterministic.
 
 use crate::drums::{BD, CH, CP, OH, SD};
+use crate::fm::algorithms::ALGORITHMS;
+use crate::fm::sysex::{Dx7Op, Dx7Voice};
 use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, steps_of};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
@@ -160,6 +162,96 @@ pub fn randomise_synth(
         }
     }
     out
+}
+
+/// Operator ratios a random voice picks from (DX7 coarse; 0 is ×0.5):
+/// carriers stay near the played pitch, modulators range further.
+const CARRIER_RATIOS: [u8; 5] = [0, 1, 1, 1, 2];
+const MODULATOR_RATIOS: [u8; 9] = [0, 1, 1, 2, 2, 3, 4, 5, 7];
+
+fn random_op(rng: &mut Pcg32, carrier: bool) -> Dx7Op {
+    let ratios: &[u8] = if carrier {
+        &CARRIER_RATIOS
+    } else {
+        &MODULATOR_RATIOS
+    };
+    Dx7Op {
+        // A carrier attacks quickly to full level so every note is heard;
+        // every envelope ends at 0 so notes stop after release.
+        rates: [
+            if carrier {
+                rng.gen_range(60..=99)
+            } else {
+                rng.gen_range(30..=99)
+            },
+            rng.gen_range(20..=99),
+            rng.gen_range(20..=99),
+            rng.gen_range(30..=80),
+        ],
+        levels: [
+            if carrier { 99 } else { rng.gen_range(60..=99) },
+            rng.gen_range(if carrier { 60 } else { 0 }..=99),
+            rng.gen_range(0..=99),
+            0,
+        ],
+        // No keyboard level scaling: it could silence an operator in
+        // part of the range.
+        break_point: 39,
+        left_depth: 0,
+        right_depth: 0,
+        left_curve: 0,
+        right_curve: 0,
+        rate_scaling: rng.gen_range(0..=if carrier { 3 } else { 7 }),
+        amp_mod_sens: rng.gen_range(0..=if carrier { 1 } else { 3 }),
+        vel_sens: rng.gen_range(0..=if carrier { 3 } else { 7 }),
+        level: if carrier {
+            rng.gen_range(85..=99)
+        } else {
+            rng.gen_range(0..=85)
+        },
+        fixed: false,
+        coarse: ratios[rng.gen_range(0..ratios.len())],
+        fine: 0,
+        detune: if carrier {
+            rng.gen_range(4..=10)
+        } else {
+            rng.gen_range(3..=11)
+        },
+    }
+}
+
+/// A fresh FM sound for the FM panel's Randomise: a new algorithm,
+/// feedback, operators, LFO and pitch EG that always plays. `current`'s
+/// osc sync and transpose are kept.
+pub fn randomise_voice(current: &Dx7Voice, seed: u64) -> Dx7Voice {
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let algorithm = rng.gen_range(0..ALGORITHMS.len()) as u8;
+    let carriers = ALGORITHMS[algorithm as usize].carriers;
+    let ops = std::array::from_fn(|op| random_op(&mut rng, carriers & (1 << op) != 0));
+    // Mostly no pitch envelope; sometimes a short blip that settles back
+    // to the played pitch (level 50 is no shift).
+    let (pitch_rates, pitch_levels) = if rng.gen_bool(0.2) {
+        ([99, rng.gen_range(40..=99), 99, 99], [rng.gen_range(40..=60), 50, 50, 50])
+    } else {
+        ([99; 4], [50; 4])
+    };
+    Dx7Voice {
+        ops,
+        pitch_rates,
+        pitch_levels,
+        algorithm,
+        feedback: rng.gen_range(0..=7),
+        osc_sync: current.osc_sync,
+        lfo_speed: rng.gen_range(0..=99),
+        lfo_delay: rng.gen_range(0..=99),
+        lfo_pmd: rng.gen_range(0..=10),
+        lfo_amd: rng.gen_range(0..=20),
+        lfo_sync: rng.gen_bool(0.5),
+        lfo_wave: rng.gen_range(0..6),
+        pms: rng.gen_range(0..=3),
+        transpose: current.transpose,
+        name: "RANDOM".into(),
+    }
 }
 
 const KICKS: [&[usize]; 4] = [&[0, 4, 8, 12], &[0, 3, 6, 10], &[0, 6, 8, 11], &[0, 7, 10]];
@@ -700,5 +792,61 @@ mod tests {
         };
         let r = randomise_synth(&base, Dice::ALL, &groove_four_on_floor(), 5);
         assert_eq!(&r.steps[8..], &base.steps[8..]);
+    }
+
+    fn load_voice(s: &mut crate::fm::FmSynth, v: &Dx7Voice) {
+        use crate::params::MachineParam;
+        for (id, x) in v.to_params() {
+            match id {
+                MachineParam::Fm(p) => s.set_param(p, x),
+                MachineParam::FmOp(op, p) => s.set_op_param(op as usize, p, x),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn random_voices_are_deterministic_valid_and_vary() {
+        let base = Dx7Voice::init();
+        let a = randomise_voice(&base, 7);
+        assert_eq!(a, randomise_voice(&base, 7));
+        assert_ne!(a, randomise_voice(&base, 8));
+        for seed in 0..200 {
+            assert!(randomise_voice(&base, seed).is_valid(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn random_voices_keep_osc_sync_and_transpose() {
+        let mut base = Dx7Voice::init();
+        base.osc_sync = false;
+        base.transpose = 31;
+        for seed in 0..50 {
+            let v = randomise_voice(&base, seed);
+            assert_eq!((v.osc_sync, v.transpose), (false, 31), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn every_random_voice_plays_and_its_envelopes_end_at_zero() {
+        use crate::testutil::{all_finite, peak};
+        for seed in 0..100 {
+            let v = randomise_voice(&Dx7Voice::init(), seed);
+            for (note, vel) in [(36, 110), (60, 40), (84, 100)] {
+                let mut s = crate::fm::FmSynth::new(48_000.0);
+                load_voice(&mut s, &v);
+                s.note_on(note, vel, false);
+                let n = 12_000;
+                let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+                s.render(&mut l, &mut r);
+                assert!(all_finite(&l), "seed {seed}");
+                assert!(peak(&l) > 0.01, "seed {seed} note {note}: silent");
+                assert!(peak(&l) < 4.0, "seed {seed}: too loud {}", peak(&l));
+            }
+            for o in &v.ops {
+                assert_eq!(o.levels[3], 0, "seed {seed}: release ends at 0");
+            }
+            assert_eq!(v.pitch_levels[3], 50, "seed {seed}: pitch settles");
+        }
     }
 }

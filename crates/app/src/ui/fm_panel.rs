@@ -314,6 +314,13 @@ impl SidAcidApp {
             {
                 self.import_syx(uid);
             }
+            if ui
+                .button("Randomise")
+                .on_hover_text("A new random sound that always plays (undoable)")
+                .clicked()
+            {
+                self.randomise_fm_voice(uid);
+            }
         });
         let names: Vec<String> = match (self.view.panel(uid).fm_browser, &self.fm_of(uid).bank) {
             (FmBrowser::Imported, Some(bank)) => bank.iter().map(|v| v.name.clone()).collect(),

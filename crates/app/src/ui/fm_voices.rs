@@ -44,6 +44,24 @@ impl SidAcidApp {
         self.view.focus = Some(uid);
     }
 
+    /// The FM panel's Randomise: a new, always-playable sound as one undo
+    /// step. Osc sync and transpose are kept; volume, mono/glide and the
+    /// effects are not part of a voice, so they are untouched.
+    pub(crate) fn randomise_fm_voice(&mut self, uid: MachineUid) {
+        let seed = self.next_seed();
+        self.randomise_fm_voice_seeded(uid, seed);
+    }
+
+    pub(crate) fn randomise_fm_voice_seeded(&mut self, uid: MachineUid, seed: u64) {
+        let project = &self.doc.project;
+        let Some(fm) = project.fm(uid) else {
+            return;
+        };
+        let current = Dx7Voice::from_params(&fm.voice_name, |p| project.param(uid.param(p)));
+        let voice = acid_engine::random::randomise_voice(&current, seed);
+        self.load_fm_voice(uid, &voice);
+    }
+
     pub(crate) fn import_syx(&mut self, uid: MachineUid) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("DX7 SysEx", &["syx", "SYX"])
@@ -105,5 +123,48 @@ pub(crate) fn voice_source_after(
         (Some(Edit::FmVoice { .. }), _) => None,
         (Some(Edit::FmBank { .. }), Some((FmBrowser::Imported, _))) => None,
         _ => src,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::test_rack::*;
+    use acid_engine::params::{FmParam, MachineParam};
+
+    #[test]
+    fn randomising_the_fm_voice_is_one_undo_step_and_keeps_the_rest() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let before = app.doc.project.clone();
+        app.view.focus = Some(SYNTH1);
+        app.randomise_fm_voice_seeded(FM, 5);
+        let p = &app.doc.project;
+        let fm = p.fm(FM).unwrap();
+        assert_eq!(fm.voice_name, "RANDOM");
+        assert_eq!(app.view.focus, Some(FM));
+        let changed = |id: MachineParam| p.param(FM.param(id)) != before.param(FM.param(id));
+        let current = Dx7Voice::from_params(&before.fm(FM).unwrap().voice_name, |id| {
+            before.param(FM.param(id))
+        });
+        let expected = acid_engine::random::randomise_voice(&current, 5);
+        for (id, v) in expected.to_params() {
+            assert!((p.param(FM.param(id)) - v).abs() < 1e-6, "{id:?}");
+        }
+        assert!(expected.to_params().into_iter().any(|(id, _)| changed(id)));
+        for kept in [
+            FmParam::Transpose,
+            FmParam::OscSync,
+            FmParam::Volume,
+            FmParam::Mono,
+            FmParam::Glide,
+            FmParam::Cutoff,
+            FmParam::ChorusMix,
+        ] {
+            assert!(!changed(MachineParam::Fm(kept)), "{kept:?} changed");
+        }
+        assert_eq!(fm.patterns, before.fm(FM).unwrap().patterns, "the sequence is untouched");
+        app.doc.undo();
+        assert_eq!(app.doc.project, before);
     }
 }
