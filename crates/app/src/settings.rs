@@ -92,7 +92,6 @@ pub fn load(path: &Path) -> (Settings, Option<String>) {
 
 /// Writes `settings` through a temporary file so a crash mid-write never
 /// leaves a half-written file behind.
-#[allow(dead_code)]
 pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     let text = ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default())
         .map_err(|e| e.to_string())?;

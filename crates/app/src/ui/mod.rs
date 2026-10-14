@@ -3,6 +3,7 @@
 //! to the audio thread as `Command`s through `AudioLink`.
 
 mod alg_diagram;
+mod audio_settings;
 mod drum_panel;
 mod files;
 mod fm_panel;
@@ -41,6 +42,7 @@ pub type WaveCacheEntry = (usize, usize, usize, Vec<(f32, f32)>);
 
 #[derive(Default)]
 pub struct ViewState {
+    pub audio_window: audio_settings::AudioWindow,
     /// Machine that keyboard shortcuts act on (0..MACHINES).
     pub focus: usize,
     pub message: Option<String>,
@@ -214,6 +216,14 @@ pub(crate) fn open_audio(
     Ok((AudioLink::open(project, &choice)?, notes))
 }
 
+/// Two status notes shown together, the earlier first.
+fn join_notices(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    }
+}
+
 impl SidAcidApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
@@ -224,7 +234,9 @@ impl SidAcidApp {
             app.settings = settings;
             app.view.status_line = notice;
         }
+        let load_notice = app.view.status_line.take();
         app.start_audio();
+        app.view.status_line = join_notices(load_notice, app.view.status_line.take());
         app
     }
 
@@ -429,6 +441,7 @@ impl SidAcidApp {
                 .show(ui, |ui| self.rack(ui));
         });
         self.dialogs(ctx);
+        self.audio_settings_window(ctx);
         // A collapsed panel stops drawing its roll, so a key or drag held
         // when it collapsed would never see its release.
         self.release_stale_poly_input(ctx.input(|i| i.pointer.any_down()));
@@ -509,6 +522,16 @@ pub(crate) fn run_frames_in(ctx: &egui::Context, app: &mut SidAcidApp, frames: u
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notices_join_with_the_earlier_first() {
+        use super::join_notices as j;
+        let s = |t: &str| Some(t.to_string());
+        assert_eq!(j(s("a"), s("b")), s("a; b"));
+        assert_eq!(j(s("a"), None), s("a"));
+        assert_eq!(j(None, s("b")), s("b"));
+        assert_eq!(j(None, None), None);
+    }
+
     use super::*;
     use crate::document::Edit;
     use acid_engine::project::Project;

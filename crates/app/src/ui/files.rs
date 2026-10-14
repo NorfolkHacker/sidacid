@@ -111,6 +111,11 @@ impl SidAcidApp {
                 self.view.export_open = true;
             }
             ui.separator();
+            if ui.button("Audio Settings…").clicked() {
+                ui.close_menu();
+                self.open_audio_window();
+            }
+            ui.separator();
             if ui.button("Quit").clicked() {
                 ui.close_menu();
                 self.request(Pending::Quit);

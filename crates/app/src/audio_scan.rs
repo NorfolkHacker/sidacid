@@ -13,7 +13,6 @@ pub fn default_host_name() -> &'static str {
     cpal::default_host().id().name()
 }
 
-#[allow(dead_code)] // used by the settings UI (Task 6)
 pub fn scan_all() -> Vec<HostInfo> {
     cpal::available_hosts()
         .into_iter()

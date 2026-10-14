@@ -147,10 +147,16 @@ impl SidAcidApp {
             hover.push('\n');
         }
         hover.push_str("CPU: share of each audio callback's time spent rendering\npk: worst callback in the last second");
-        ui.label(
-            egui::RichText::new(format!("CPU {:.0}%", cpu * 100.0)).color(load_colour(cpu, normal)),
-        )
-        .on_hover_text(&hover);
+        let open_settings = ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new(format!("CPU {:.0}%", cpu * 100.0))
+                        .color(load_colour(cpu, normal)),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_text(format!("{hover}\nClick for Audio Settings"))
+            .clicked();
         ui.label(
             egui::RichText::new(format!("pk {:.0}%", perf.peak() * 100.0))
                 .color(load_colour(perf.peak(), normal)),
@@ -193,6 +199,9 @@ impl SidAcidApp {
             if clicked {
                 self.view.perf.clear_overruns();
             }
+        }
+        if open_settings {
+            self.open_audio_window();
         }
     }
 }

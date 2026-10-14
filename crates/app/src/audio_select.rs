@@ -1,7 +1,5 @@
 //! Choosing what audio stream to open, from plain data about what the
 //! system offers. No cpal here: `audio_scan` builds the `HostInfo`s.
-// Used from Tasks 4–6
-#![allow(dead_code)]
 
 use crate::settings::AudioSettings;
 
