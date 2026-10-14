@@ -27,11 +27,22 @@ impl Project {
         MachineEntry::new(self.take_uid(), ty, name)
     }
 
-    /// Deep copy of `uid` with a new uid and "<name> copy"; does not insert it. None if absent.
+    /// Deep copy of `uid` with a new uid and "<name> copy"; synth param lanes on the source
+    /// itself are retargeted to the copy. Does not insert it. None if absent.
     pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineEntry> {
         let mut copy = self.machine(uid)?.clone();
         copy.uid = self.take_uid();
         copy.name = format!("{} copy", copy.name);
+        // The copy's own lanes drive the copy, not the source; other targets stay.
+        if let MachineBody::Synth(s) = &mut copy.body {
+            for lane in s.patterns.iter_mut().filter_map(|p| p.param_lane.as_mut()) {
+                if let ParamId::Machine(u, param) = lane.param
+                    && u == uid
+                {
+                    lane.param = ParamId::Machine(copy.uid, param);
+                }
+            }
+        }
         Some(copy)
     }
 
@@ -172,7 +183,7 @@ fn targets(param: ParamId, uid: MachineUid) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{KitParam, MachineParam};
+    use crate::params::{KitParam, MachineParam, SynthParam};
     use crate::project::{Bar, PatternRef};
 
     #[test]
@@ -310,5 +321,40 @@ mod tests {
         p.restore_machine(removed);
         assert_eq!(p, before);
         assert!(p.remove_machine(MachineUid(99)).is_none());
+    }
+
+    #[test]
+    fn a_duplicate_synths_self_lanes_follow_the_copy_and_other_lanes_stay() {
+        let mut p = Project::default();
+        let own = ParamId::Machine(MachineUid(1), MachineParam::Synth(SynthParam::Cutoff));
+        let other = ParamId::Machine(MachineUid(4), MachineParam::Kit(KitParam::Volume));
+        let lane = |param| {
+            Some(ParamLane {
+                param,
+                values: vec![Some(0.25); crate::project::STEPS],
+            })
+        };
+        let s = p.synth_mut(MachineUid(1)).unwrap();
+        s.patterns[0].param_lane = lane(own);
+        s.patterns[5].param_lane = lane(other);
+        let d = p.duplicate_machine(MachineUid(1)).unwrap();
+        let MachineBody::Synth(copy) = &d.body else {
+            panic!("not a synth")
+        };
+        assert_eq!(
+            copy.patterns[0].param_lane,
+            lane(ParamId::Machine(
+                d.uid,
+                MachineParam::Synth(SynthParam::Cutoff)
+            ))
+        );
+        assert_eq!(copy.patterns[5].param_lane, lane(other));
+        // The source keeps its own lane.
+        assert_eq!(
+            p.synth(MachineUid(1)).unwrap().patterns[0].param_lane,
+            lane(own)
+        );
+        p.insert_machine(1, d).unwrap();
+        p.validate().unwrap();
     }
 }
