@@ -7,6 +7,7 @@ use acid_engine::host::{self, Command, Event};
 use acid_engine::machine::MachineId;
 use acid_engine::params::{MasterParam, ParamId, fm_param, sampler_param, slot_param};
 use acid_engine::project::{Bar, Note, NotePattern, PatternRef, Project};
+use acid_engine::rack::CompiledSong;
 use acid_engine::sequencer::Mode;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -160,6 +161,70 @@ fn a_sixteen_slot_rack_does_not_allocate() {
     assert_eq!(n, 0);
 }
 
+/// `busy_project` grown to `MAX_MACHINES` slots of every type, reordered,
+/// each new machine playing its type's busy pattern, all in a looped song
+/// with automation on new machines' params.
+fn busy_sixteen_slot_project() -> Project {
+    use acid_engine::machine::{MAX_MACHINES, MachineUid};
+    use acid_engine::params::{ChannelParam, MachineParam};
+    use acid_engine::project::{Cell, MachineBody, MachineEntry};
+    let mut p = busy_project();
+    p.machines.swap(0, 3);
+    for u in 7..=MAX_MACHINES as u16 {
+        // Clone a busy machine of the cycling type under a new uid.
+        let from = p.machines[(u as usize - 7) % 6].clone();
+        p.machines.push(MachineEntry {
+            uid: MachineUid(u),
+            name: format!("M{u}"),
+            ..from
+        });
+    }
+    p.next_uid = MAX_MACHINES as u16 + 1;
+    assert!(
+        p.machines
+            .iter()
+            .any(|m| m.uid.0 > 6 && matches!(m.body, MachineBody::Sampler(_)))
+    );
+    for bar in &mut p.song.bars {
+        bar.cells = p
+            .machines
+            .iter()
+            .map(|m| {
+                let cell = Cell {
+                    pattern: Some(PatternRef(0)),
+                    transpose: 3,
+                    ..Default::default()
+                };
+                (m.uid, cell)
+            })
+            .collect();
+    }
+    for u in [8u16, 12, 16] {
+        let id = ParamId::Machine(MachineUid(u), MachineParam::Channel(ChannelParam::Level));
+        acid_engine::song::write_automation(&mut p.song, id, 0, 40, 0.4);
+    }
+    p.validate().unwrap();
+    p
+}
+
+#[test]
+fn a_sixteen_slot_song_with_automation_does_not_allocate() {
+    let p = busy_sixteen_slot_project();
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 300], vec![0.0; 300]);
+    e.set_mode(Mode::Song);
+    e.play();
+    let mut song = CompiledSong::compile(&p.song, &p.rack_uids());
+    let n = count_allocs(|| {
+        render_seconds(&mut e, &mut l, &mut r, 4.0);
+        assert!(e.swap_song(&mut song));
+        render_seconds(&mut e, &mut l, &mut r, 4.0);
+        e.stop();
+    });
+    assert_eq!(n, 0);
+    assert!(l.iter().any(|v| *v != 0.0) || r.iter().any(|v| *v != 0.0));
+}
+
 #[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
@@ -307,6 +372,12 @@ fn host_commands_and_rendering_do_not_allocate() {
             machine: 5,
             pitch: 60,
         },
+        Command::SetMode(Mode::Song),
+        Command::Song(Box::new(CompiledSong::compile(
+            &busy_project().song,
+            &busy_project().rack_uids(),
+        ))),
+        Command::Play,
     ];
     for c in commands {
         assert!(tx.push(c).is_ok());
@@ -318,11 +389,16 @@ fn host_commands_and_rendering_do_not_allocate() {
     });
     assert_eq!(n, 0);
     let mut disposed = 0;
+    let mut songs = 0;
     while let Ok(e) = rx.pop() {
         if matches!(e, Event::DisposeNotePattern(_)) {
             disposed += 1;
         }
+        if matches!(e, Event::DisposeSong(_)) {
+            songs += 1;
+        }
     }
+    assert_eq!(songs, 1, "the replaced song comes back to be freed");
     assert_eq!(
         disposed, 1,
         "the swapped-out pattern comes back to be freed"

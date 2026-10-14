@@ -558,6 +558,11 @@ impl Project {
         self.machines.iter_mut().find(|m| m.uid == uid)
     }
 
+    /// The machines' uids in rack order: what a song compiles against.
+    pub fn rack_uids(&self) -> Vec<MachineUid> {
+        self.machines.iter().map(|m| m.uid).collect()
+    }
+
     /// `uid`'s position in the rack.
     pub fn position(&self, uid: MachineUid) -> Option<usize> {
         self.machines.iter().position(|m| m.uid == uid)

@@ -3,11 +3,11 @@
 //! effects and master bus, and the sequencer, rendered sample-accurately.
 //! process() is real-time safe: no allocation, locking or I/O.
 
-use crate::machine::{MACHINES, MAX_MACHINES, MachineUid, standard_rack};
+use crate::machine::{MAX_MACHINES, MachineUid};
 use crate::mixer::Mixer;
-use crate::params::{GlobalParam, MachineParam, ParamId};
-use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, Song, SynthPattern};
-use crate::rack::{MachineDsp, Slot, SlotPatterns};
+use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
+use crate::project::{DrumPattern, MAX_NOTES, NotePattern, PATTERNS, Project, SynthPattern};
+use crate::rack::{CompiledSong, MachineDsp, Slot, SlotPatterns};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
@@ -28,32 +28,24 @@ enum Loc {
     Global(usize),
 }
 
-/// The standard six slots' banks, for the six-track sequencer (interim
-/// until the sequencer is keyed by uid). Only valid for the standard rack.
-fn standard_banks(slots: &[Slot]) -> Banks<'_> {
-    fn synth(s: &Slot) -> &[SynthPattern] {
-        match &s.patterns {
-            SlotPatterns::Synth(v) => v,
-            _ => &[],
-        }
-    }
-    fn drum(s: &Slot) -> &[DrumPattern] {
-        match &s.patterns {
-            SlotPatterns::Drum(v) => v,
-            _ => &[],
-        }
-    }
-    fn notes(s: &Slot) -> &[NotePattern] {
-        match &s.patterns {
-            SlotPatterns::Notes(v) => v,
-            _ => &[],
-        }
-    }
-    Banks {
-        synths: [synth(&slots[0]), synth(&slots[1])],
-        drums: [drum(&slots[2]), drum(&slots[3])],
-        notes: [notes(&slots[4]), notes(&slots[5])],
-    }
+/// Most sequencer events one slot can add to a tick: a 303's note (or
+/// gate off), lane restore and lane value; a kit's every instrument; a
+/// note machine's 128 releases plus `MAX_NOTES` starts.
+const SLOT_EVENTS: usize = {
+    let synth = 3;
+    let kit = DRUM_INSTRUMENTS;
+    let notes = 128 + MAX_NOTES;
+    let m = if synth > kit { synth } else { kit };
+    if m > notes { m } else { notes }
+};
+
+/// Room in the sequencer event buffer for the worst tick of a rack with
+/// `param_count` params (globals included): every automation lane (a song
+/// holds at most one lane per param) plus every slot at its worst, for a
+/// full `MAX_MACHINES` rack. Reserved up front so the buffer never grows
+/// on the audio thread.
+fn event_reserve(param_count: usize) -> usize {
+    param_count + MAX_MACHINES * SLOT_EVENTS
 }
 
 pub struct Engine {
@@ -71,12 +63,9 @@ pub struct Engine {
     global_touched: [bool; GLOBALS],
     /// Every knob in the rack plus the globals: bounds song lanes.
     param_count: usize,
-    /// Interim (until the sequencer is keyed by uid): the rack is today's
-    /// six machines in order, so the six-track sequencer can play it.
-    /// Otherwise slots render but no patterns play.
-    standard_layout: bool,
     guard_fired: bool,
-    song: Song,
+    /// The song, resolved to this rack's positions.
+    song: CompiledSong,
     /// The song ended by itself and no transport command came since: the
     /// next `stop` counts as the first one (it only releases).
     ended_by_song: bool,
@@ -105,9 +94,8 @@ impl Engine {
             global_base: defaults,
             global_touched: [false; GLOBALS],
             param_count: GLOBALS,
-            standard_layout: false,
             guard_fired: false,
-            song: Song::default(),
+            song: CompiledSong::default(),
             ended_by_song: false,
         };
         e.load_project(p);
@@ -126,30 +114,24 @@ impl Engine {
                 .take(MAX_MACHINES)
                 .map(|m| Slot::from_entry(m, self.sample_rate)),
         );
-        let standard = standard_rack();
-        self.standard_layout = self.slots.len() == standard.len()
-            && self
-                .slots
-                .iter()
-                .zip(standard)
-                .all(|(s, (uid, ty, _))| s.uid == uid && s.ty == ty);
         self.param_count = GLOBALS + self.slots.iter().map(|s| s.knobs.len()).sum::<usize>();
-        // Room for every param (automation and lane events), plus per
-        // machine 128 releases and MAX_NOTES starts: never grows on the
-        // audio thread.
-        let reserve = 64 + 2 * self.param_count + MAX_MACHINES * (128 + MAX_NOTES);
-        self.events = Vec::with_capacity(reserve);
+        self.events = Vec::with_capacity(event_reserve(self.param_count));
         for i in 0..GLOBALS {
             let id = ParamId::from(self.global_ids[i]);
             self.set_param(id, p.param(id));
         }
-        self.song = p.song.clone();
+        self.song = CompiledSong::compile(&p.song, &self.slot_uids());
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
-        if self.standard_layout {
-            for (i, m) in p.machines.iter().enumerate() {
-                self.seq.select(i, m.selected);
-            }
+        // Every position takes its machine's selection; empty ones go back
+        // to the first pattern.
+        for pos in 0..MAX_MACHINES {
+            let selected = p
+                .machines
+                .get(pos)
+                .filter(|_| pos < self.slots.len())
+                .map_or(0, |m| m.selected);
+            self.seq.select(pos, selected);
         }
     }
 
@@ -431,12 +413,12 @@ impl Engine {
 
     /// Swaps in a new song (real-time safe). An invalid song leaves both
     /// sides untouched and returns false.
-    pub fn swap_song(&mut self, song: &mut Song) -> bool {
+    pub fn swap_song(&mut self, song: &mut CompiledSong) -> bool {
         let refs_ok = song
             .bars
             .iter()
-            .flat_map(|b| &b.cells)
-            .filter_map(|(_, c)| c.pattern)
+            .flat_map(|b| &b.patterns)
+            .flatten()
             .all(|r| (r.0 as usize) < PATTERNS);
         let lanes_ok = song.automation.len() <= self.param_count
             && song
@@ -496,10 +478,11 @@ impl Engine {
         self.seq.is_playing()
     }
 
-    /// Ignores `machine >= MACHINES` and `slot >= 128`.
-    pub fn select_pattern(&mut self, machine: usize, slot: u8) {
-        if machine < MACHINES && (slot as usize) < PATTERNS {
-            self.seq.select(machine, slot);
+    /// Selects pattern `slot` for the machine at rack position `pos`.
+    /// Ignores positions past the rack and `slot >= 128`.
+    pub fn select_pattern(&mut self, pos: usize, slot: u8) {
+        if pos < self.slots.len() && (slot as usize) < PATTERNS {
+            self.seq.select(pos, slot);
         }
     }
 
@@ -599,7 +582,8 @@ impl Engine {
         p
     }
 
-    pub fn queued_patterns(&self) -> [Option<u8>; MACHINES] {
+    /// By rack position.
+    pub fn queued_patterns(&self) -> [Option<u8>; MAX_MACHINES] {
         std::array::from_fn(|m| self.seq.queued_pattern(m))
     }
 
@@ -613,11 +597,13 @@ impl Engine {
         std::mem::take(&mut self.guard_fired)
     }
 
-    pub fn playhead(&self) -> [usize; MACHINES] {
+    /// By rack position.
+    pub fn playhead(&self) -> [usize; MAX_MACHINES] {
         std::array::from_fn(|m| self.seq.playhead(m))
     }
 
-    pub fn current_patterns(&self) -> [u8; MACHINES] {
+    /// By rack position.
+    pub fn current_patterns(&self) -> [u8; MAX_MACHINES] {
         std::array::from_fn(|m| self.seq.current_pattern(m))
     }
 
@@ -635,27 +621,26 @@ impl Engine {
         }
     }
 
-    /// Applies one sequencer event. Machine indices are rack positions of
-    /// the standard layout (the only layout the sequencer plays for now).
+    /// Applies one sequencer event; `slot`s are rack positions.
     fn handle_event(&mut self, ev: SeqEvent) {
         match ev {
             SeqEvent::Note {
-                synth,
+                slot,
                 midi,
                 accent,
                 legato,
             } => {
-                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(synth).map(|s| &mut s.dsp) {
+                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(slot).map(|s| &mut s.dsp) {
                     s.note_on(midi, accent, legato);
                 }
             }
-            SeqEvent::NoteOff { synth } => {
-                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(synth).map(|s| &mut s.dsp) {
+            SeqEvent::NoteOff { slot } => {
+                if let Some(MachineDsp::Synth(s)) = self.slots.get_mut(slot).map(|s| &mut s.dsp) {
                     s.note_off();
                 }
             }
-            SeqEvent::Drum { kit, inst, accent } => {
-                if let Some(MachineDsp::Kit(k)) = self.slots.get_mut(2 + kit).map(|s| &mut s.dsp) {
+            SeqEvent::Drum { slot, inst, accent } => {
+                if let Some(MachineDsp::Kit(k)) = self.slots.get_mut(slot).map(|s| &mut s.dsp) {
                     k.trigger(inst, accent);
                 }
             }
@@ -663,12 +648,8 @@ impl Engine {
             SeqEvent::ParamRestore { id } => self.restore_param(id),
             SeqEvent::Automation { id, value } => self.apply_automation(id, value),
             SeqEvent::AutomationReset { id } => self.reset_automation(id),
-            SeqEvent::PolyOn {
-                machine,
-                pitch,
-                vel,
-            } => self.poly_on(machine, pitch, vel, false),
-            SeqEvent::PolyOff { machine, pitch } => self.poly_off(machine, pitch, false),
+            SeqEvent::PolyOn { slot, pitch, vel } => self.poly_on(slot, pitch, vel, false),
+            SeqEvent::PolyOff { slot, pitch } => self.poly_off(slot, pitch, false),
         }
     }
 
@@ -681,19 +662,12 @@ impl Engine {
         let mut pos = 0;
         let mut ticks_here = 0;
         while pos < n {
-            if !self.standard_layout {
-                // Interim: the six-track sequencer can't play this rack.
-                for s in &mut self.slots {
-                    s.render(pos..n);
-                }
-                break;
-            }
             let until = self.seq.samples_to_next_tick();
             if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
                 ticks_here += 1;
                 self.events.clear();
                 self.seq
-                    .tick(standard_banks(&self.slots), &self.song, &mut self.events);
+                    .tick(Banks::of_slots(&self.slots), &self.song, &mut self.events);
                 for i in 0..self.events.len() {
                     let ev = self.events[i];
                     self.handle_event(ev);
@@ -766,27 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn a_non_standard_rack_renders_but_plays_no_patterns() {
-        let mut p = crate::demo::demo_project();
-        p.machines.swap(0, 1);
-        let mut e = Engine::from_project(SR, &p);
-        assert!(!e.standard_layout);
-        e.play();
-        let (l, r) = render(&mut e, 0.5);
-        assert!(all_finite(&l) && all_finite(&r));
-        assert_eq!(
-            peak(&l),
-            0.0,
-            "no patterns play until the sequencer is keyed by uid"
-        );
-        let mut s = Engine::from_project(SR, &crate::demo::demo_project());
-        assert!(s.standard_layout);
-        s.play();
-        let (l, _) = render(&mut s, 0.5);
-        assert!(peak(&l) > 0.01, "the standard rack sequences");
-    }
-
-    #[test]
     fn any_rack_layout_builds_and_renders() {
         let mut p = Project::default();
         p.machines.swap(0, 3); // 909 first
@@ -822,34 +775,135 @@ mod tests {
             None
         );
         // A param that doesn't fit the machine type is ignored.
-        eng.set_param(
-            ParamId::Machine(MachineUid(2), MachineParam::Fm(FmParam::Volume)),
-            0.5,
-        );
+        let non_fitting_id = ParamId::Machine(MachineUid(2), MachineParam::Fm(FmParam::Volume));
+        eng.set_param(non_fitting_id, 0.5);
+        assert_eq!(eng.knob(non_fitting_id), None);
     }
 
     #[test]
-    fn sixteen_machines_fit_without_reallocating() {
+    fn rebuilding_the_rack_resets_selections_from_the_project() {
         let mut p = Project::default();
-        for u in 7..=16u16 {
-            p.machines.push(MachineEntry::new(
-                MachineUid(u),
-                MachineType::Synth,
-                format!("Synth {u}"),
-            ));
+        p.machines[1].selected = 4;
+        let mut eng = Engine::from_project(SR, &p);
+        eng.select_pattern(0, 9);
+        eng.select_pattern(5, 7);
+        let mut q = Project::default();
+        q.machines.truncate(3);
+        q.machines[2].selected = 2;
+        eng.load_project(&q);
+        let mut want = [0; MAX_MACHINES];
+        want[2] = 2;
+        assert_eq!(
+            eng.current_patterns(),
+            want,
+            "positions past the rack reset too"
+        );
+        eng.load_project(&p);
+        want[2] = 0;
+        want[1] = 4;
+        assert_eq!(eng.current_patterns(), want);
+    }
+
+    /// A full rack of `types` at its busiest: dense patterns on every slot
+    /// (every drum hit; on note machines 256 notes over 128 pitches that
+    /// all end and restart on each wrap; synth lanes) and a song lane on
+    /// every param.
+    fn dense_rack(types: &[MachineType]) -> Project {
+        use crate::project::{DrumHit, MachineBody, Note, ParamLane};
+        let mut p = Project::default();
+        p.machines = (1..=MAX_MACHINES as u16)
+            .zip(types.iter().cycle())
+            .map(|(u, &ty)| MachineEntry::new(MachineUid(u), ty, format!("M{u}")))
+            .collect();
+        p.next_uid = MAX_MACHINES as u16 + 1;
+        for m in &mut p.machines {
+            let uid = m.uid;
+            match &mut m.body {
+                MachineBody::Synth(s) => {
+                    let pat = &mut s.patterns[0];
+                    pat.length = 1;
+                    pat.steps[0].gate = crate::project::Gate::On;
+                    pat.param_lane = Some(ParamLane {
+                        param: ParamId::Machine(uid, MachineParam::Synth(SynthParam::Cutoff)),
+                        values: vec![Some(0.5); crate::project::STEPS],
+                    });
+                }
+                MachineBody::Kit(k) => {
+                    for step in &mut k.patterns[0].steps {
+                        step.fill(DrumHit::Accent);
+                    }
+                }
+                MachineBody::Fm(crate::project::FmMachine { patterns, .. })
+                | MachineBody::Sampler(crate::project::SamplerMachine { patterns, .. }) => {
+                    let pat = &mut patterns[0];
+                    pat.length = 1;
+                    pat.notes = (0..MAX_NOTES)
+                        .map(|i| Note {
+                            start: 0,
+                            len: 4,
+                            pitch: (i % 128) as u8,
+                            vel: 100,
+                        })
+                        .collect();
+                }
+            }
         }
-        p.next_uid = 17;
+        let mut bar = crate::project::Bar::default();
+        for m in &p.machines {
+            bar.cell_mut(m.uid).pattern = Some(crate::project::PatternRef(0));
+        }
+        p.song.bars = vec![bar; 2];
+        p.song.loop_range = Some((0, 1));
+        let ids: Vec<ParamId> = p
+            .machines
+            .iter()
+            .flat_map(|m| {
+                let uid = m.uid;
+                MachineParam::all_for(m.machine_type())
+                    .into_iter()
+                    .map(move |mp| ParamId::Machine(uid, mp))
+            })
+            .chain(GlobalParam::all().into_iter().map(ParamId::from))
+            .collect();
+        for id in ids {
+            crate::song::write_automation(&mut p.song, id, 0, 0, 0.5);
+        }
         p.validate().unwrap();
-        let eng = Engine::from_project(48000.0, &p);
-        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
-        let mut too_many = p.clone();
-        too_many.machines.push(MachineEntry::new(
-            MachineUid(17),
-            MachineType::Fm,
-            "FM 2".into(),
-        ));
-        too_many.next_uid = 18;
-        assert!(too_many.validate().is_err());
+        p
+    }
+
+    /// Plays `p` for a second in each mode; returns the most events one
+    /// tick produced, asserting the event buffer never grew.
+    fn busiest_tick(p: &Project) -> usize {
+        let mut eng = Engine::from_project(SR, p);
+        assert_eq!(eng.slots.len(), MAX_MACHINES);
+        assert_eq!(p.song.automation.len(), eng.param_count, "a lane per param");
+        let reserve = eng.events.capacity();
+        assert!(reserve >= event_reserve(eng.param_count));
+        let mut most = 0;
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        for mode in [Mode::Pattern, Mode::Song] {
+            eng.stop();
+            eng.set_mode(mode);
+            eng.play();
+            for _ in 0..(SR as usize / 64) {
+                eng.process(&mut l, &mut r);
+                most = most.max(eng.events.len());
+            }
+        }
+        assert_eq!(eng.events.capacity(), reserve, "the buffer never grew");
+        most
+    }
+
+    #[test]
+    fn a_full_rack_tick_fits_the_event_reserve() {
+        let mixed = busiest_tick(&dense_rack(&MachineType::ALL));
+        assert!(mixed > MAX_MACHINES * 128, "{mixed}");
+        let notes = busiest_tick(&dense_rack(&[MachineType::Fm, MachineType::Sampler]));
+        assert!(
+            notes >= MAX_MACHINES * (128 + MAX_NOTES),
+            "every note slot releases 128 and starts MAX_NOTES on a wrap: {notes}"
+        );
     }
 
     const SR: f32 = 44_100.0;
@@ -874,6 +928,11 @@ mod tests {
                 })
                 .unwrap()
         }
+    }
+
+    /// `song` compiled for the standard rack.
+    fn compiled(song: &crate::project::Song) -> CompiledSong {
+        CompiledSong::compile(song, &Project::default().rack_uids())
     }
 
     fn render(e: &mut Engine, seconds: f32) -> (Vec<f32>, Vec<f32>) {
@@ -1243,7 +1302,7 @@ mod tests {
         e.set_param(kit_param(2, KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
-        assert_eq!(e.current_patterns(), [0; MACHINES]);
+        assert_eq!(e.current_patterns(), [0; MAX_MACHINES]);
     }
 
     #[test]
@@ -1295,7 +1354,7 @@ mod tests {
         e.play();
         render(&mut e, 0.3);
         assert!(e.playhead()[2] >= 2);
-        assert_eq!(e.current_patterns(), [0; MACHINES]);
+        assert_eq!(e.current_patterns(), [0; MAX_MACHINES]);
     }
 
     #[test]
@@ -1402,7 +1461,9 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         e.select_pattern(3, 5);
-        assert_eq!(e.queued_patterns(), [None, None, None, Some(5), None, None]);
+        let mut want = [None; MAX_MACHINES];
+        want[3] = Some(5);
+        assert_eq!(e.queued_patterns(), want);
     }
 
     #[test]
@@ -1518,9 +1579,9 @@ mod tests {
     #[test]
     fn swap_song_validates() {
         let mut e = demo_engine();
-        let mut good = two_bar_demo().song;
+        let mut good = compiled(&two_bar_demo().song);
         assert!(e.swap_song(&mut good));
-        let mut bad = crate::project::Song {
+        let mut bad = CompiledSong {
             bars: vec![Default::default(); crate::song::MAX_BARS + 1],
             ..Default::default()
         };
@@ -1582,7 +1643,7 @@ mod tests {
         let mut song = two_bar_demo().song;
         song.bars[0].cell_mut(MachineId::Synth1.uid()).pattern =
             Some(crate::project::PatternRef(7));
-        assert!(e.swap_song(&mut song));
+        assert!(e.swap_song(&mut compiled(&song)));
         for _ in 0..10_000 {
             if e.song_step() > 20 {
                 break;
@@ -1627,7 +1688,7 @@ mod tests {
         e.play();
         e.select_pattern(5, 9);
         assert_eq!(e.queued_patterns()[5], Some(9));
-        assert_eq!(e.current_patterns().len(), crate::machine::MACHINES);
+        assert_eq!(e.current_patterns().len(), MAX_MACHINES);
     }
 
     #[test]

@@ -4,10 +4,12 @@
 use crate::drums::DrumKit;
 use crate::engine::Engine;
 use crate::fm::FmSynth;
-use crate::machine::{MachineType, MachineUid};
+use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::{ChannelStrip, StereoBuf};
 use crate::params::MachineParam;
-use crate::project::{DrumPattern, MachineBody, MachineEntry, NotePattern, SynthPattern};
+use crate::project::{
+    AutoLane, DrumPattern, MachineBody, MachineEntry, NotePattern, PatternRef, Song, SynthPattern,
+};
 use crate::sampler::slot::SlotPlay;
 use crate::sampler::{SLOTS, Sampler};
 use crate::synth::BassSynth;
@@ -155,5 +157,72 @@ impl Slot {
             MachineDsp::Fm(f) => f.reset(),
             MachineDsp::Sampler(s) => s.reset(),
         }
+    }
+}
+
+/// A song bar resolved to rack positions.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CompiledBar {
+    pub patterns: [Option<PatternRef>; MAX_MACHINES],
+    pub mutes: [bool; MAX_MACHINES],
+    pub transpose: [i8; MAX_MACHINES],
+}
+
+/// A song whose bars are resolved to rack positions: what the sequencer
+/// plays. Built on the UI thread for one rack order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompiledSong {
+    pub bars: Vec<CompiledBar>,
+    pub loop_range: Option<(u16, u16)>,
+    pub automation: Vec<AutoLane>,
+}
+
+impl CompiledSong {
+    /// Resolves uid cells to rack positions (UI thread; allocates). Cells
+    /// of machines not in `rack` are dropped; positions past
+    /// `MAX_MACHINES` are ignored.
+    pub fn compile(song: &Song, rack: &[MachineUid]) -> CompiledSong {
+        let bars = song
+            .bars
+            .iter()
+            .map(|bar| {
+                let mut c = CompiledBar::default();
+                for (pos, &uid) in rack.iter().take(MAX_MACHINES).enumerate() {
+                    let cell = bar.cell(uid);
+                    c.patterns[pos] = cell.pattern;
+                    c.mutes[pos] = cell.mute;
+                    c.transpose[pos] = cell.transpose;
+                }
+                c
+            })
+            .collect();
+        CompiledSong {
+            bars,
+            loop_range: song.loop_range,
+            automation: song.automation.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{Bar, Cell};
+
+    #[test]
+    fn songs_compile_to_rack_positions() {
+        let mut song = Song::default();
+        let mut bar = Bar::default();
+        *bar.cell_mut(MachineUid(5)) = Cell {
+            pattern: Some(PatternRef(3)),
+            mute: true,
+            transpose: 2,
+        };
+        song.bars.push(bar);
+        let c = CompiledSong::compile(&song, &[MachineUid(5), MachineUid(1)]);
+        assert_eq!(c.bars[0].patterns[0], Some(PatternRef(3)));
+        assert!(c.bars[0].mutes[0]);
+        assert_eq!(c.bars[0].transpose[0], 2);
+        assert_eq!(c.bars[0].patterns[1], None);
     }
 }

@@ -1,81 +1,133 @@
 //! Pure song helpers shared by the sequencer, offline render and the UI:
 //! bar lengths, global step positions, automation lookup and editing.
 
-use crate::machine::{MACHINES, MachineId, MachineKind, NOTE_MACHINES, kind_of};
+use crate::machine::{MAX_MACHINES, MachineId, MachineType, MachineUid};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, Cell, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
+    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
     SynthPattern, steps_of,
 };
+use crate::rack::{CompiledBar, CompiledSong, Slot, SlotPatterns};
 use std::collections::BTreeMap;
 
 pub const MAX_BARS: usize = 999;
 pub const DEFAULT_BAR_STEPS: usize = 16;
 
-/// Every machine's pattern bank, borrowed. Cheap to copy.
+/// One machine's pattern bank, borrowed, by what plays it.
 #[derive(Clone, Copy)]
-pub struct Banks<'a> {
-    pub synths: [&'a [SynthPattern]; 2],
-    pub drums: [&'a [DrumPattern]; 2],
-    pub notes: [&'a [NotePattern]; NOTE_MACHINES],
+pub enum Bank<'a> {
+    Synth(&'a [SynthPattern]),
+    Drum(&'a [DrumPattern]),
+    Notes(&'a [NotePattern]),
 }
 
-impl<'a> Banks<'a> {
-    pub fn new(
-        synths: &'a [Vec<SynthPattern>; 2],
-        drums: &'a [Vec<DrumPattern>; 2],
-        notes: &'a [Vec<NotePattern>; NOTE_MACHINES],
-    ) -> Self {
-        Self {
-            synths: [&synths[0], &synths[1]],
-            drums: [&drums[0], &drums[1]],
-            notes: [&notes[0], &notes[1]],
+impl<'a> Bank<'a> {
+    pub fn len(&self) -> usize {
+        match self {
+            Bank::Synth(b) => b.len(),
+            Bank::Drum(b) => b.len(),
+            Bank::Notes(b) => b.len(),
         }
     }
 
-    /// The standard six machines' banks; a missing machine has an empty bank.
-    pub fn of(p: &'a Project) -> Self {
-        let synth = |m: MachineId| p.synth(m.uid()).map_or(&[][..], |s| &s.patterns[..]);
-        let kit = |m: MachineId| p.kit(m.uid()).map_or(&[][..], |k| &k.patterns[..]);
-        let notes = |m: MachineId| p.note_patterns(m.uid()).map_or(&[][..], |n| &n[..]);
-        Self {
-            synths: [synth(MachineId::Synth1), synth(MachineId::Synth2)],
-            drums: [kit(MachineId::Kit808), kit(MachineId::Kit909)],
-            notes: [notes(MachineId::Fm), notes(MachineId::Sampler)],
-        }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
-    /// Patterns in `machine`'s bank; 0 for an invalid machine.
-    pub fn bank_len(&self, machine: usize) -> usize {
-        match kind_of(machine) {
-            Some(MachineKind::Synth(s)) => self.synths[s].len(),
-            Some(MachineKind::Drum(k)) => self.drums[k].len(),
-            Some(MachineKind::Notes(n)) => self.notes[n].len(),
-            None => 0,
-        }
-    }
-
-    /// Length in steps (1..=STEPS) of `machine`'s pattern `slot`.
-    pub fn length(&self, machine: usize, slot: u8) -> Option<usize> {
+    /// Length in steps (1..=STEPS) of pattern `slot`.
+    pub fn length(&self, slot: u8) -> Option<usize> {
         let s = slot as usize;
-        let length = match kind_of(machine)? {
-            MachineKind::Synth(i) => self.synths[i].get(s)?.length,
-            MachineKind::Drum(i) => self.drums[i].get(s)?.length,
-            MachineKind::Notes(i) => self.notes[i].get(s)?.length,
+        let length = match self {
+            Bank::Synth(b) => b.get(s)?.length,
+            Bank::Drum(b) => b.get(s)?.length,
+            Bank::Notes(b) => b.get(s)?.length,
         };
         Some(steps_of(length))
     }
+
+    fn of_slot(p: &'a SlotPatterns) -> Self {
+        match p {
+            SlotPatterns::Synth(v) => Bank::Synth(v),
+            SlotPatterns::Drum(v) => Bank::Drum(v),
+            SlotPatterns::Notes(v) => Bank::Notes(v),
+        }
+    }
 }
 
-/// Machine `m`'s (by `MachineId::index`) cell in `bar`.
-fn cell_of(bar: &Bar, m: usize) -> Cell {
-    MachineId::from_index(m).map_or_else(Cell::default, |id| bar.cell(id.uid()))
+/// Every rack position's pattern bank, borrowed, with the machine there.
+/// Cheap to copy. Positions past the rack hold `None`.
+#[derive(Clone, Copy)]
+pub struct Banks<'a> {
+    pub slots: [Option<Bank<'a>>; MAX_MACHINES],
+    /// The machine at each position: song bars are keyed by its uid, and
+    /// its type says whether the song transpose applies.
+    pub machines: [Option<(MachineUid, MachineType)>; MAX_MACHINES],
 }
 
-/// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
-pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
-    let longest = (0..MACHINES)
-        .filter_map(|m| banks.length(m, cell_of(bar, m).pattern?.0))
+impl<'a> Banks<'a> {
+    /// No machines.
+    pub fn empty() -> Self {
+        Self {
+            slots: [None; MAX_MACHINES],
+            machines: [None; MAX_MACHINES],
+        }
+    }
+
+    /// The engine's rack, in order.
+    pub fn of_slots(slots: &'a [Slot]) -> Self {
+        let mut b = Self::empty();
+        for (i, s) in slots.iter().take(MAX_MACHINES).enumerate() {
+            b.slots[i] = Some(Bank::of_slot(&s.patterns));
+            b.machines[i] = Some((s.uid, s.ty));
+        }
+        b
+    }
+
+    /// The project's rack, in order.
+    pub fn of(p: &'a Project) -> Self {
+        use crate::project::MachineBody;
+        let mut b = Self::empty();
+        for (i, m) in p.machines.iter().take(MAX_MACHINES).enumerate() {
+            b.slots[i] = Some(match &m.body {
+                MachineBody::Synth(x) => Bank::Synth(&x.patterns),
+                MachineBody::Kit(x) => Bank::Drum(&x.patterns),
+                MachineBody::Fm(x) => Bank::Notes(&x.patterns),
+                MachineBody::Sampler(x) => Bank::Notes(&x.patterns),
+            });
+            b.machines[i] = Some((m.uid, m.machine_type()));
+        }
+        b
+    }
+
+    /// Patterns in the bank at rack position `pos`; 0 for an empty position.
+    pub fn bank_len(&self, pos: usize) -> usize {
+        self.slots
+            .get(pos)
+            .copied()
+            .flatten()
+            .map_or(0, |b| b.len())
+    }
+
+    /// Length in steps (1..=STEPS) of pattern `slot` at rack position `pos`.
+    pub fn length(&self, pos: usize, slot: u8) -> Option<usize> {
+        self.slots.get(pos).copied().flatten()?.length(slot)
+    }
+
+    /// Whether the song transpose applies at rack position `pos`.
+    pub fn transposes(&self, pos: usize) -> bool {
+        self.machines
+            .get(pos)
+            .copied()
+            .flatten()
+            .is_some_and(|(_, ty)| ty.transposes())
+    }
+}
+
+/// Steps in a bar whose patterns per position `pattern_at` gives: its
+/// longest assigned pattern, or 16 when none is assigned.
+fn steps_with(banks: Banks<'_>, pattern_at: impl Fn(usize) -> Option<PatternRef>) -> usize {
+    let longest = (0..MAX_MACHINES)
+        .filter_map(|pos| banks.length(pos, pattern_at(pos)?.0))
         .max()
         .unwrap_or(0);
     if longest == 0 {
@@ -83,6 +135,33 @@ pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
     } else {
         longest
     }
+}
+
+/// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
+pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
+    steps_with(banks, |pos| {
+        let (uid, _) = banks.machines[pos]?;
+        bar.cell(uid).pattern
+    })
+}
+
+/// `bar_steps` of a bar compiled to rack positions.
+pub fn compiled_bar_steps(bar: &CompiledBar, banks: Banks<'_>) -> usize {
+    steps_with(banks, |pos| bar.patterns[pos])
+}
+
+/// `total_steps` of a compiled song.
+pub fn compiled_total_steps(song: &CompiledSong, banks: Banks<'_>) -> u32 {
+    compiled_bar_start_step(song, song.bars.len(), banks)
+}
+
+/// `bar_start_step` of a compiled song.
+pub fn compiled_bar_start_step(song: &CompiledSong, bar: usize, banks: Banks<'_>) -> u32 {
+    song.bars
+        .iter()
+        .take(bar)
+        .map(|b| compiled_bar_steps(b, banks) as u32)
+        .sum()
 }
 
 /// Global step at which `bar` starts (`bar == bars.len()` gives the song length).
@@ -152,7 +231,7 @@ pub fn clear_automation(song: &mut Song, param: ParamId) {
 /// and in the following bars that still held the bar's old reference.
 /// Out-of-range machines and slots are ignored.
 pub fn write_pattern_ref(song: &mut Song, bar: usize, machine: usize, slot: u8) {
-    if machine >= MACHINES || slot as usize >= PATTERNS {
+    if slot as usize >= PATTERNS {
         return;
     }
     let Some(uid) = MachineId::from_index(machine).map(MachineId::uid) else {
@@ -480,7 +559,7 @@ mod tests {
         let mut song = Song::default();
         song.bars = vec![bar([Some(0); 4]); 2];
         let before = song.clone();
-        write_pattern_ref(&mut song, 0, MACHINES, 1);
+        write_pattern_ref(&mut song, 0, 6, 1);
         write_pattern_ref(&mut song, 0, 0, PATTERNS as u8);
         assert_eq!(song, before);
     }

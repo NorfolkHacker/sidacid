@@ -5,10 +5,10 @@
 //! freed on the UI thread, never on the audio thread.
 
 use crate::engine::Engine;
-use crate::machine::MACHINES;
 use crate::machine::MAX_MACHINES;
-use crate::params::{CHANNELS, ParamId};
-use crate::project::{DrumPattern, NotePattern, Song, SynthPattern};
+use crate::params::ParamId;
+use crate::project::{DrumPattern, NotePattern, SynthPattern};
+use crate::rack::CompiledSong;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::Mode;
@@ -59,7 +59,8 @@ pub enum Command {
     },
     ReplaceEngine(Box<Engine>),
     SetMode(Mode),
-    Song(Box<Song>),
+    /// The song compiled for the engine's rack order.
+    Song(Box<CompiledSong>),
     SetSongStart(u16),
     /// The user is holding (true) or released (false) a knob while recording.
     Touch(ParamId, bool),
@@ -80,12 +81,15 @@ pub enum Command {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Status {
     pub playing: bool,
-    pub playhead: [usize; MACHINES],
-    pub patterns: [u8; MACHINES],
-    pub queued: [Option<u8>; MACHINES],
-    /// Peaks since the previous status: channels 0..CHANNELS, then master.
-    /// Muted (or soloed-out) channels read 0.
-    pub meters: [f32; CHANNELS + 1],
+    /// By rack position.
+    pub playhead: [usize; MAX_MACHINES],
+    /// By rack position.
+    pub patterns: [u8; MAX_MACHINES],
+    /// By rack position.
+    pub queued: [Option<u8>; MAX_MACHINES],
+    /// Peaks since the previous status: rack positions 0..MAX_MACHINES,
+    /// then master. Muted (or soloed-out) machines read 0.
+    pub meters: [f32; MAX_MACHINES + 1],
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
     /// Worst single callback load since the previous status.
@@ -105,15 +109,21 @@ pub struct Status {
     /// UI counts the Stops it sends the same way: a status that has not
     /// caught up predates its latest Stop.
     pub stops: u32,
+    /// Rack generation this status reports on (0 until racks can change
+    /// while running).
+    pub rack_gen: u32,
 }
 
+// Events travel by value through a preallocated ring: boxing the Status
+// would allocate on the audio thread.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Status(Status),
     DisposeSynthPattern(Box<SynthPattern>),
     DisposeDrumPattern(Box<DrumPattern>),
     DisposeNotePattern(Box<NotePattern>),
     DisposeEngine(Box<Engine>),
-    DisposeSong(Box<Song>),
+    DisposeSong(Box<CompiledSong>),
     DisposeSample(Option<Arc<SampleData>>),
     DisposeSlotPlay(Box<SlotPlay>),
 }
@@ -124,7 +134,7 @@ pub struct EngineHost {
     events: Producer<Event>,
     status_every: usize,
     since_status: usize,
-    meters: [f32; CHANNELS + 1],
+    meters: [f32; MAX_MACHINES + 1],
     guard_fired: bool,
     song_rejected: bool,
     cpu: f32,
@@ -150,7 +160,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         events: event_tx,
         status_every,
         since_status: 0,
-        meters: [0.0; CHANNELS + 1],
+        meters: [0.0; MAX_MACHINES + 1],
         guard_fired: false,
         song_rejected: false,
         cpu: 0.0,
@@ -182,11 +192,8 @@ impl EngineHost {
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         self.drain_commands();
         self.engine.process(out_l, out_r);
-        // Interim (until Status is per slot): the first six positions, then
-        // the master.
-        let m = self.engine.take_meters();
-        let meters = m[..CHANNELS].iter().chain(&m[MAX_MACHINES..]);
-        for (acc, m) in self.meters.iter_mut().zip(meters) {
+        let meters = self.engine.take_meters();
+        for (acc, m) in self.meters.iter_mut().zip(&meters) {
             *acc = acc.max(*m);
         }
         self.guard_fired |= self.engine.take_guard_fired();
@@ -254,7 +261,7 @@ impl EngineHost {
                     std::mem::swap(&mut self.engine, &mut engine);
                     self.dispose(Event::DisposeEngine(engine));
                     // Nothing from the old engine carries over to the new one.
-                    self.meters = [0.0; CHANNELS + 1];
+                    self.meters = [0.0; MAX_MACHINES + 1];
                     self.guard_fired = false;
                     self.song_rejected = false;
                     self.since_status = 0;
@@ -304,10 +311,11 @@ impl EngineHost {
             song_step: self.engine.song_step(),
             song_rejected: self.song_rejected,
             stops: self.stops,
+            rack_gen: 0,
         };
         if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
         {
-            self.meters = [0.0; CHANNELS + 1];
+            self.meters = [0.0; MAX_MACHINES + 1];
             self.cpu_peak = 0.0;
             self.guard_fired = false;
             self.song_rejected = false;
@@ -423,7 +431,7 @@ mod tests {
         assert!((58..=61).contains(&statuses.len()), "{}", statuses.len());
         let last = statuses.last().unwrap();
         assert!(last.playing);
-        assert!(last.meters[CHANNELS] > 0.0);
+        assert!(last.meters[MAX_MACHINES] > 0.0);
     }
 
     #[test]
@@ -496,8 +504,8 @@ mod tests {
     #[test]
     fn song_commands_and_status() {
         let (mut host, mut tx, mut rx) = host_with_demo();
-        let song = crate::project::Song {
-            bars: vec![crate::project::Bar::default(); 4],
+        let song = CompiledSong {
+            bars: vec![Default::default(); 4],
             ..Default::default()
         };
         tx.push(Command::Song(Box::new(song))).unwrap();
@@ -534,7 +542,7 @@ mod tests {
     fn replace_engine_clears_host_state() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         host.guard_fired = true;
-        host.meters = [1.0; CHANNELS + 1];
+        host.meters = [1.0; MAX_MACHINES + 1];
         host.since_status = host.status_every - 1;
         tx.push(Command::ReplaceEngine(Box::new(Engine::new(SR))))
             .unwrap();
@@ -700,8 +708,8 @@ mod tests {
     #[test]
     fn a_rejected_song_is_reported_once() {
         let (mut host, mut tx, mut rx) = host_with_demo();
-        let song = crate::project::Song {
-            bars: vec![crate::project::Bar::default(); crate::song::MAX_BARS + 1],
+        let song = CompiledSong {
+            bars: vec![Default::default(); crate::song::MAX_BARS + 1],
             ..Default::default()
         };
         tx.push(Command::Song(Box::new(song))).unwrap();

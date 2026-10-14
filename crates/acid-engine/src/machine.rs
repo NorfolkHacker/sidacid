@@ -8,13 +8,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_MACHINES: usize = 16;
 
 pub const MACHINES: usize = 6;
-/// Machines with a song transpose: Synth 1, Synth 2, FM.
-pub const TRANSPOSED: usize = 3;
-/// Machines sequenced from note patterns: FM, Sampler.
-pub const NOTE_MACHINES: usize = 2;
-/// Index of the first note machine; note machine `n` is machine
-/// `FIRST_NOTE_MACHINE + n`.
-pub const FIRST_NOTE_MACHINE: usize = MachineId::Fm as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MachineId {
@@ -209,7 +202,6 @@ mod tests {
         for m in [MachineId::Kit808, MachineId::Kit909, MachineId::Sampler] {
             assert_eq!(m.transpose_index(), None, "{m:?}");
         }
-        assert_eq!(TRANSPOSED, 3);
     }
 
     #[test]
@@ -219,9 +211,6 @@ mod tests {
             assert_eq!(MachineId::from_index(i), Some(*m));
         }
         assert_eq!(MachineId::from_index(MACHINES), None);
-        for n in 0..NOTE_MACHINES {
-            assert_eq!(kind_of(FIRST_NOTE_MACHINE + n), Some(MachineKind::Notes(n)));
-        }
         assert_eq!(kind_of(4), Some(MachineKind::Notes(0)));
         assert_eq!(kind_of(5), Some(MachineKind::Notes(1)));
         assert_eq!(kind_of(3), Some(MachineKind::Drum(1)));
@@ -229,7 +218,7 @@ mod tests {
             .iter()
             .filter_map(|m| m.transpose_index())
             .collect();
-        assert_eq!(transposed, (0..TRANSPOSED).collect::<Vec<_>>());
+        assert_eq!(transposed, [0, 1, 2]);
     }
 
     #[test]

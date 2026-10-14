@@ -9,6 +9,7 @@ use acid_engine::params::ParamId;
 use acid_engine::project::{
     DrumHit, DrumPattern, NotePattern, Project, STEPS, SeqView, Song, SynthPattern, SynthStep,
 };
+use acid_engine::rack::CompiledSong;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -714,7 +715,10 @@ impl Document {
             Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
             Edit::Swing(_) => vec![Command::SetSwing(p.swing)],
             Edit::View { .. } => Vec::new(),
-            Edit::Song { .. } => vec![Command::Song(Box::new(p.song.clone()))],
+            Edit::Song { .. } => vec![Command::Song(Box::new(CompiledSong::compile(
+                &p.song,
+                &p.rack_uids(),
+            )))],
             Edit::FmVoice { values, .. } => values
                 .iter()
                 .map(|(id, _)| Command::SetParam(*id, p.param(*id)))

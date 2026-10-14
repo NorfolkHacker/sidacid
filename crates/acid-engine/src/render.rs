@@ -2,6 +2,7 @@
 
 use crate::engine::Engine;
 use crate::project::Project;
+use crate::rack::CompiledSong;
 use crate::sequencer::Mode;
 use crate::song;
 use std::path::Path;
@@ -80,7 +81,8 @@ fn render_song_to<E>(
     engine.set_mode(Mode::Song);
     engine.set_song_start(0);
     engine.play();
-    let steps = song::total_steps(&p.song, song::Banks::of(&p)).max(1) as f64;
+    let compiled = CompiledSong::compile(&p.song, &p.rack_uids());
+    let steps = song::compiled_total_steps(&compiled, song::Banks::of(&p)).max(1) as f64;
     let step_samples = 60.0 / p.bpm.clamp(40.0, 300.0) as f64 / 4.0 * sr as f64;
     let expected = steps * step_samples;
     let mut rendered = 0;

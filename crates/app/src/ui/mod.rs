@@ -1486,12 +1486,13 @@ mod tests {
         let before = app.doc.project.song.clone();
         app.pending.clear();
         let fm = MachineId::Fm.uid();
+        let at = app.doc.project.position(fm).unwrap();
         let mut song = before.clone();
         song.bars[1].cell_mut(fm).transpose = 5;
         app.apply_song(song, false);
         assert!(matches!(
             app.pending.as_slice(),
-            [Command::Song(s)] if s.bars[1].cell(fm).transpose == 5
+            [Command::Song(s)] if s.bars[1].transpose[at] == 5
         ));
         app.doc.undo();
         assert_eq!(app.doc.project.song, before);

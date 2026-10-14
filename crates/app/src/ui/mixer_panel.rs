@@ -1,6 +1,7 @@
 //! Mixer strips, delay and reverb returns, master compressor, meters.
 
 use super::{SidAcidApp, theme};
+use acid_engine::machine::MAX_MACHINES;
 use acid_engine::params::{CHANNELS, ChannelParam, FxParam, MasterParam, ParamId, channel_param};
 use eframe::egui::{self, Sense, vec2};
 
@@ -136,7 +137,7 @@ impl SidAcidApp {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.strong("Master");
-                                    meter(ui, self.status.meters[CHANNELS]);
+                                    meter(ui, self.status.meters[MAX_MACHINES]);
                                 });
                                 egui::Grid::new("master")
                                     .spacing([0.0, 0.0])
