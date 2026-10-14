@@ -1,0 +1,24 @@
+Plan 11 (modular rack b: rack management UI) — manual verification 2026-10-14 and items left open.
+
+VERIFIED (controller, on the Deck)
+- Offline: a 16-machine rack built through Project ops (demo six + Synth 3–6, Sampler 2–3,
+  909 2, FM 2–3, 808 2) validates, saves, reloads equal and renders (2 bars, peak 1.000);
+  a 17th machine (duplicate) is refused.
+- UI (throwaway builds adding machines at startup):
+  - Add bar shows "+ Add machine ⏷  8 / 16".
+  - Mixer strips follow rack order after a move ("909 2" first) and the strip row scrolls
+    horizontally (ScrollArea).
+  - A new "909 2" panel shows "909 2 DRUMS   A01", empty patterns, and ⬆ ⬇ 🗐 🗙 with
+    ⬆ disabled at the top; SYNTH 1's header keeps its text with all four buttons enabled.
+- Not clicked by hand (xdotool clicks land wrong on this desktop): rename by double-click,
+  the add menu, duplicate/remove buttons, undo of rack edits while playing. Covered by unit
+  tests (rack_header.rs, rack_sync.rs, document.rs). Owed to the user: click through them.
+
+DEFERRED MINORS (task reviews)
+- Engine: refused-swap test doesn't assert rack_gen unchanged; no sub-3 bar-wrap join test.
+- Project ops: rename-default self-exclusion untested; next_uid u16 overflow unhandled
+  (unreachable); names stored untrimmed.
+- Document: MergeKey::Rack is shared (would merge if apply(..,true)/record() were ever used
+  for rack edits); rename default-name logic duplicated with Project::rename_machine.
+- App: commit_rename applies mid-draw (safe); voice_source_before can create a stray panel;
+  the refused-rack guard ignores a second refusal at the same generation.
