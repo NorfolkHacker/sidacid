@@ -1,0 +1,33 @@
+Plan 10 (modular rack a: engine & project model) — manual verification 2026-10-14 and items left open.
+
+VERIFIED (controller, on the Deck)
+- App (release build) launches and looks as before: SYNTH 1 / SYNTH 2 / 808 DRUMS panels with
+  the same headers and controls; transport meter running (CPU 3%, MEM 172 MB).
+- ~/Documents/Showcase.sidacid (v2) loads via migration as six machines, uids 1–6, names
+  Synth 1, Synth 2, 808, 909, FM, Sampler; validates; saves as v3; v3 reloads equal.
+  It has no song bars (song render silent, as expected); pattern render: 463050 frames,
+  peak 0.979.
+- `sidacid render-demo` writes a WAV.
+- Golden bit-exact render (pattern + song) unchanged through all nine tasks.
+- Mixer/song panels lower in the window were not screenshotted (xdotool scrolling is
+  unreliable on this desktop); their labels are covered by unit tests.
+
+CARRIED TO PLAN 10b (rack UI)
+- A machine added mid-playback starts at step 0 (out of phase) and is silent until the
+  next bar in song mode (Ruling 9).
+- Shared UI state to move per machine: sampler_slot, fm_op, fm_browser, fm_voice_src
+  (Ruling 10); prune ViewState::panels and wave_cache on rack change.
+- Compare Status::rack_gen against the last SetRack sent; a refused SetRack has no status flag.
+- write_pattern_ref has no unknown-uid guard (validate catches it later).
+
+DEFERRED MINORS (task reviews)
+- Golden non-silence check is left-channel only; 4.8 MB fixture could be compacted.
+- migrate: stale comment; v2 params on positions > 6 dropped silently while automation on
+  them is rejected.
+- validate tests assert is_err() only; no duplicate-cell-per-uid check; no test for an
+  automation lane on an unknown uid.
+- set_rack: unreachable let-else (debug_assert), swap.selected not bound-checked, a fresh
+  slot replacing an existing uid is accepted silently, sample rate not carried in RackSwap.
+- Small: render.rs double-builds the engine; rack.rs imports engine for MAX_BLOCK;
+  GlobalParam::all() rebuilt per element in from_project; Banks passed by value; per-frame
+  name clones in mixer/song panels; duplicated all-six-cells test helper.
