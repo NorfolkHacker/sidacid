@@ -21,8 +21,9 @@ pub const VOICES: usize = 16;
 pub const MAX_SLICES: usize = 64;
 /// Longest sample a slot accepts.
 pub const MAX_SECONDS: f32 = 30.0;
-/// Most decoded audio (f32 bytes) a project may hold.
-pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+/// Most decoded audio (f32 bytes) a project may hold, shared by every
+/// sampler in the rack.
+pub const SAMPLE_POOL: usize = 256 * 1024 * 1024;
 /// New zones are placed upward from here (MIDI 24 = C1).
 pub const FIRST_KEY: u8 = 24;
 pub use machine::Sampler;

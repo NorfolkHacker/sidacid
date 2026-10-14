@@ -522,9 +522,10 @@ impl From<std::io::Error> for ProjectError {
     }
 }
 
-/// Parses with embedded 16-bit PCM limited to half the f32 memory limit.
+/// Parses with embedded 16-bit PCM limited to half the f32 sample pool,
+/// one budget shared by every sampler in the file.
 fn with_pcm_budget<T>(f: impl FnOnce() -> T) -> T {
-    let budget = crate::sampler::MEMORY_LIMIT as u64 / 2;
+    let budget = crate::sampler::SAMPLE_POOL as u64 / 2;
     crate::sampler::slot::pcm_codec::with_budget(budget, f)
 }
 
@@ -654,8 +655,8 @@ impl Project {
                 sampler_bytes = sampler_bytes.saturating_add(s.memory_bytes());
             }
         }
-        if sampler_bytes > crate::sampler::MEMORY_LIMIT {
-            return bad("sampler audio exceeds 64 MB".into());
+        if sampler_bytes > crate::sampler::SAMPLE_POOL {
+            return bad("sampler audio exceeds 256 MB".into());
         }
         for bar in &self.song.bars {
             for (i, (uid, cell)) in bar.cells.iter().enumerate() {
@@ -1092,13 +1093,67 @@ mod tests {
         assert!(Project::from_ron(&ron_with_slot_entries(&exact)).is_ok());
     }
 
+    /// Fills `uid`'s slots with silent mono 192 kHz audio whose decoded
+    /// size (`memory_bytes`) totals `bytes` (a multiple of 4).
+    fn fill_sampler(p: &mut Project, uid: MachineUid, bytes: usize) {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let mut left = bytes / 4;
+        let s = p.sampler_mut(uid).unwrap();
+        for (slot, entry) in s.slots.iter_mut().enumerate() {
+            let n = left.min(5_700_000);
+            left -= n;
+            if n == 0 {
+                break;
+            }
+            let key = 24 + 2 * slot as u8;
+            let d = SlotData {
+                name: "big".into(),
+                meta: SlotMeta::chromatic(key, key + 1, key, n as u32),
+                sample_rate: 192_000,
+                channels: 1,
+                pcm: vec![0; n],
+            };
+            assert!(d.is_valid(), "{:?}", d.problem());
+            *entry = Some(d);
+        }
+        assert_eq!(left, 0, "more audio than one sampler holds");
+        assert_eq!(p.sampler(uid).unwrap().memory_bytes(), bytes);
+    }
+
+    #[test]
+    fn the_pool_is_shared_across_samplers() {
+        let mut p = Project::default();
+        let s2 = p.new_machine(MachineType::Sampler);
+        p.insert_machine(p.machines.len(), s2.clone()).unwrap();
+        fill_sampler(&mut p, MachineUid(6), 100 * 1024 * 1024);
+        fill_sampler(&mut p, s2.uid, 100 * 1024 * 1024);
+        p.validate().unwrap(); // 200 MB < 256 MB
+        let s3 = p.new_machine(MachineType::Sampler);
+        p.insert_machine(p.machines.len(), s3.clone()).unwrap();
+        fill_sampler(&mut p, s3.uid, 100 * 1024 * 1024);
+        assert!(
+            p.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 256 MB")
+        );
+    }
+
+    #[test]
+    fn a_project_over_the_old_limit_round_trips() {
+        let mut p = Project::default();
+        fill_sampler(&mut p, MachineUid(6), 90 * 1024 * 1024); // > 64 MB, < 256 MB
+        let q = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(q, p);
+    }
+
     #[test]
     fn embedded_audio_over_the_memory_limit_is_refused_while_parsing() {
-        // 16 slots of 2.2 MB of 16-bit audio: 35 MB, over the 32 MB of PCM
-        // that MEMORY_LIMIT (64 MB of f32) allows.
-        let entries: Vec<String> = (0..crate::sampler::SLOTS as u8)
-            .map(|i| slot_entry(i * 8, 1_100_000).0)
-            .collect();
+        // 9 slots of 16 MB of 16-bit audio: 144 MB, over the 128 MB of PCM
+        // (half of SAMPLE_POOL, which counts f32) one parse may inflate.
+        let entries: Vec<String> = (0..9u8).map(|i| slot_entry(i * 8, 8_000_000).0).collect();
+        let mut entries = entries;
+        entries.resize(crate::sampler::SLOTS, "None".into());
         match Project::from_ron(&ron_with_slot_entries(&entries)) {
             Err(ProjectError::Parse(e)) => assert!(e.contains("memory"), "{e}"),
             other => panic!("expected a parse error, got {other:?}"),

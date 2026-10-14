@@ -12,13 +12,13 @@
 //! host are taken back out (`discard_pending`).
 
 use super::SidAcidApp;
-use super::sampler_load::sample_memory;
+use super::sampler_load::{pool_message, sample_memory};
 use acid_engine::host::{Command, Status};
 use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
 use acid_engine::params::ParamId;
 use acid_engine::project::BANK_SIZE;
 use acid_engine::rack::RackSwap;
-use acid_engine::sampler::MEMORY_LIMIT;
+use acid_engine::sampler::SAMPLE_POOL;
 
 /// The rate fresh slots are built for when no stream runs (no engine to
 /// match; the next stream builds its engine from the project).
@@ -39,16 +39,10 @@ impl SidAcidApp {
     /// it. None when the rack is full or `uid` is not in it.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
         if let Some(src) = self.doc.project.sampler(uid) {
-            let in_use = sample_memory(&self.doc.project);
-            if in_use + src.memory_bytes() > MEMORY_LIMIT {
-                let name = self
-                    .doc
-                    .project
-                    .machine(uid)
-                    .map_or("", |m| m.name.as_str());
-                self.view.message = Some(format!(
-                    "Not enough sample memory to duplicate '{name}' (64 MB in all)"
-                ));
+            let needed = src.memory_bytes();
+            let free = SAMPLE_POOL.saturating_sub(sample_memory(&self.doc.project));
+            if needed > free {
+                self.view.message = Some(pool_message(needed, free));
                 return None;
             }
         }

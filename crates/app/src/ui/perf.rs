@@ -263,7 +263,7 @@ impl SidAcidApp {
                 .on_hover_text("Memory this app is using");
         }
         let samples = super::sampler_load::sample_memory(&self.doc.project) as u64;
-        let limit = acid_engine::sampler::MEMORY_LIMIT as u64;
+        let limit = acid_engine::sampler::SAMPLE_POOL as u64;
         let colour = load_colour(samples as f32 / limit as f32, normal);
         ui.label(
             egui::RichText::new(format!(

@@ -253,9 +253,9 @@ pub struct Document {
     pass_open: bool,
 }
 
-/// Sample data (PCM in `SlotData`) the undo history may hold. Twice the
-/// 64 MB the sampler allows in a project, so a few full reloads stay
-/// undoable. Past it the oldest steps are dropped, the newest always kept.
+/// Sample data (PCM in `SlotData`) the undo history may hold: as much
+/// 16-bit PCM as the whole 256 MB (f32) sample pool decodes from, so a
+/// full pool's worth of reloads stays undoable. Past it the oldest steps are dropped, the newest always kept.
 pub const UNDO_SAMPLE_BYTES: usize = 128 * 1024 * 1024;
 
 impl Document {

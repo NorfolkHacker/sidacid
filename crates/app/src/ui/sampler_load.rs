@@ -9,7 +9,7 @@ use acid_engine::params::{MachineParam, SlotParam};
 use acid_engine::sampler::decode::decode;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
 use acid_engine::sampler::slot::{SlotData, SlotMeta};
-use acid_engine::sampler::{MEMORY_LIMIT, SLOTS};
+use acid_engine::sampler::{SAMPLE_POOL, SLOTS};
 
 /// Samples at least this long load as slice slots.
 const SLICE_MIN_SECONDS: f32 = 1.0;
@@ -17,13 +17,26 @@ const SLICE_MIN_SECONDS: f32 = 1.0;
 const CHROMATIC_SPAN: u8 = 24;
 
 /// Sample memory in use across every sampler in the rack: the project's
-/// `MEMORY_LIMIT` covers them all.
+/// `SAMPLE_POOL` covers them all.
 pub(crate) fn sample_memory(project: &acid_engine::project::Project) -> usize {
     let samplers = project
         .machines
         .iter()
         .filter_map(|m| project.sampler(m.uid));
     samplers.map(|s| s.memory_bytes()).sum()
+}
+
+/// The refusal shown when `needed_bytes` of new audio do not fit in the
+/// `free_bytes` left in the pool. Needed rounds up and free rounds down,
+/// so the figures never suggest it would fit.
+pub fn pool_message(needed_bytes: usize, free_bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    format!(
+        "Not enough sample memory: {} MB needed, {} MB free of {} MB",
+        needed_bytes.div_ceil(MIB),
+        free_bytes / MIB,
+        SAMPLE_POOL / MIB
+    )
 }
 
 impl SidAcidApp {
@@ -94,9 +107,10 @@ impl SidAcidApp {
         };
         let old = sampler.slots[slot].as_ref().map_or(0, |d| d.memory_bytes());
         let in_use = sample_memory(&self.doc.project);
-        if in_use - old + decoded.samples.len() * 4 > MEMORY_LIMIT {
-            self.view.message =
-                Some("Not enough sample memory left (64 MB in all). Clear a slot first.".into());
+        let needed = decoded.samples.len() * 4;
+        let free = SAMPLE_POOL.saturating_sub(in_use - old);
+        if needed > free {
+            self.view.message = Some(pool_message(needed, free));
             return;
         }
         let frames = decoded.frames() as u32;

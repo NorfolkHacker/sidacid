@@ -2088,37 +2088,50 @@ mod tests {
     }
 
     #[test]
-    fn a_load_past_the_memory_limit_is_refused() {
-        use acid_engine::sampler::MEMORY_LIMIT;
-        use acid_engine::sampler::slot::{SlotData, SlotMeta};
+    fn pool_messages_round_needed_up_and_free_down() {
+        use sampler_load::pool_message;
+        let mib = 1024 * 1024;
+        assert_eq!(
+            pool_message(31 * mib - 5, 12 * mib + mib / 2),
+            "Not enough sample memory: 31 MB needed, 12 MB free of 256 MB"
+        );
+        assert_eq!(
+            pool_message(31 * mib + 1, 0),
+            "Not enough sample memory: 32 MB needed, 0 MB free of 256 MB"
+        );
+    }
+
+    #[test]
+    fn a_load_past_the_memory_pool_is_refused() {
+        use acid_engine::sampler::SAMPLE_POOL;
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        let frames = 5_700_000usize;
+        // Silent filler slots (0..12) leave 4000 bytes of the pool free.
         let leave = 1_000;
-        let mut left = MEMORY_LIMIT / 4 - leave;
-        // Filler slots that fill the memory: valid slots, their metas span the PCM.
-        for slot in 0..3 {
-            let n = left.min(frames);
-            left -= n;
-            let big = SlotData {
-                name: "big".into(),
-                meta: SlotMeta::chromatic(24 + 2 * slot as u8, 25 + 2 * slot as u8, 24, n as u32),
-                sample_rate: 192_000,
-                channels: 1,
-                pcm: vec![0; n],
-            };
-            assert!(big.is_valid(), "{:?}", big.problem());
-            app.doc.project.sampler_mut(SAMPLER).unwrap().slots[slot] = Some(big);
-        }
+        sampler_with_frames(&mut app, SAMPLE_POOL / 4 - leave);
         assert_eq!(
             app.doc.project.sampler(SAMPLER).unwrap().memory_bytes(),
-            MEMORY_LIMIT - leave * 4
+            SAMPLE_POOL - leave * 4
         );
         let before = app.doc.project.clone();
-        app.load_sample_bytes(SAMPLER, 3, "Over", Some("wav"), &test_wav(0.5));
+        app.load_sample_bytes(SAMPLER, 15, "Over", Some("wav"), &test_wav(0.5));
         let msg = app.view.message.clone().expect("a message explains it");
-        assert!(msg.contains("Not enough sample memory"), "{msg}");
+        assert!(
+            msg.starts_with("Not enough sample memory: ")
+                && msg.ends_with(" MB needed, 0 MB free of 256 MB"),
+            "{msg}"
+        );
         assert_eq!(app.doc.project, before);
         assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn a_load_over_the_old_limit_fits_the_pool() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        // 80 MB of silence already loaded: over the old 64 MB, well inside 256 MB.
+        sampler_with_frames(&mut app, 80 * 1024 * 1024 / 4);
+        app.load_sample_bytes(SAMPLER, 15, "Fits", Some("wav"), &test_wav(0.5));
+        assert!(app.view.message.is_none(), "{:?}", app.view.message);
+        assert!(app.doc.project.sampler(SAMPLER).unwrap().slots[15].is_some());
     }
 
     #[test]
@@ -2428,10 +2441,11 @@ mod tests {
         assert!(app.pending.is_empty());
     }
 
-    /// Fills sampler slots (5.7M frames at most each) with `frames` in all.
+    /// Fills sampler slots 0..12 (5.7M silent frames at most each) with
+    /// `frames` in all.
     fn sampler_with_frames(app: &mut SidAcidApp, mut frames: usize) {
         use acid_engine::sampler::slot::{SlotData, SlotMeta};
-        for slot in 0..3 {
+        for slot in 0..12 {
             let n = frames.min(5_700_000);
             frames -= n;
             if n == 0 {
@@ -2447,13 +2461,14 @@ mod tests {
             assert!(big.is_valid(), "{:?}", big.problem());
             app.doc.project.sampler_mut(SAMPLER).unwrap().slots[slot] = Some(big);
         }
+        assert_eq!(frames, 0, "more frames than the filler slots hold");
     }
 
     #[test]
-    fn duplicating_a_sampler_past_the_memory_limit_is_refused() {
-        use acid_engine::sampler::MEMORY_LIMIT;
+    fn duplicating_a_sampler_past_the_memory_pool_is_refused() {
+        use acid_engine::sampler::SAMPLE_POOL;
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        sampler_with_frames(&mut app, MEMORY_LIMIT / 4 / 2 + 1_000);
+        sampler_with_frames(&mut app, SAMPLE_POOL / 4 / 2 + 1_000);
         let count = app.doc.project.machines.len();
         let expected = app.rack_expected;
         assert!(app.duplicate_machine(SAMPLER).is_none());
@@ -2462,11 +2477,11 @@ mod tests {
         assert!(!app.pending.iter().any(|c| matches!(c, Command::SetRack(_))));
         assert!(!app.doc.can_undo());
         let msg = app.view.message.clone().expect("the user is told");
-        assert!(
-            msg.starts_with("Not enough sample memory to duplicate '"),
-            "{msg}"
+        // The copy needs 128 MB + 4000 bytes; 128 MB - 4000 bytes are free.
+        assert_eq!(
+            msg,
+            "Not enough sample memory: 129 MB needed, 127 MB free of 256 MB"
         );
-        assert!(msg.ends_with("' (64 MB in all)"), "{msg}");
     }
 
     #[test]
