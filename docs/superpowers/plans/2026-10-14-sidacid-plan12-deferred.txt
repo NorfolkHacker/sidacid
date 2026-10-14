@@ -1,0 +1,22 @@
+Plan 12 (modular rack c: per-machine CPU + 256 MB sample pool) — manual verification 2026-10-14
+and items left open.
+
+VERIFIED (controller, on the Deck; throwaway builds that start playback at launch)
+- Panel headers show "CPU n%" left of the ⬆ ⬇ 🗐 🗙 buttons while the demo plays
+  (SYNTH 1 "CPU 1%", SYNTH 2 / 808 "CPU 0%"); playheads advance.
+- Transport meter reads "Smp 0/256 MB".
+- Duplicating Synth 1 twice while playing: both copies get mixer strips and meters move.
+- Not captured: the transport hover's "Top:" line (hover can't be screenshotted reliably here);
+  covered by unit tests. A ~150 MB two-sampler save/reopen was not probed by hand; the 90 MB
+  round-trip and shared-pool validate tests cover it.
+
+NOTICED
+- Duplicating the same machine twice gives two machines both named "Synth 1 copy" (spec says
+  "<name> copy"; names needn't be unique). Possible polish: "Synth 1 copy 2".
+
+DEFERRED MINORS (task reviews)
+- Timing: ~2 Instant::now per slot per span (chain timestamps to halve; ~0.03% of budget);
+  drain_commands/chunk-loop time not in shared_cpu (doc note).
+- UI: shared_cpu's first reading smoothed from 0; header CPU label is selectable text.
+- Pool: parse-budget sharing across several samplers not tested directly; parse-limit test
+  takes ~1.6 s (144 MB fixture).
