@@ -2,6 +2,7 @@
 //! app; `sidacid render-demo [out.wav]` renders the demo groove offline.
 
 mod audio;
+mod audio_select;
 mod document;
 mod settings;
 mod ui;
