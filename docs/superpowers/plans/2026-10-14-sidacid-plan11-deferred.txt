@@ -22,3 +22,12 @@ DEFERRED MINORS (task reviews)
   for rack edits); rename default-name logic duplicated with Project::rename_machine.
 - App: commit_rename applies mid-draw (safe); voice_source_before can create a stray panel;
   the refused-rack guard ignores a second refusal at the same generation.
+
+FROM THE FINAL REVIEW
+- A removed synth whose param lane was overriding another machine's knob mid-step leaves that
+  knob at the lane value until Stop (the removed slot's ParamRestore never fires) - fix in
+  set_rack or document.
+- Second golden fixture (sampler audio + 303 param lanes) still not added (carried from plan 10).
+- Sub-3 bar-wrap join test worth adding with plan 10c.
+- Plan 10c: put the 256 MB pool refusal for duplicates in SidAcidApp::duplicate_machine beside
+  F1's check.

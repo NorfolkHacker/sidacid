@@ -12,11 +12,13 @@
 //! host are taken back out (`discard_pending`).
 
 use super::SidAcidApp;
+use super::sampler_load::sample_memory;
 use acid_engine::host::{Command, Status};
 use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
 use acid_engine::params::ParamId;
 use acid_engine::project::BANK_SIZE;
 use acid_engine::rack::RackSwap;
+use acid_engine::sampler::MEMORY_LIMIT;
 
 /// The rate fresh slots are built for when no stream runs (no engine to
 /// match; the next stream builds its engine from the project).
@@ -36,6 +38,20 @@ impl SidAcidApp {
     /// Adds a copy of `uid` directly below it (one undo step) and focuses
     /// it. None when the rack is full or `uid` is not in it.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
+        if let Some(src) = self.doc.project.sampler(uid) {
+            let in_use = sample_memory(&self.doc.project);
+            if in_use + src.memory_bytes() > MEMORY_LIMIT {
+                let name = self
+                    .doc
+                    .project
+                    .machine(uid)
+                    .map_or("", |m| m.name.as_str());
+                self.view.message = Some(format!(
+                    "Not enough sample memory to duplicate '{name}' (64 MB in all)"
+                ));
+                return None;
+            }
+        }
         let (copy, cmds) = self.doc.duplicate_machine(uid)?;
         self.send(cmds);
         self.sync_rack();
@@ -101,7 +117,6 @@ impl SidAcidApp {
     pub(crate) fn rack_for_new_host(&mut self) {
         self.engine_rack = self.doc.project.rack_uids();
         self.rack_expected = 0;
-        self.rack_reloaded_at = None;
     }
 
     /// A `ReplaceEngine` built from the project goes to the current host.
@@ -126,12 +141,9 @@ impl SidAcidApp {
     /// wrong: a bug): restart audio, so a fresh host builds its engine from
     /// the project and the host's rack count and ours both start again at
     /// 0. Without a stream (tests) the same reset happens with no device.
-    /// A refusal reported at the generation already restarted for is not
-    /// acted on twice (the loop guard). True when it restarted.
-    pub(crate) fn reload_after_refused_rack(&mut self, status: &Status) -> bool {
-        if self.rack_reloaded_at == Some(status.rack_gen) {
-            return false;
-        }
+    /// The old host's statuses are gone after the restart, so every refusal
+    /// seen is a new host's own and restarts once.
+    pub(crate) fn reload_after_refused_rack(&mut self, _status: &Status) -> bool {
         self.view.audition = None;
         self.view.pad_note = None;
         if self.audio.is_some() {
@@ -139,7 +151,6 @@ impl SidAcidApp {
         } else {
             self.reset_for_new_host();
         }
-        self.rack_reloaded_at = Some(status.rack_gen);
         true
     }
 

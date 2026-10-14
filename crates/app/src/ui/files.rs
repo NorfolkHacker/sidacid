@@ -227,6 +227,8 @@ impl SidAcidApp {
             panel.fm_voice_src = None;
         }
         self.view.knob_scroll = None;
+        self.view.renaming = None;
+        self.view.rack_action = None;
         self.view.audition = None;
         self.view.wave_cache.clear();
         self.view.wave_drag = None;

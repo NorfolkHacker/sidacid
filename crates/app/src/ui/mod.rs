@@ -179,8 +179,6 @@ pub struct SidAcidApp {
     /// The rack generation (`Status::rack_gen`) a status describing
     /// `engine_rack` carries; it mirrors the host's count (see `rack_sync`).
     pub(crate) rack_expected: u32,
-    /// The generation at which a refused rack last reloaded the engine.
-    pub(crate) rack_reloaded_at: Option<u32>,
     /// Tests only: the commands a frame flushed with no audio device (a
     /// real app drops them), so a test can see what would reach the engine.
     #[cfg(test)]
@@ -314,7 +312,6 @@ impl SidAcidApp {
             pending: Vec::new(),
             view: ViewState::default(),
             rack_expected: 0,
-            rack_reloaded_at: None,
             #[cfg(test)]
             flushed: Vec::new(),
         }
@@ -2393,11 +2390,63 @@ mod tests {
         assert_eq!(app.rack_expected, 0, "a fresh host counts from 0");
         assert_eq!(app.engine_rack, app.doc.project.rack_uids());
         assert!(app.pending.is_empty(), "queued swaps were for the old rack");
-        // The same refusal reported again does not restart again.
+        // Each refused status restarts once.
         app.add_machine(MachineType::Fm);
-        assert!(!app.reload_after_refused_rack(&refused));
-        assert_eq!(app.rack_expected, 1, "no second restart");
         assert!(!app.pending.is_empty());
+        assert!(app.reload_after_refused_rack(&refused));
+        assert_eq!(app.rack_expected, 0);
+        assert!(app.pending.is_empty());
+    }
+
+    /// Fills sampler slots (5.7M frames at most each) with `frames` in all.
+    fn sampler_with_frames(app: &mut SidAcidApp, mut frames: usize) {
+        use acid_engine::sampler::slot::{SlotData, SlotMeta};
+        for slot in 0..3 {
+            let n = frames.min(5_700_000);
+            frames -= n;
+            if n == 0 {
+                break;
+            }
+            let big = SlotData {
+                name: "big".into(),
+                meta: SlotMeta::chromatic(24 + 2 * slot as u8, 25 + 2 * slot as u8, 24, n as u32),
+                sample_rate: 192_000,
+                channels: 1,
+                pcm: vec![0; n],
+            };
+            assert!(big.is_valid(), "{:?}", big.problem());
+            app.doc.project.sampler_mut(SAMPLER).unwrap().slots[slot] = Some(big);
+        }
+    }
+
+    #[test]
+    fn duplicating_a_sampler_past_the_memory_limit_is_refused() {
+        use acid_engine::sampler::MEMORY_LIMIT;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        sampler_with_frames(&mut app, MEMORY_LIMIT / 4 / 2 + 1_000);
+        let count = app.doc.project.machines.len();
+        let expected = app.rack_expected;
+        assert!(app.duplicate_machine(SAMPLER).is_none());
+        assert_eq!(app.doc.project.machines.len(), count);
+        assert_eq!(app.rack_expected, expected);
+        assert!(!app.pending.iter().any(|c| matches!(c, Command::SetRack(_))));
+        assert!(!app.doc.can_undo());
+        let msg = app.view.message.clone().expect("the user is told");
+        assert!(
+            msg.starts_with("Not enough sample memory to duplicate '"),
+            "{msg}"
+        );
+        assert!(msg.ends_with("' (64 MB in all)"), "{msg}");
+    }
+
+    #[test]
+    fn duplicating_a_small_sampler_works() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        sampler_with_frames(&mut app, 1_000);
+        let count = app.doc.project.machines.len();
+        assert!(app.duplicate_machine(SAMPLER).is_some());
+        assert_eq!(app.doc.project.machines.len(), count + 1);
+        assert!(app.view.message.is_none());
     }
 
     #[test]

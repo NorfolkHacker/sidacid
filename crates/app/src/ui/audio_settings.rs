@@ -76,12 +76,7 @@ impl SidAcidApp {
             self.view.audio_window.open = false;
             return ApplyOutcome::Unchanged;
         }
-        self.pending.clear();
-        self.reset_transport_view();
-        self.view.perf.restart();
-        // Release the old stream first: JACK and ASIO allow one per device.
-        self.audio = None;
-        self.rack_for_new_host();
+        self.reset_for_new_host();
         match open(&new) {
             Ok((link, notes)) => {
                 self.audio = link;
