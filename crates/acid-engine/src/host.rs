@@ -23,7 +23,7 @@ const STATUS_RATE_HZ: f32 = 60.0;
 /// so a stalled UI cannot make replaced boxes leak.
 const DISPOSAL_RESERVE: usize = 256;
 /// Weight of the newest CPU-load sample in the smoothed value.
-const CPU_SMOOTHING: f32 = 0.1;
+pub const CPU_SMOOTHING: f32 = 0.1;
 
 /// One pattern of any machine type, for `Command::Pattern`.
 #[derive(Clone, Debug, PartialEq)]

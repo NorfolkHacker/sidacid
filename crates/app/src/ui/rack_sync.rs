@@ -211,5 +211,6 @@ impl SidAcidApp {
         v.rec_last = v.rec_last.filter(|(id, _)| live_param(id));
         v.live.retain(|id, _| live_param(id));
         v.renaming = v.renaming.take().filter(|(uid, _)| live(*uid));
+        v.perf.retain_machines(live);
     }
 }

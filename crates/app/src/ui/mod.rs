@@ -445,7 +445,10 @@ impl SidAcidApp {
         if status.rack_rejected && self.reload_after_refused_rack(&status) {
             return;
         }
-        self.view.perf.on_status(&status, now);
+        let fresh = status.rack_gen == self.rack_expected;
+        self.view
+            .perf
+            .on_status(&status, now, &self.engine_rack, fresh);
         self.gate_status(&mut status);
         self.status = status;
         self.view.auto_retried = false;
@@ -2270,6 +2273,33 @@ mod tests {
         new.playhead[0] = 9;
         app.on_status(new, 2.0);
         assert_eq!(app.status.playhead[0], 9);
+    }
+
+    #[test]
+    fn machine_cpu_comes_from_statuses_of_the_engine_rack_and_goes_with_the_machine() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.add_machine(MachineType::Sampler);
+        let rack = app.engine_rack.clone();
+        let mut old = Status {
+            rack_gen: app.rack_expected.wrapping_sub(1),
+            ..Status::default()
+        };
+        old.slot_cpu[0] = 0.3;
+        app.on_status(old, 1.0);
+        assert!(app.view.perf.machine_cpu(rack[0]).is_none());
+        let mut new = Status {
+            rack_gen: app.rack_expected,
+            ..Status::default()
+        };
+        new.slot_cpu[0] = 0.3;
+        new.slot_cpu[1] = 0.6;
+        app.on_status(new, 2.0);
+        assert_eq!(app.view.perf.machine_cpu(rack[0]), Some(0.3));
+        assert_eq!(app.view.perf.machine_cpu(rack[1]), Some(0.6));
+        run_frames(&mut app, 2); // headers draw their readings
+        app.remove_machine(rack[1]);
+        assert!(app.view.perf.machine_cpu(rack[1]).is_none());
+        assert!(app.view.perf.machine_cpu(rack[0]).is_some());
     }
 
     #[test]

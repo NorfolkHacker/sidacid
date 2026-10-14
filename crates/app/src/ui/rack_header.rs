@@ -195,6 +195,14 @@ impl SidAcidApp {
             if clicked.is_some() {
                 self.view.rack_action = clicked;
             }
+            if let Some(share) = self.view.perf.machine_cpu(uid) {
+                let normal = ui.visuals().text_color();
+                ui.label(
+                    egui::RichText::new(super::perf::cpu_label(share))
+                        .color(super::perf::cpu_colour(share, normal)),
+                )
+                .on_hover_text("Share of the audio time this machine takes");
+            }
         });
     }
 
