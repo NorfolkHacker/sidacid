@@ -3,6 +3,7 @@
 //! chorus) with a tempo-synced arpeggiator.
 
 pub mod adsr;
+pub mod arp;
 pub mod ladder;
 pub mod lfo;
 pub mod osc;

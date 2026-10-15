@@ -3,6 +3,7 @@
 //! 101-style trigger and portamento modes, drift and a chorus.
 
 use super::adsr::Adsr;
+use super::arp::{Arp, ArpEvent};
 use super::ladder::Ladder;
 use super::lfo::{Drift, Lfo, Noise};
 use super::osc::Vco;
@@ -44,6 +45,7 @@ pub struct MonoSynth {
     drift: Drift,
     noise: Noise,
     chorus: Chorus,
+    arp: Arp,
     held: [Held; MAX_HELD],
     held_len: usize,
     /// The gated pitch.
@@ -75,6 +77,7 @@ impl MonoSynth {
             drift: Drift::new(sample_rate),
             noise: Noise::new(0x2545_f491),
             chorus: Chorus::new(sample_rate),
+            arp: Arp::new(),
             held: [Held::default(); MAX_HELD],
             held_len: 0,
             sounding: None,
@@ -89,18 +92,65 @@ impl MonoSynth {
             glide_coef: 1.0,
         };
         s.apply_patch();
+        s.arp.set_bpm(120.0, sample_rate);
         s
     }
 
     pub fn set_param(&mut self, p: MonoParam, v: f32) {
         self.patch.set(p, v);
         self.apply_patch();
+        match p {
+            MonoParam::ArpOn => {
+                // Off → on starts the pattern afresh; on → off re-sounds the
+                // newest held note (forgetting what the arp last played).
+                self.arp.set_notes(&[], 1);
+                self.sounding = None;
+                self.follow_held();
+            }
+            MonoParam::ArpRange if self.patch.arp_on => self.arp_follow_held(),
+            _ => {}
+        }
     }
 
     fn apply_patch(&mut self) {
         let p = &self.patch;
         self.env.set(p.attack_s, p.decay_s, p.sustain, p.release_s);
         self.glide_coef = 1.0 - (-1.0 / (p.porta_s * self.sample_rate)).exp();
+    }
+
+    /// Sequencer tick `tick` (`tick_len` samples) starts now (transport running).
+    pub fn clock_tick(&mut self, tick: u64, tick_len: f64) {
+        self.arp.clock_tick(tick, tick_len, self.patch.arp_thirds);
+    }
+
+    pub fn stop_transport(&mut self) {
+        self.arp.stop_transport();
+    }
+
+    pub fn set_bpm(&mut self, bpm: f32) {
+        self.arp.set_bpm(bpm, self.sample_rate);
+    }
+
+    /// Arp steps played since construction.
+    pub fn arp_steps(&self) -> u64 {
+        self.arp.steps()
+    }
+
+    /// Rebuilds the arp's notes from the held stack; a first note restarts
+    /// the pattern (and, stopped, steps at once).
+    fn arp_follow_held(&mut self) {
+        let was_empty = self.arp.is_empty();
+        let mut pitches = [0u8; MAX_HELD];
+        for (p, h) in pitches.iter_mut().zip(&self.held[..self.held_len]) {
+            *p = h.pitch;
+        }
+        self.arp.set_notes(&pitches[..self.held_len], self.patch.arp_octaves);
+        if self.arp.is_empty() {
+            self.close_gate();
+        } else if was_empty {
+            self.arp.restart();
+            self.arp.start_free();
+        }
     }
 
     pub fn sounding(&self) -> Option<u8> {
@@ -128,7 +178,11 @@ impl MonoSynth {
         }
         self.held[self.held_len] = Held { pitch, vel, live };
         self.held_len += 1;
-        self.sound(pitch, vel);
+        if self.patch.arp_on {
+            self.arp_follow_held();
+        } else {
+            self.sound(pitch, vel);
+        }
     }
 
     /// Releases `pitch` if it was started the same way (`live` or not).
@@ -163,6 +217,7 @@ impl MonoSynth {
     /// Clears notes, filter and modulation state (NaN guard, hard stop).
     pub fn reset(&mut self) {
         self.held_len = 0;
+        self.arp.set_notes(&[], 1);
         self.sounding = None;
         self.gate = false;
         self.has_pitch = false;
@@ -178,6 +233,10 @@ impl MonoSynth {
     /// After the held set changed: sound the newest held note (legato) or
     /// close the gate.
     fn follow_held(&mut self) {
+        if self.patch.arp_on {
+            self.arp_follow_held();
+            return;
+        }
         match self.top() {
             Some(h) if self.sounding != Some(h.pitch) => self.sound(h.pitch, h.vel),
             Some(_) => {}
@@ -216,6 +275,20 @@ impl MonoSynth {
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         let n = left.len().min(right.len());
         for i in 0..n {
+            if self.patch.arp_on && !self.arp.is_empty() {
+                match self.arp.advance(self.patch.arp_thirds) {
+                    ArpEvent::Step => {
+                        let vel = self.top().map_or(100, |h| h.vel);
+                        if let Some(p) = self.arp.next_pitch(self.patch.arp_mode) {
+                            // Each arp note is a fresh note: the envelope retriggers.
+                            self.gate = false;
+                            self.sound(p, vel);
+                        }
+                    }
+                    ArpEvent::GateOff => self.close_gate(),
+                    ArpEvent::Idle => {}
+                }
+            }
             let (l, r) = self.sample();
             left[i] += l;
             right[i] += r;
@@ -502,5 +575,60 @@ mod tests {
                 assert!(peak(&y) < 4.0, "{m:?}={v}: {}", peak(&y));
             }
         }
+    }
+
+    #[test]
+    fn the_arp_steps_through_held_notes_from_the_tempo_when_stopped() {
+        let mut s = MonoSynth::new(SR);
+        s.set_bpm(120.0);
+        s.set_param(M::ArpOn, 1.0);
+        for p in [55, 48, 52] {
+            s.note_on(p, 100, true);
+        }
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            render(&mut s, 1);
+            seen.push(s.sounding());
+            render(&mut s, 5999);
+        }
+        assert_eq!(seen, [Some(48), Some(52), Some(55)]);
+        assert_eq!(s.arp_steps(), 3);
+    }
+
+    #[test]
+    fn releasing_every_key_stops_the_arp() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ArpOn, 1.0);
+        s.note_on(48, 100, true);
+        render(&mut s, 100);
+        s.note_off(48, true);
+        assert_eq!(s.env.stage(), Stage::Release);
+        render(&mut s, 48_000);
+        assert_eq!(s.arp_steps(), 1);
+    }
+
+    #[test]
+    fn turning_the_arp_off_plays_the_newest_held_note() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ArpOn, 1.0);
+        s.note_on(48, 100, true);
+        s.note_on(60, 100, true);
+        render(&mut s, 10);
+        s.set_param(M::ArpOn, 0.0);
+        assert_eq!(s.sounding(), Some(60));
+    }
+
+    #[test]
+    fn clocked_arp_waits_for_the_grid() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ArpOn, 1.0);
+        s.clock_tick(1, 100.0);
+        s.note_on(48, 100, false);
+        render(&mut s, 250);
+        assert_eq!(s.arp_steps(), 0, "tick 1 has no 1/16 boundary");
+        s.clock_tick(4, 100.0);
+        render(&mut s, 1);
+        assert_eq!(s.arp_steps(), 1);
+        assert_eq!(s.sounding(), Some(48));
     }
 }
