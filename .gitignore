@@ -1,2 +1,4 @@
 /target
 *.wav
+/.claude/worktrees/
+/.superpowers/
