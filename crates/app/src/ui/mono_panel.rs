@@ -268,6 +268,60 @@ mod tests {
     }
 
     #[test]
+    fn drawing_and_hovering_never_edit_the_project() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let uid = app.add_machine(MachineType::Mono).expect("room for a Mono");
+        let title = app.panel_title(uid).to_uppercase();
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |app: &mut SidAcidApp, size: egui::Vec2, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            texts(&ctx.run(input, |ctx| app.ui(ctx)).shapes)
+        };
+        frame(&mut app, vec2(1280.0, 800.0), vec![]);
+        let project = app.doc.project.clone();
+        let depth = app.doc.undo_depth();
+        // Down the rack at the first size, back up at the second.
+        for (size, wheel) in [(vec2(1280.0, 800.0), -300.0), (vec2(636.0, 1044.0), 300.0)] {
+            let mut mono_seen = false;
+            for i in 0..300 {
+                let t = i as f32 / 300.0;
+                let events = if i % 20 == 19 {
+                    // Scroll the rack a little, with the pointer in the left
+                    // gutter where nothing takes the wheel.
+                    vec![
+                        egui::Event::PointerMoved(pos2(12.0, size.y * 0.6)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: vec2(0.0, wheel),
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                } else if i % 2 == 0 {
+                    vec![]
+                } else {
+                    // Sweep the pointer across the window, row by row.
+                    let x = (t * 17.0).fract() * size.x;
+                    vec![egui::Event::PointerMoved(pos2(x, t * size.y))]
+                };
+                let drawn = frame(&mut app, size, events);
+                mono_seen |= drawn
+                    .iter()
+                    .any(|(s, r)| s.starts_with(&title) && r.top() >= 0.0 && r.bottom() <= size.y);
+            }
+            assert!(mono_seen, "the Mono panel was never on screen at {size:?}");
+        }
+        assert_eq!(app.doc.undo_depth(), depth, "no undo step without a click");
+        assert!(app.doc.project == project, "the project changed without a click");
+    }
+
+    #[test]
     fn the_panel_draws_its_sections_and_the_patch_list() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.add_machine(MachineType::Mono);
