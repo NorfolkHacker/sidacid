@@ -87,19 +87,22 @@ with per-sample smoothing on cutoff and level so knob moves don't zipper.
   - The held notes, sorted by pitch and expanded over Range octaves, form the sequence.
   - **Up** goes low to high; **Down** goes high to low.
   - **U&D** goes up and then down, without repeating the top and bottom notes.
-  - Each step is a fresh note, so the envelope retriggers and portamento applies as set.
+  - Each step is a fresh note, gated for half a step. The envelope retriggers; portamento On glides between steps, while Auto doesn't (the gate has closed).
   - A single held note repeats at the arp rate.
   - When the held set changes, the arp keeps its position in the new sequence (clamped to its length) rather than restarting.
 - **Notes off:** `all_off`, `pattern_off` and `reset` behave as the FM's do: no stuck notes on stop, pattern switch or mute.
 
 ### Arp clock
 
-- **Where it runs:** inside the machine, clocked in samples from the tempo. The sequencer's 4-ticks-per-step grid can't place triplets.
-- **Rates:** 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32.
-- **Tempo:** the slot already receives `set_bpm`.
-- **Song position:** the engine also calls `slot.sync_position(steps: f64)` when the transport starts or locates. The arp sets its phase from that, so arp steps land on the song grid.
-- **Stopped transport:** live audition still arpeggiates, free-running from the moment of the first held note.
-- **Swing:** the song's swing delays every odd 1/16 position, the same as note tracks. It applies only at the 1/16 rate; the other rates are straight.
+- **Where it runs:** inside the machine, timed in samples. The sequencer's 4-ticks-per-step grid can't place triplets on its own.
+- **Rates:** 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32. Each is a whole number of thirds of a tick (48, 24, 16, 12, 8, 6), so step boundaries are found with integer maths.
+- **Transport running:**
+  - Before each sequencer tick, the engine reads the tick's index and length in samples, as `Sequencer::tick_clock() -> (u64, f64)`. After the tick it calls `MonoSynth::clock_tick(tick, tick_len)`.
+  - If an arp step boundary falls inside that tick, the machine schedules it at the exact sample offset.
+  - Because ticks carry the swung length, the arp follows the song's swing grid at every rate, and it is always in phase with the song position.
+  - While the transport runs, arp notes start only on step boundaries, as on hardware clocked externally.
+- **Transport stopped:** live audition still arpeggiates. The first note plays at once, then the arp free-runs from the tempo (`set_bpm`).
+- **Arp note length:** half an arp step, so every step re-opens the gate and retriggers the envelope.
 
 ### Machine integration
 
@@ -181,7 +184,7 @@ closed, so the rack stays usable at 1280×800.
   - Gate vs Gate+Trig retriggering.
   - Drift 0 is bit-identical across two runs; Drift 1 differs.
   - The step order of each arp mode, including the U&D no-repeat ends and Range 2/3.
-  - Arp steps land on the tempo grid at 1/16 and 1/16T after `sync_position`.
+  - Arp steps land on the tempo grid at 1/16 and 1/16T from `clock_tick`, and an engine test counts 16 arp steps in one bar at 1/16.
   - The arp follows a chord change without restarting.
   - No stuck notes after `pattern_off`.
   - Output stays finite for every param at both extremes.
