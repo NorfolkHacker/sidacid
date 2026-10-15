@@ -2531,4 +2531,55 @@ mod tests {
         };
         assert_eq!(mono.arp_steps(), 16);
     }
+
+    #[test]
+    fn a_mono_arp_restarts_on_the_next_song_bar_after_a_short_one() {
+        use crate::params::{MachineParam, MonoParam};
+        use crate::project::{Bar, MachineBody, Note, PatternRef};
+        let mut p = Project::default();
+        p.bpm = 120.0;
+        let mut m = p.new_machine(MachineType::Mono);
+        m.params.insert(MachineParam::Mono(MonoParam::ArpOn), 1.0);
+        // 1/4: a step every 4 sixteenths.
+        m.params.insert(MachineParam::Mono(MonoParam::ArpRate), 0.0);
+        if let MachineBody::Mono(mono) = &mut m.body {
+            for (slot, length) in [(0, 6u8), (1, 16)] {
+                let pat = &mut mono.patterns[slot];
+                pat.length = length;
+                pat.notes = vec![Note { start: 0, len: length as u16 * 4, pitch: 48, vel: 100 }];
+            }
+        }
+        let uid = m.uid;
+        p.machines.push(m);
+        // A 6-step bar, then a 16-step one.
+        p.song.bars = [0, 1]
+            .map(|slot| {
+                let mut bar = Bar::default();
+                bar.cell_mut(uid).pattern = Some(PatternRef(slot));
+                bar
+            })
+            .to_vec();
+        let mut eng = Engine::from_project(SR, &p);
+        eng.set_mode(crate::sequencer::Mode::Song);
+        eng.play();
+        let pos = eng.position(uid).unwrap();
+        let steps = |eng: &Engine| match &eng.slots[pos].dsp {
+            MachineDsp::Mono(m) => m.arp_steps(),
+            _ => panic!("not a Mono slot"),
+        };
+        let (mut l, mut r) = ([0.0; 1], [0.0; 1]);
+        let mut third = None;
+        for n in 0..SR as usize * 2 {
+            eng.process(&mut l, &mut r);
+            if steps(&eng) == 3 {
+                third = Some(n);
+                break;
+            }
+        }
+        // Steps on beats 1 and 2 of the 6-step bar, then the second bar's
+        // downbeat: 6 sixteenths in at 120 BPM, not a beat later.
+        let bar_two = (6.0 * SR as f64 / 8.0) as usize;
+        let third = third.expect("a third arp step");
+        assert!((bar_two..=bar_two + 2).contains(&third), "third step at {third}, bar two at {bar_two}");
+    }
 }

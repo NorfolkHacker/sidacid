@@ -100,6 +100,7 @@ with per-sample smoothing on cutoff and level so knob moves don't zipper.
   - Before each sequencer tick, the engine reads the tick's index and length in samples, as `Sequencer::tick_clock() -> (u64, f64)`. After the tick it calls `MonoSynth::clock_tick(tick, tick_len)`.
   - If an arp step boundary falls inside that tick, the machine schedules it at the exact sample offset.
   - Because ticks carry the swung length, the arp follows the song's swing grid at every rate, and it is always in phase with the song position.
+  - In Song mode the tick is counted from the current bar's start, so the arp's grid restarts on every bar, even after a bar shorter than 16 steps. In Pattern mode it is counted from Play.
   - While the transport runs, arp notes start only on step boundaries, as on hardware clocked externally.
 - **Transport stopped:** live audition still arpeggiates. The first note plays at once, then the arp free-runs from the tempo (`set_bpm`).
 - **Arp note length:** half an arp step, so every step re-opens the gate and retriggers the envelope.

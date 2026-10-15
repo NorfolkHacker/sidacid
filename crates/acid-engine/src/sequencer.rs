@@ -514,13 +514,26 @@ impl Sequencer {
         self.samples_to_next.max(0.0).ceil() as usize
     }
 
-    /// The tick about to run (its number since play, at 4 per step) and its
-    /// length in samples, swing included. The Mono arp clocks from these.
+    /// The tick about to run, at 4 per step (counted from the current song
+    /// bar's start in Song mode, from Play in Pattern mode), and its length
+    /// in samples, swing included. The Mono arp clocks from these.
     pub fn tick_clock(&self) -> (u64, f64) {
-        (
-            self.global_step * SUBS as u64 + self.sub as u64,
-            self.step_len(self.global_step) * 0.25,
-        )
+        let sub = self.sub as u64;
+        let tick = if self.mode == Mode::Song {
+            // Counted from the bar's start, so the arp's grid restarts on
+            // every bar however long the last one was. The step counters
+            // advance on quarter 2, so quarter 3 is one tick before them
+            // (and before the wrap, on a bar's last step).
+            let bar_step = self.bar_step as u64;
+            match (sub, bar_step) {
+                (3, 0) => self.bar_len as u64 * SUBS as u64 - 1,
+                (3, _) => bar_step * SUBS as u64 - 1,
+                _ => bar_step * SUBS as u64 + sub,
+            }
+        } else {
+            self.global_step * SUBS as u64 + sub
+        };
+        (tick, self.step_len(self.global_step) * 0.25)
     }
 
     pub fn advance(&mut self, n: usize) {
@@ -1333,6 +1346,36 @@ mod tests {
             2,
             "8-step synth pattern plays twice in the 16-step bar"
         );
+    }
+
+    #[test]
+    fn the_tick_clock_restarts_at_every_song_bar() {
+        let mut f = Fixture::new();
+        f.synths[0][0].length = 6;
+        f.synths[0][1].length = 16;
+        f.song.bars = vec![
+            song_bar([Some(0), None, None, None]),
+            song_bar([Some(1), None, None, None]),
+        ];
+        let uids: Vec<_> = standard_rack().iter().map(|m| m.0).collect();
+        let song = CompiledSong::compile(&f.song, &uids);
+        let mut s = song_seq();
+        s.play();
+        let mut ticks = Vec::new();
+        let mut buf = Vec::with_capacity(64);
+        while s.is_playing() {
+            if s.samples_to_next_tick() == 0 {
+                ticks.push(s.tick_clock().0);
+                buf.clear();
+                s.tick(f.banks(), &song, &mut buf);
+            } else {
+                s.advance(s.samples_to_next_tick());
+            }
+        }
+        let bar = |steps: u64| (0..steps * SUBS as u64).collect::<Vec<_>>();
+        let expected: Vec<u64> = [bar(6), bar(16)].concat();
+        // The song-ending tick (the third bar's start) is clocked too.
+        assert_eq!(ticks[..expected.len()], expected[..]);
     }
 
     #[test]
