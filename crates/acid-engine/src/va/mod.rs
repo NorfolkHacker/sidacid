@@ -7,3 +7,7 @@ pub mod ladder;
 pub mod lfo;
 pub mod osc;
 pub mod patch;
+
+mod synth;
+
+pub use synth::MonoSynth;
