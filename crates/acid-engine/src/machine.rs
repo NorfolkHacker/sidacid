@@ -20,15 +20,17 @@ pub enum MachineType {
     Kit909,
     Fm,
     Sampler,
+    Mono,
 }
 
 impl MachineType {
-    pub const ALL: [MachineType; 5] = [
+    pub const ALL: [MachineType; 6] = [
         MachineType::Synth,
         MachineType::Kit808,
         MachineType::Kit909,
         MachineType::Fm,
         MachineType::Sampler,
+        MachineType::Mono,
     ];
 
     /// Menu label.
@@ -39,6 +41,7 @@ impl MachineType {
             MachineType::Kit909 => "909 Kit",
             MachineType::Fm => "FM",
             MachineType::Sampler => "Sampler",
+            MachineType::Mono => "Mono",
         }
     }
 
@@ -50,12 +53,13 @@ impl MachineType {
             MachineType::Kit909 => "909",
             MachineType::Fm => "FM",
             MachineType::Sampler => "Sampler",
+            MachineType::Mono => "Mono",
         }
     }
 
     /// Whether the song transpose applies to this type.
     pub fn transposes(self) -> bool {
-        matches!(self, MachineType::Synth | MachineType::Fm)
+        matches!(self, MachineType::Synth | MachineType::Fm | MachineType::Mono)
     }
 }
 
@@ -132,8 +136,8 @@ mod tests {
     }
 
     #[test]
-    fn only_synths_and_fm_transpose() {
+    fn only_synths_fm_and_mono_transpose() {
         let t: Vec<_> = MachineType::ALL.iter().map(|t| t.transposes()).collect();
-        assert_eq!(t, [true, false, false, true, false]);
+        assert_eq!(t, [true, false, false, true, false, true]);
     }
 }

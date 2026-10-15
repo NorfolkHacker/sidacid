@@ -351,6 +351,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mono_machine_can_be_added_and_drawn() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert!(app.add_machine(MachineType::Mono).is_some());
+        let m = app
+            .doc
+            .project
+            .machines
+            .iter()
+            .find(|m| m.machine_type() == MachineType::Mono)
+            .unwrap();
+        assert_eq!(m.name, "Mono");
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx));
+    }
+
+    #[test]
     fn a_full_rack_refuses_add_and_duplicate() {
         let mut app = demo();
         while app.doc.project.machines.len() < MAX_MACHINES {
@@ -410,7 +426,7 @@ mod tests {
     #[test]
     fn the_add_menu_lists_every_type_in_order() {
         let labels: Vec<&str> = MachineType::ALL.iter().map(|t| t.label()).collect();
-        assert_eq!(labels, ["303 Synth", "808 Kit", "909 Kit", "FM", "Sampler"]);
+        assert_eq!(labels, ["303 Synth", "808 Kit", "909 Kit", "FM", "Sampler", "Mono"]);
     }
 
     /// The panel's open state lives where its `CollapsingHeader` kept it.

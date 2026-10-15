@@ -514,6 +514,15 @@ impl Sequencer {
         self.samples_to_next.max(0.0).ceil() as usize
     }
 
+    /// The tick about to run (its number since play, at 4 per step) and its
+    /// length in samples, swing included. The Mono arp clocks from these.
+    pub fn tick_clock(&self) -> (u64, f64) {
+        (
+            self.global_step * SUBS as u64 + self.sub as u64,
+            self.step_len(self.global_step) * 0.25,
+        )
+    }
+
     pub fn advance(&mut self, n: usize) {
         if self.playing {
             self.samples_to_next -= n as f64;

@@ -242,8 +242,10 @@ impl Engine {
         for i in 0..swap.order.len() {
             let slot = match swap.fresh[i].take() {
                 Some(mut s) => {
-                    if let MachineDsp::Sampler(x) = &mut s.dsp {
-                        x.set_bpm(bpm);
+                    match &mut s.dsp {
+                        MachineDsp::Sampler(x) => x.set_bpm(bpm),
+                        MachineDsp::Mono(m) => m.set_bpm(bpm),
+                        _ => {}
                     }
                     s
                 }
@@ -402,6 +404,11 @@ impl Engine {
         for s in self.samplers() {
             s.set_bpm(bpm);
         }
+        for s in &mut self.slots {
+            if let MachineDsp::Mono(m) = &mut s.dsp {
+                m.set_bpm(bpm);
+            }
+        }
     }
 
     /// Exchanges a slot's audio on Sampler machine `uid` (real-time safe;
@@ -434,6 +441,7 @@ impl Engine {
             match &mut s.dsp {
                 MachineDsp::Fm(f) => f.pattern_off(),
                 MachineDsp::Sampler(x) => x.pattern_off(),
+                MachineDsp::Mono(m) => m.pattern_off(),
                 _ => {}
             }
         }
@@ -471,6 +479,7 @@ impl Engine {
         match self.slots.get_mut(machine).map(|s| &mut s.dsp) {
             Some(MachineDsp::Fm(f)) => f.note_on(pitch, vel.min(127), live),
             Some(MachineDsp::Sampler(s)) => s.note_on(pitch, vel.min(127), live),
+            Some(MachineDsp::Mono(m)) => m.note_on(pitch, vel.min(127), live),
             _ => {}
         }
     }
@@ -479,13 +488,14 @@ impl Engine {
         match self.slots.get_mut(machine).map(|s| &mut s.dsp) {
             Some(MachineDsp::Fm(f)) => f.note_off(pitch, live),
             Some(MachineDsp::Sampler(s)) => s.note_off(pitch, live),
+            Some(MachineDsp::Mono(m)) => m.note_off(pitch, live),
             _ => {}
         }
     }
 
     /// Stops the transport and releases the pattern's notes (tails ring
     /// out; auditioned notes keep sounding). Stopping while already stopped
-    /// also silences the FM and Sampler machines at once, auditions
+    /// also silences the FM, Mono and Sampler machines at once, auditions
     /// included, so drones and loops can be cut. The first stop after a
     /// song ends by itself still only releases: the song end is not a stop.
     pub fn stop(&mut self) {
@@ -493,7 +503,10 @@ impl Engine {
         self.ended_by_song = false;
         if cut {
             for s in &mut self.slots {
-                if matches!(s.dsp, MachineDsp::Fm(_) | MachineDsp::Sampler(_)) {
+                if matches!(
+                    s.dsp,
+                    MachineDsp::Fm(_) | MachineDsp::Sampler(_) | MachineDsp::Mono(_)
+                ) {
                     s.reset();
                 }
             }
@@ -508,6 +521,11 @@ impl Engine {
         for s in &mut self.slots {
             if let MachineDsp::Synth(x) = &mut s.dsp {
                 x.note_off();
+            }
+        }
+        for s in &mut self.slots {
+            if let MachineDsp::Mono(m) = &mut s.dsp {
+                m.stop_transport();
             }
         }
         self.note_machines_pattern_off();
@@ -761,12 +779,19 @@ impl Engine {
             let until = self.seq.samples_to_next_tick();
             if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
                 ticks_here += 1;
+                let (tick, tick_len) = self.seq.tick_clock();
                 self.events.clear();
                 self.seq
                     .tick(Banks::of_slots(&self.slots), &self.song, &mut self.events);
                 for i in 0..self.events.len() {
                     let ev = self.events[i];
                     self.handle_event(ev);
+                }
+                // After this tick's notes, so a note on a step boundary sounds on it.
+                for s in &mut self.slots {
+                    if let MachineDsp::Mono(m) = &mut s.dsp {
+                        m.clock_tick(tick, tick_len);
+                    }
                 }
                 if self.seq.take_ended() {
                     self.end_playback();
@@ -965,7 +990,8 @@ mod tests {
                     }
                 }
                 MachineBody::Fm(crate::project::FmMachine { patterns, .. })
-                | MachineBody::Sampler(crate::project::SamplerMachine { patterns, .. }) => {
+                | MachineBody::Sampler(crate::project::SamplerMachine { patterns, .. })
+                | MachineBody::Mono(crate::project::MonoMachine { patterns, .. }) => {
                     let pat = &mut patterns[0];
                     pat.length = 1;
                     pat.notes = (0..MAX_NOTES)
@@ -2473,5 +2499,36 @@ mod tests {
         );
         render(&mut e, 1.0);
         assert_eq!(e.fm().active_voices() + e.sampler().active_voices(), 0);
+    }
+
+    #[test]
+    fn a_mono_arp_plays_sixteen_sixteenths_in_a_bar() {
+        use crate::params::{MachineParam, MonoParam};
+        use crate::project::{MachineBody, Note};
+        let mut p = Project::default();
+        p.bpm = 120.0;
+        let mut m = p.new_machine(MachineType::Mono);
+        m.params.insert(MachineParam::Mono(MonoParam::ArpOn), 1.0);
+        if let MachineBody::Mono(mono) = &mut m.body {
+            let pat = &mut mono.patterns[0];
+            pat.length = 16;
+            pat.notes = [48, 52, 55]
+                .map(|pitch| Note { start: 0, len: 64, pitch, vel: 100 })
+                .to_vec();
+        }
+        let uid = m.uid;
+        p.machines.push(m);
+        let mut eng = Engine::from_project(SR, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        // 120 BPM: one bar is 2 s, a 1/16 is SR / 8 samples.
+        for _ in 0..(SR as usize * 2) / 64 {
+            eng.process(&mut l, &mut r);
+        }
+        let pos = eng.position(uid).unwrap();
+        let MachineDsp::Mono(mono) = &eng.slots[pos].dsp else {
+            panic!("not a Mono slot")
+        };
+        assert_eq!(mono.arp_steps(), 16);
     }
 }

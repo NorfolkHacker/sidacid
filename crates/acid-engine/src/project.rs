@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub use crate::rack_edit::RemovedMachine;
 
-pub const PROJECT_VERSION: u32 = 3;
+pub const PROJECT_VERSION: u32 = 4;
 pub const STEPS: usize = 64;
 
 /// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
@@ -186,6 +186,27 @@ impl Default for FmMachine {
             patterns: vec![NotePattern::default(); PATTERNS],
             voice_name: init_voice_name(),
             bank: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MonoMachine {
+    pub patterns: Vec<NotePattern>,
+    /// Name of the patch the Mono params were last loaded from.
+    #[serde(default = "init_patch_name")]
+    pub patch_name: String,
+}
+
+fn init_patch_name() -> String {
+    "Init".into()
+}
+
+impl Default for MonoMachine {
+    fn default() -> Self {
+        Self {
+            patterns: vec![NotePattern::default(); PATTERNS],
+            patch_name: init_patch_name(),
         }
     }
 }
@@ -397,6 +418,7 @@ pub enum MachineBody {
     Kit(DrumMachine),
     Fm(FmMachine),
     Sampler(SamplerMachine),
+    Mono(MonoMachine),
 }
 
 impl MachineBody {
@@ -408,6 +430,7 @@ impl MachineBody {
             MachineType::Kit909 => MachineBody::Kit(DrumMachine::new(KitKind::K909)),
             MachineType::Fm => MachineBody::Fm(FmMachine::default()),
             MachineType::Sampler => MachineBody::Sampler(SamplerMachine::default()),
+            MachineType::Mono => MachineBody::Mono(MonoMachine::default()),
         }
     }
 
@@ -420,6 +443,7 @@ impl MachineBody {
             },
             MachineBody::Fm(_) => MachineType::Fm,
             MachineBody::Sampler(_) => MachineType::Sampler,
+            MachineBody::Mono(_) => MachineType::Mono,
         }
     }
 }
@@ -575,11 +599,13 @@ impl Project {
     body_accessors!(kit, kit_mut, Kit, DrumMachine);
     body_accessors!(fm, fm_mut, Fm, FmMachine);
     body_accessors!(sampler, sampler_mut, Sampler, SamplerMachine);
+    body_accessors!(mono, mono_mut, Mono, MonoMachine);
 
-    /// Note patterns of an FM or Sampler machine.
+    /// Note patterns of an FM, Mono or Sampler machine.
     pub fn note_patterns(&self, uid: MachineUid) -> Option<&Vec<NotePattern>> {
         match &self.machine(uid)?.body {
             MachineBody::Fm(m) => Some(&m.patterns),
+            MachineBody::Mono(m) => Some(&m.patterns),
             MachineBody::Sampler(m) => Some(&m.patterns),
             _ => None,
         }
@@ -588,6 +614,7 @@ impl Project {
     pub fn note_patterns_mut(&mut self, uid: MachineUid) -> Option<&mut Vec<NotePattern>> {
         match &mut self.machine_mut(uid)?.body {
             MachineBody::Fm(m) => Some(&mut m.patterns),
+            MachineBody::Mono(m) => Some(&mut m.patterns),
             MachineBody::Sampler(m) => Some(&mut m.patterns),
             _ => None,
         }
@@ -710,6 +737,7 @@ impl Project {
             MachineBody::Kit(k) => k.patterns.len(),
             MachineBody::Fm(f) => f.patterns.len(),
             MachineBody::Sampler(s) => s.patterns.len(),
+            MachineBody::Mono(m) => m.patterns.len(),
         };
         if count != PATTERNS {
             return bad(format!("{count} patterns"));
@@ -763,6 +791,11 @@ impl Project {
                     }
                 }
             }
+            MachineBody::Mono(m) => {
+                if let Some(j) = m.patterns.iter().position(|p| !p.is_well_formed()) {
+                    return bad(format!("pattern {}", label(j)));
+                }
+            }
         }
         Ok(())
     }
@@ -785,7 +818,12 @@ impl Project {
             2 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
                 .map_err(parse)?
                 .upgrade(),
-            PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
+            // v4 only added the Mono machine: a v3 file reads as it is.
+            3 | PROJECT_VERSION => {
+                let mut p = with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?;
+                p.version = PROJECT_VERSION;
+                p
+            }
             v => return Err(ProjectError::TooNew(v)),
         };
         p.validate()?;
@@ -1587,5 +1625,25 @@ mod tests {
         assert_eq!(p.fm(FM).unwrap().patterns.len(), PATTERNS);
         assert!(sampler(&p).patterns.iter().all(|n| n.notes.is_empty()));
         assert_eq!(p.kit(MachineUid(4)).unwrap().kind, KitKind::K909);
+    }
+
+    #[test]
+    fn a_project_with_a_mono_machine_round_trips() {
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::Mono);
+        let uid = m.uid;
+        p.machines.push(m);
+        p.mono_mut(uid).unwrap().patch_name = "Squelch".into();
+        p.validate().unwrap();
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.mono(uid).unwrap().patterns.len(), PATTERNS);
+    }
+
+    #[test]
+    fn version_3_files_still_load() {
+        let text = Project::default().to_ron().replace("version: 4", "version: 3");
+        let p = Project::from_ron(&text).unwrap();
+        assert_eq!(p.version, PROJECT_VERSION);
     }
 }

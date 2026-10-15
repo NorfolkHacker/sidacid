@@ -438,12 +438,13 @@ impl SidAcidApp {
             MachineBody::Kit(k) => Clip::Drum(k.patterns[slot].clone()),
             MachineBody::Fm(f) => Clip::Notes(f.patterns[slot].clone()),
             MachineBody::Sampler(s) => Clip::Notes(s.patterns[slot].clone()),
+            MachineBody::Mono(m) => Clip::Notes(m.patterns[slot].clone()),
         });
     }
 
     /// Pastes onto the focused machine's selected pattern: synth onto
-    /// synth, drums onto any kit (808 and 909 alike), notes onto FM or
-    /// Sampler.
+    /// synth, drums onto any kit (808 and 909 alike), notes onto FM, Mono
+    /// or Sampler.
     pub(crate) fn paste_pattern(&mut self) {
         let Some(entry) = self.focused().and_then(|uid| self.doc.project.machine(uid)) else {
             return;
@@ -469,13 +470,14 @@ impl SidAcidApp {
                 slot,
                 pattern: Box::new(p.clone()),
             },
-            (Some(Clip::Notes(p)), MachineBody::Fm(_) | MachineBody::Sampler(_)) => {
-                Edit::NotePattern {
-                    uid,
-                    slot,
-                    pattern: Box::new(p.clone()),
-                }
-            }
+            (
+                Some(Clip::Notes(p)),
+                MachineBody::Fm(_) | MachineBody::Mono(_) | MachineBody::Sampler(_),
+            ) => Edit::NotePattern {
+                uid,
+                slot,
+                pattern: Box::new(p.clone()),
+            },
             _ => {
                 self.view.message = Some("The clipboard holds a different kind of pattern.".into());
                 return;

@@ -129,6 +129,7 @@ pub fn param_label(project: &acid_engine::project::Project, id: ParamId) -> Stri
         MachineParam::Kit(p) => format!("{machine} {}", p.name()),
         MachineParam::Channel(p) => format!("{machine} {}", p.name()),
         MachineParam::Fm(p) => format!("{machine} {}", p.name()),
+        MachineParam::Mono(p) => format!("{machine} {}", p.name()),
         MachineParam::Sampler(p) => format!("{machine} {}", p.name()),
         MachineParam::FmOp(op, p) => format!("{machine} OP{} {}", op + 1, p.name()),
         MachineParam::SamplerSlot(s, p) => format!("{machine} Slot {} {}", s + 1, p.name()),

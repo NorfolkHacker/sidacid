@@ -14,6 +14,7 @@ use crate::project::{
 use crate::sampler::slot::SlotPlay;
 use crate::sampler::{SLOTS, Sampler};
 use crate::synth::BassSynth;
+use crate::va::MonoSynth;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ pub enum MachineDsp {
     Synth(BassSynth),
     Kit(DrumKit),
     Fm(Box<FmSynth>),
+    Mono(Box<MonoSynth>),
     Sampler(Box<Sampler>),
 }
 
@@ -73,6 +75,10 @@ impl Slot {
             ),
             MachineBody::Sampler(m) => (
                 MachineDsp::Sampler(Box::new(Sampler::new(sample_rate))),
+                SlotPatterns::Notes(m.patterns.clone()),
+            ),
+            MachineBody::Mono(m) => (
+                MachineDsp::Mono(Box::new(MonoSynth::new(sample_rate))),
                 SlotPatterns::Notes(m.patterns.clone()),
             ),
         };
@@ -135,6 +141,7 @@ impl Slot {
             (MachineParam::SamplerSlot(i, p), MachineDsp::Sampler(s)) => {
                 s.set_slot_param(i as usize, p, v)
             }
+            (MachineParam::Mono(p), MachineDsp::Mono(m)) => m.set_param(p, v),
             _ => {}
         }
     }
@@ -147,6 +154,7 @@ impl Slot {
             MachineDsp::Kit(k) => k.render(l, r),
             MachineDsp::Fm(f) => f.render(l, r),
             MachineDsp::Sampler(s) => s.render(l, r),
+            MachineDsp::Mono(m) => m.render(l, r),
         }
     }
 
@@ -157,6 +165,7 @@ impl Slot {
             MachineDsp::Kit(k) => k.reset(),
             MachineDsp::Fm(f) => f.reset(),
             MachineDsp::Sampler(s) => s.reset(),
+            MachineDsp::Mono(m) => m.reset(),
         }
     }
 }

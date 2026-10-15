@@ -93,6 +93,7 @@ impl<'a> Banks<'a> {
                 MachineBody::Kit(x) => Bank::Drum(&x.patterns),
                 MachineBody::Fm(x) => Bank::Notes(&x.patterns),
                 MachineBody::Sampler(x) => Bank::Notes(&x.patterns),
+                MachineBody::Mono(x) => Bank::Notes(&x.patterns),
             });
             b.machines[i] = Some((m.uid, m.machine_type()));
         }

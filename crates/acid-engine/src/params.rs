@@ -173,6 +173,7 @@ pub enum MachineParam {
     FmOp(u8, OpParam),
     Sampler(SamplerParam),
     SamplerSlot(u8, SlotParam),
+    Mono(MonoParam),
 }
 
 /// A control shared by the whole rack: send effects and master bus.
@@ -319,6 +320,7 @@ impl MachineParam {
                     S::Reverse | S::Choke | S::TempoLock => disc(n, 0.0, 2),
                 }
             }
+            MachineParam::Mono(p) => p.info(),
         }
     }
 
@@ -336,6 +338,7 @@ impl MachineParam {
             MachineParam::SamplerSlot(s, _) => {
                 ty == MachineType::Sampler && (s as usize) < SAMPLER_SLOTS
             }
+            MachineParam::Mono(_) => ty == MachineType::Mono,
         }
     }
 
@@ -359,6 +362,7 @@ impl MachineParam {
             MachineParam::SamplerSlot(s, p) => {
                 base + SamplerParam::ALL.len() + s as usize * SlotParam::ALL.len() + p as usize
             }
+            MachineParam::Mono(p) => base + p as usize,
         })
     }
 
@@ -393,6 +397,7 @@ impl MachineParam {
                     );
                 }
             }
+            MachineType::Mono => v.extend(MonoParam::ALL.iter().map(|&p| MachineParam::Mono(p))),
         }
         v
     }
@@ -408,6 +413,7 @@ impl MachineParam {
                 MachineType::Sampler => {
                     SamplerParam::ALL.len() + SAMPLER_SLOTS * SlotParam::ALL.len()
                 }
+                MachineType::Mono => MonoParam::ALL.len(),
             }
     }
 }
@@ -519,6 +525,7 @@ machine_param_from!(
     ChannelParam => Channel,
     FmParam => Fm,
     SamplerParam => Sampler,
+    MonoParam => Mono,
 );
 
 pub fn lin(v: f32, lo: f32, hi: f32) -> f32 {
@@ -791,5 +798,20 @@ mod tests {
         assert_eq!(step_index(7.0, 3), 2);
         assert!(on(0.5) && !on(0.49));
         assert!((db_to_gain(-6.0) - 0.501).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mono_params_fit_only_mono_machines() {
+        use crate::machine::MachineType as T;
+        let p = MachineParam::Mono(MonoParam::Cutoff);
+        assert!(p.fits(T::Mono));
+        assert!(!p.fits(T::Fm));
+        assert!(!MachineParam::Fm(FmParam::Volume).fits(T::Mono));
+        let all = MachineParam::all_for(T::Mono);
+        assert_eq!(all.len(), MachineParam::count_for(T::Mono));
+        for (i, q) in all.iter().enumerate() {
+            assert_eq!(q.index_for(T::Mono), Some(i), "{q:?}");
+        }
+        assert_eq!(p.info(), MonoParam::Cutoff.info());
     }
 }

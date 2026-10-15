@@ -11,6 +11,7 @@ mod fm_voices;
 mod keys;
 pub mod knob;
 mod mixer_panel;
+mod mono_panel;
 mod note_panel;
 mod pads;
 mod params_ui;
@@ -550,6 +551,7 @@ impl SidAcidApp {
                 MachineType::Kit808 | MachineType::Kit909 => self.drum_panel(ui, uid),
                 MachineType::Fm => self.fm_panel(ui, uid),
                 MachineType::Sampler => self.sampler_panel(ui, uid),
+                MachineType::Mono => self.mono_panel(ui, uid),
             }
             ui.add_space(6.0);
         }
