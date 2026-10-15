@@ -4,6 +4,7 @@
 
 use std::f32::consts::PI;
 
+/// The Mono synth's filter: one channel of the four-stage ladder.
 pub struct Ladder {
     s: [f32; 4],
     g: f32,
@@ -14,6 +15,7 @@ pub struct Ladder {
 }
 
 impl Ladder {
+    /// A silent filter at 1 kHz with no resonance.
     pub fn new(sample_rate: f32) -> Self {
         let mut l = Self {
             s: [0.0; 4],
@@ -26,6 +28,7 @@ impl Ladder {
         l
     }
 
+    /// Clears the stage states (the settings stay).
     pub fn reset(&mut self) {
         self.s = [0.0; 4];
     }
@@ -38,6 +41,7 @@ impl Ladder {
         self.k = k.clamp(0.0, 4.2);
     }
 
+    /// Filters one sample.
     pub fn process(&mut self, x: f32) -> f32 {
         let gg = self.big_g;
         let b = 1.0 / (1.0 + self.g);

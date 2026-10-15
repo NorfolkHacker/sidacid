@@ -1,6 +1,7 @@
 //! The Mono machine's voice: one VCO + sub + noise through the ladder
 //! and VCA, with last-note priority over a stack of held notes, the
-//! 101-style trigger and portamento modes, drift and a chorus.
+//! envelope trigger modes (every note, after a gap, or each LFO cycle),
+//! the portamento modes, drift and a chorus.
 
 use super::adsr::Adsr;
 use super::arp::{Arp, ArpEvent};

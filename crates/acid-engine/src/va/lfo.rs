@@ -5,6 +5,7 @@
 pub struct Noise(u32);
 
 impl Noise {
+    /// A source seeded with `seed` (0 is taken as 1).
     pub fn new(seed: u32) -> Self {
         Self(seed.max(1))
     }
@@ -30,6 +31,7 @@ pub enum LfoWave {
     Noise,
 }
 
+/// The free-running LFO; one per synth, shared by every destination.
 pub struct Lfo {
     phase: f32,
     held: f32,
@@ -38,6 +40,7 @@ pub struct Lfo {
 }
 
 impl Lfo {
+    /// An LFO at the start of its cycle.
     pub fn new(sample_rate: f32) -> Self {
         Self {
             phase: 0.0,
@@ -47,6 +50,7 @@ impl Lfo {
         }
     }
 
+    /// Back to the start of the cycle, the held value at 0.
     pub fn reset(&mut self) {
         self.phase = 0.0;
         self.held = 0.0;

@@ -5,14 +5,18 @@ use super::lfo::LfoWave;
 use super::osc::SubWave;
 use crate::params::{MonoParam, exp, mono_steps, on, step_index};
 
+/// What moves the pulse width, in `MonoParam::PwmSource` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PwmSource {
+    /// The PW knob alone.
     Manual,
+    /// The LFO, PW setting the depth.
     Lfo,
+    /// The envelope, PW setting the depth.
     Env,
 }
 
-/// What restarts the envelope.
+/// What restarts the envelope, in `MonoParam::Trigger` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {
     /// Every new note, legato or not.
@@ -23,18 +27,26 @@ pub enum Trigger {
     Lfo,
 }
 
+/// When the pitch glides to a new note, in `MonoParam::Portamento` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Porta {
+    /// Never: each note starts at its own pitch.
     Off,
+    /// Into every note after the first.
     On,
     /// Glides only between overlapping notes.
     Auto,
 }
 
+/// The order the arpeggiator plays the held notes in, in
+/// `MonoParam::ArpMode` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArpMode {
+    /// Lowest to highest, then again from the lowest.
     Up,
+    /// Up then back down, without repeating the ends.
     UpDown,
+    /// Highest to lowest.
     Down,
 }
 

@@ -5,6 +5,7 @@
 /// Decay and release cover 99% of their way in their set time.
 const LN_100: f32 = 4.605_17;
 
+/// Where the envelope is: Idle until a gate, Sustain while held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Idle,
@@ -14,6 +15,7 @@ pub enum Stage {
     Release,
 }
 
+/// A per-sample envelope: 0 at rest, up to 1 at the attack's peak.
 pub struct Adsr {
     stage: Stage,
     level: f32,
@@ -25,6 +27,7 @@ pub struct Adsr {
 }
 
 impl Adsr {
+    /// An idle envelope with short default times.
     pub fn new(sample_rate: f32) -> Self {
         let mut e = Self {
             stage: Stage::Idle,
@@ -39,6 +42,8 @@ impl Adsr {
         e
     }
 
+    /// Times in seconds (floored at 0.1 ms); `sustain` is clamped to 0..=1.
+    /// Takes effect on the next sample, mid-stage too.
     pub fn set(&mut self, attack_s: f32, decay_s: f32, sustain: f32, release_s: f32) {
         let sr = self.sample_rate;
         self.attack_step = 1.0 / (attack_s.max(1e-4) * sr);
@@ -47,29 +52,35 @@ impl Adsr {
         self.sustain = sustain.clamp(0.0, 1.0);
     }
 
+    /// Starts the attack from the current level.
     pub fn gate_on(&mut self) {
         self.stage = Stage::Attack;
     }
 
+    /// Starts the release (unless already idle).
     pub fn gate_off(&mut self) {
         if self.stage != Stage::Idle {
             self.stage = Stage::Release;
         }
     }
 
+    /// Idle at 0 at once, with no release.
     pub fn reset(&mut self) {
         self.stage = Stage::Idle;
         self.level = 0.0;
     }
 
+    /// The current stage.
     pub fn stage(&self) -> Stage {
         self.stage
     }
 
+    /// The level `next` last returned.
     pub fn level(&self) -> f32 {
         self.level
     }
 
+    /// Advances one sample and returns the new level.
     pub fn next(&mut self) -> f32 {
         match self.stage {
             Stage::Idle => {}
