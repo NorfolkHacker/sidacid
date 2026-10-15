@@ -23,6 +23,7 @@ pub mod sampler;
 pub mod sequencer;
 pub mod song;
 pub mod synth;
+pub mod va;
 
 #[cfg(test)]
 #[allow(dead_code)]
