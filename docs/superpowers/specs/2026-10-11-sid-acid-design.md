@@ -6,8 +6,7 @@ Working name: **SidAcid** (rename freely)
 
 ## 1. Goal
 
-A standalone native desktop acid groovebox in the spirit of Propellerhead ReBirth RB-338,
-built on a C64 SID-style engine. It contains:
+A standalone native desktop acid groovebox built on a C64 SID-style engine. It contains:
 
 - 2 × SID bass synths with 303-style controls (cutoff, resonance, env mod, decay, accent, slide)
 - 2 × SID drum machines (an 808-flavoured kit and a 909-flavoured kit)
@@ -20,7 +19,7 @@ built on a C64 SID-style engine. It contains:
 
 It is **not** part of Acid OS. It shares no runtime, files or dependencies with it.
 
-Inspirations: ReBirth RB-338 (layout, banks, song automation), midiphy zetaSID (SID drum
+Inspirations: midiphy zetaSID (SID drum
 programs, per-step parameter lane, detuned unison), raver1975/acid (groove-aware randomise,
 drum evolver, swing, bars-with-automation song model).
 

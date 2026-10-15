@@ -1,6 +1,6 @@
 # SidAcid
 
-A ReBirth-style acid groovebox built on a C64 SID-style sound engine. It runs as a native desktop app and is laid out for the Steam Deck screen.
+An acid groovebox built on a C64 SID-style sound engine. It runs as a native desktop app and is laid out for the Steam Deck screen.
 
 ![SidAcid](docs/images/screenshot.png)
 
