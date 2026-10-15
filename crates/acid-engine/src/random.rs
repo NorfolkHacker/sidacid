@@ -168,13 +168,33 @@ pub fn randomise_synth(
 /// carriers stay near the played pitch, modulators range further.
 const CARRIER_RATIOS: [u8; 5] = [0, 1, 1, 1, 2];
 const MODULATOR_RATIOS: [u8; 9] = [0, 1, 1, 2, 2, 3, 4, 5, 7];
+/// Bright voices also reach for the odd, clangy ratios.
+const BRIGHT_RATIOS: [u8; 10] = [1, 2, 3, 3, 5, 7, 9, 11, 13, 17];
+/// LFO waves that pulse rather than swell: saw down, saw up, square, S&H.
+const PULSE_WAVES: [u8; 4] = [1, 2, 3, 5];
 
-fn random_op(rng: &mut Pcg32, carrier: bool) -> Dx7Op {
-    let ratios: &[u8] = if carrier {
-        &CARRIER_RATIOS
-    } else {
-        &MODULATOR_RATIOS
+/// What a random voice is going for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Character {
+    /// A clean tone: gentle modulation, little movement.
+    Tone,
+    /// Strong modulators, odd and fractional ratios, high feedback.
+    Bright,
+    /// A sustained body gated by a fast LFO, sometimes with stepped pitch
+    /// or a slow fixed-frequency modulator wobbling the timbre.
+    Rhythmic,
+}
+
+fn random_op(rng: &mut Pcg32, carrier: bool, character: Character) -> Dx7Op {
+    use Character::*;
+    let ratios: &[u8] = match (carrier, character) {
+        (true, _) => &CARRIER_RATIOS,
+        (false, Bright) => &BRIGHT_RATIOS,
+        (false, _) => &MODULATOR_RATIOS,
     };
+    // Rhythmic carriers hold their level so the LFO has something to gate;
+    // bright modulators hold theirs so the brightness lasts.
+    let sustain = (carrier && character == Rhythmic) || (!carrier && character == Bright);
     Dx7Op {
         // A carrier attacks quickly to full level so every note is heard;
         // every envelope ends at 0 so notes stop after release.
@@ -190,8 +210,14 @@ fn random_op(rng: &mut Pcg32, carrier: bool) -> Dx7Op {
         ],
         levels: [
             if carrier { 99 } else { rng.gen_range(60..=99) },
-            rng.gen_range(if carrier { 60 } else { 0 }..=99),
-            rng.gen_range(0..=99),
+            rng.gen_range(if sustain {
+                85
+            } else if carrier {
+                60
+            } else {
+                0
+            }..=99),
+            rng.gen_range(if sustain { 80 } else { 0 }..=99),
             0,
         ],
         // No keyboard level scaling: it could silence an operator in
@@ -202,16 +228,29 @@ fn random_op(rng: &mut Pcg32, carrier: bool) -> Dx7Op {
         left_curve: 0,
         right_curve: 0,
         rate_scaling: rng.gen_range(0..=if carrier { 3 } else { 7 }),
-        amp_mod_sens: rng.gen_range(0..=if carrier { 1 } else { 3 }),
+        // Rhythmic voices gate every carrier hard and pulse some modulators.
+        amp_mod_sens: match (character, carrier) {
+            (Rhythmic, true) => 3,
+            (Rhythmic, false) => rng.gen_range(0..=3),
+            (_, true) => rng.gen_range(0..=1),
+            (_, false) => rng.gen_range(0..=3),
+        },
         vel_sens: rng.gen_range(0..=if carrier { 3 } else { 7 }),
-        level: if carrier {
-            rng.gen_range(85..=99)
-        } else {
-            rng.gen_range(0..=85)
+        // Levels are logarithmic: below about 60 a modulator is barely heard.
+        level: match (carrier, character) {
+            (true, _) => rng.gen_range(85..=99),
+            (false, Tone) => rng.gen_range(0..=85),
+            (false, Bright) => rng.gen_range(75..=97),
+            (false, Rhythmic) => rng.gen_range(65..=92),
         },
         fixed: false,
         coarse: ratios[rng.gen_range(0..ratios.len())],
-        fine: 0,
+        // Bright modulators sometimes sit off the harmonic series.
+        fine: if !carrier && character == Bright && rng.gen_bool(0.4) {
+            rng.gen_range(1..=99)
+        } else {
+            0
+        },
         detune: if carrier {
             rng.gen_range(4..=10)
         } else {
@@ -220,14 +259,46 @@ fn random_op(rng: &mut Pcg32, carrier: bool) -> Dx7Op {
     }
 }
 
+/// Turns `op` into a fixed-frequency modulator: `low` gives 1..10 Hz (a
+/// slow wobble), otherwise 100..1000 Hz (an inharmonic clang).
+fn fix_op(rng: &mut Pcg32, op: &mut Dx7Op, low: bool) {
+    op.fixed = true;
+    op.coarse = if low { 0 } else { 2 };
+    op.fine = rng.gen_range(0..=99);
+    op.level = rng.gen_range(80..=95);
+}
+
 /// A fresh FM sound for the FM panel's Randomise: a new algorithm,
-/// feedback, operators, LFO and pitch EG that always plays. `current`'s
-/// osc sync and transpose are kept.
+/// feedback, operators, LFO and pitch EG that always plays. Each voice is
+/// a plain tone, a bright one or a rhythmic one. `current`'s osc sync and
+/// transpose are kept.
 pub fn randomise_voice(current: &Dx7Voice, seed: u64) -> Dx7Voice {
+    use Character::*;
     let mut rng = Pcg32::seed_from_u64(seed);
-    let algorithm = rng.gen_range(0..ALGORITHMS.len()) as u8;
-    let carriers = ALGORITHMS[algorithm as usize].carriers;
-    let ops = std::array::from_fn(|op| random_op(&mut rng, carriers & (1 << op) != 0));
+    let character = match rng.gen_range(0..10) {
+        0..=2 => Tone,
+        3..=5 => Bright,
+        _ => Rhythmic,
+    };
+    // A bright voice needs modulators: at most three carriers.
+    let algorithm = loop {
+        let a = rng.gen_range(0..ALGORITHMS.len()) as u8;
+        if character != Bright || ALGORITHMS[a as usize].carriers.count_ones() <= 3 {
+            break a;
+        }
+    };
+    let alg = ALGORITHMS[algorithm as usize];
+    let mut ops =
+        std::array::from_fn(|op| random_op(&mut rng, alg.carriers & (1 << op) != 0, character));
+    let modulators: Vec<usize> = (0..6).filter(|&op| alg.carriers & (1 << op) == 0).collect();
+    if !modulators.is_empty() {
+        let fixed = modulators[rng.gen_range(0..modulators.len())];
+        match character {
+            Bright if rng.gen_bool(0.3) => fix_op(&mut rng, &mut ops[fixed], false),
+            Rhythmic if rng.gen_bool(0.3) => fix_op(&mut rng, &mut ops[fixed], true),
+            _ => {}
+        }
+    }
     // Mostly no pitch envelope; sometimes a short blip that settles back
     // to the played pitch (level 50 is no shift).
     let (pitch_rates, pitch_levels) = if rng.gen_bool(0.2) {
@@ -235,12 +306,16 @@ pub fn randomise_voice(current: &Dx7Voice, seed: u64) -> Dx7Voice {
     } else {
         ([99; 4], [50; 4])
     };
-    Dx7Voice {
+    let mut v = Dx7Voice {
         ops,
         pitch_rates,
         pitch_levels,
         algorithm,
-        feedback: rng.gen_range(0..=7),
+        feedback: if character == Bright {
+            rng.gen_range(4..=7)
+        } else {
+            rng.gen_range(0..=7)
+        },
         osc_sync: current.osc_sync,
         lfo_speed: rng.gen_range(0..=99),
         lfo_delay: rng.gen_range(0..=99),
@@ -251,7 +326,27 @@ pub fn randomise_voice(current: &Dx7Voice, seed: u64) -> Dx7Voice {
         pms: rng.gen_range(0..=3),
         transpose: current.transpose,
         name: "RANDOM".into(),
+    };
+    if character == Rhythmic {
+        // 2..10 Hz pulses that start with the note, restart on each key so
+        // the rhythm lands the same way every time, and gate deeply.
+        v.lfo_speed = rng.gen_range(55..=75);
+        v.lfo_delay = 0;
+        v.lfo_sync = true;
+        v.lfo_wave = PULSE_WAVES[rng.gen_range(0..PULSE_WAVES.len())];
+        v.lfo_amd = rng.gen_range(70..=99);
+        // Sometimes the LFO steps the pitch too: trills, or octave jumps
+        // on a square wave.
+        if rng.gen_bool(0.35) {
+            v.lfo_pmd = rng.gen_range(60..=99);
+            v.pms = if v.lfo_wave == 3 && rng.gen_bool(0.5) {
+                7
+            } else {
+                rng.gen_range(4..=6)
+            };
+        }
     }
+    v
 }
 
 const KICKS: [&[usize]; 4] = [&[0, 4, 8, 12], &[0, 3, 6, 10], &[0, 6, 8, 11], &[0, 7, 10]];
@@ -825,6 +920,61 @@ mod tests {
             let v = randomise_voice(&base, seed);
             assert_eq!((v.osc_sync, v.transpose), (false, 31), "seed {seed}");
         }
+    }
+
+    /// A held middle C rendered for one second.
+    fn hold_c(v: &Dx7Voice) -> Vec<f32> {
+        let mut s = crate::fm::FmSynth::new(48_000.0);
+        load_voice(&mut s, v);
+        s.note_on(60, 100, false);
+        let n = 48_000;
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        s.render(&mut l, &mut r);
+        l
+    }
+
+    /// How much the level swings from one 10 ms window to the next while
+    /// the note is held (after the attack): ~0 for a steady tone.
+    fn pulsing(x: &[f32]) -> f32 {
+        let rms: Vec<f32> = x[4_800..]
+            .chunks(480)
+            .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt())
+            .collect();
+        let mean = rms.iter().sum::<f32>() / rms.len() as f32;
+        let swing = rms.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>();
+        swing / rms.len() as f32 / mean.max(1e-9)
+    }
+
+    /// Mean frequency relative to a sine at the note: 1 for a sine,
+    /// higher for a brighter, richer tone.
+    fn brightness(x: &[f32]) -> f32 {
+        let x = &x[4_800..];
+        let energy = |y: &mut dyn Iterator<Item = f32>| y.map(|v| v * v).sum::<f32>();
+        let diff = energy(&mut x.windows(2).map(|w| w[1] - w[0]));
+        let sig = energy(&mut x.iter().copied());
+        let sine = std::f32::consts::TAU * 261.63 / 48_000.0;
+        (diff / sig.max(1e-12)).sqrt() / sine
+    }
+
+    #[test]
+    fn random_voices_are_a_mix_of_plain_bright_and_rhythmic() {
+        let (mut plain, mut bright, mut rhythmic) = (0, 0, 0);
+        let seeds = 100;
+        for seed in 0..seeds {
+            let x = hold_c(&randomise_voice(&Dx7Voice::init(), seed));
+            let (p, b) = (pulsing(&x), brightness(&x));
+            if p > 0.1 {
+                rhythmic += 1;
+            } else if b > 4.0 {
+                bright += 1;
+            } else if b < 2.0 {
+                plain += 1;
+            }
+        }
+        eprintln!("plain {plain} bright {bright} rhythmic {rhythmic}");
+        assert!(rhythmic >= 30, "{rhythmic} rhythmic of {seeds}");
+        assert!(bright >= 15, "{bright} bright of {seeds}");
+        assert!(plain >= 10, "{plain} plain of {seeds}");
     }
 
     #[test]
