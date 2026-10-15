@@ -99,8 +99,14 @@ impl MonoSynth {
 
     pub fn set_param(&mut self, p: MonoParam, v: f32) {
         let was_on = self.patch.arp_on;
+        let chorus_was_on = self.patch.chorus_mix > 0.0;
         self.patch.set(p, v);
         self.apply_patch();
+        // The chorus is not fed while its Mix is 0, so its line still holds
+        // the audio from before: clear it rather than replay that.
+        if !chorus_was_on && self.patch.chorus_mix > 0.0 {
+            self.chorus.reset();
+        }
         match p {
             MonoParam::ArpOn if self.patch.arp_on != was_on => {
                 self.arp.clear_timing();
@@ -380,6 +386,21 @@ mod tests {
         let y = render(&mut s, 4800);
         assert!(all_finite(&y));
         assert!(rms(&y) > 0.01 && peak(&y) < 1.5, "rms {} peak {}", rms(&y), peak(&y));
+    }
+
+    #[test]
+    fn raising_the_chorus_mix_replays_nothing_from_before() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ChorusMix, 0.5);
+        s.note_on(48, 100, false);
+        assert!(rms(&render(&mut s, 4800)) > 0.01, "the chorus heard the note");
+        s.set_param(M::ChorusMix, 0.0);
+        s.note_off(48, false);
+        render(&mut s, SR as usize);
+        assert_eq!(peak(&render(&mut s, 480)), 0.0, "released to silence");
+        s.set_param(M::ChorusMix, 1.0);
+        let y = render(&mut s, 4800);
+        assert_eq!(peak(&y), 0.0, "stale chorus audio replayed");
     }
 
     #[test]
