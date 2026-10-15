@@ -188,6 +188,7 @@ impl Voice {
                 self.out_level[op] = ol;
                 self.env[op].set_out_level(ol);
             }
+            self.env[op].set_shape(o.rates, o.levels, scale_rate(key, o.rate_scaling));
             let level = self.env[op].tick(n) - amp_lfo * AMS_DEPTH[o.amp_mod_sens.min(3)];
             let target = if o.on && level > SILENT {
                 2f32.powf(level).min(2.0)
@@ -287,5 +288,59 @@ mod tests {
             }
         }
         assert!(worst < 2e-3, "max error {worst}");
+    }
+
+    fn held(patch: &FmPatch) -> Voice {
+        let mut v = Voice::new(SR);
+        v.start(patch, 69, 127, false, 1);
+        v
+    }
+
+    /// Peak output over `seconds`.
+    fn play(v: &mut Voice, patch: &FmPatch, seconds: f32) -> f32 {
+        let mut buf = [0.0f32; BLOCK];
+        let mut peak = 0.0f32;
+        for _ in 0..(seconds * SR) as usize / BLOCK {
+            buf.fill(0.0);
+            v.render(patch, &ALGORITHMS[0], 0.0, &Sine::new(), &mut buf);
+            peak = buf.iter().fold(peak, |m, x| m.max(x.abs()));
+        }
+        peak
+    }
+
+    #[test]
+    fn lowering_level_3_quietens_a_held_note() {
+        let mut patch = FmPatch::default();
+        let mut v = held(&patch);
+        let before = play(&mut v, &patch, 0.1);
+        patch.ops[0].levels[2] = 50.0;
+        play(&mut v, &patch, 0.05);
+        let after = play(&mut v, &patch, 0.05);
+        assert!(after < before * 0.25, "{before} -> {after}");
+    }
+
+    #[test]
+    fn a_faster_attack_applies_mid_note() {
+        let mut patch = FmPatch::default();
+        patch.ops[0].rates[0] = 10.0; // many seconds to full level
+        let mut v = held(&patch);
+        let slow = play(&mut v, &patch, 0.05);
+        patch.ops[0].rates[0] = 99.0;
+        play(&mut v, &patch, 0.01);
+        let fast = play(&mut v, &patch, 0.01);
+        assert!(slow < 0.5 * VOICE_GAIN && fast > 0.9 * VOICE_GAIN, "{slow} -> {fast}");
+    }
+
+    #[test]
+    fn a_new_release_rate_applies_to_a_released_note() {
+        let mut patch = FmPatch::default();
+        patch.ops[0].rates[3] = 10.0; // a long release
+        let mut v = held(&patch);
+        play(&mut v, &patch, 0.02);
+        v.release();
+        play(&mut v, &patch, 0.01);
+        patch.ops[0].rates[3] = 99.0;
+        play(&mut v, &patch, 0.05);
+        assert!(!v.active, "the fast release finished the note");
     }
 }

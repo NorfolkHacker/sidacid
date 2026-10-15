@@ -155,6 +155,28 @@ impl Env {
         }
     }
 
+    /// New rates, levels or rate scaling (a knob moved while the note
+    /// plays): the current stage heads for its new level at its new rate.
+    /// A new sustain level is approached at R3, not jumped to.
+    pub fn set_shape(&mut self, rates: [f32; 4], levels: [f32; 4], rate_scaling: i32) {
+        if rates == self.rates && levels == self.levels && rate_scaling == self.rate_scaling {
+            return;
+        }
+        self.rates = rates;
+        self.levels = levels;
+        self.rate_scaling = rate_scaling;
+        if self.down && self.stage == 3 {
+            if self.actual(levels[2]) != self.lvl {
+                self.advance(2);
+            }
+        } else if self.stage < 4 {
+            self.advance(self.stage);
+        } else {
+            // Through the release: hold the new L4, as `set_out_level` does.
+            self.lvl = self.actual(levels[3]);
+        }
+    }
+
     pub fn is_down(&self) -> bool {
         self.down
     }
@@ -371,6 +393,20 @@ mod tests {
         e.set_out_level(operator_out_level(0.0, 0, 0));
         let level = e.tick(BLOCK);
         assert!(level < -13.0, "level 0 silences the drone: {level}");
+    }
+
+    #[test]
+    fn a_new_sustain_level_is_approached_at_rate_3_not_jumped_to() {
+        let rates = [99.0, 99.0, 30.0, 99.0];
+        let mut e = full_env(rates, [99.0, 99.0, 99.0, 0.0]);
+        let full = (0..blocks(0.05)).map(|_| e.tick(BLOCK)).last().unwrap();
+        e.set_shape(rates, [99.0, 99.0, 50.0, 0.0], 0);
+        let next = e.tick(BLOCK);
+        assert!(full - next < 0.1, "no jump: {full} -> {next}");
+        let settled = (0..blocks(10.0)).map(|_| e.tick(BLOCK)).last().unwrap();
+        let want = full_env(rates, [99.0, 99.0, 50.0, 0.0]).actual(50.0) - FULL;
+        assert!((settled - want).abs() < 0.01, "{settled} vs {want}");
+        assert!(e.is_down() && e.stage == 3, "back in the sustain");
     }
 
     #[test]
