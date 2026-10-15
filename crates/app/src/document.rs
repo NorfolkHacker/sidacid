@@ -23,6 +23,7 @@ const NO_SYNTH: &str = "the edit names a synth in the rack";
 const NO_KIT: &str = "the edit names a drum kit in the rack";
 const NO_NOTES: &str = "the edit names a note machine in the rack";
 const NO_FM: &str = "the edit names an FM machine in the rack";
+const NO_MONO: &str = "the edit names a Mono machine in the rack";
 const NO_SAMPLER: &str = "the edit names a sampler in the rack";
 const NO_ROOM: &str = "the rack has room for the machine and its uid is free";
 
@@ -107,6 +108,12 @@ pub enum Edit {
         uid: MachineUid,
         bank: Option<Vec<Dx7Voice>>,
     },
+    /// Loading a Mono patch: its name and every knob, one undo step.
+    MonoPatch {
+        uid: MachineUid,
+        name: String,
+        values: Vec<(ParamId, f32)>,
+    },
     /// Loading or clearing a sampler slot, with its knob values: one undo step.
     SamplerSlot {
         uid: MachineUid,
@@ -163,6 +170,7 @@ enum MergeKey {
     View(MachineUid),
     Song,
     FmVoice(MachineUid),
+    MonoPatch(MachineUid),
     FmBank(MachineUid),
     SamplerSlot(MachineUid, usize),
     SlotMeta(MachineUid, usize),
@@ -196,6 +204,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::View { uid, .. } => MergeKey::View(*uid),
         Edit::Song { .. } => MergeKey::Song,
         Edit::FmVoice { uid, .. } => MergeKey::FmVoice(*uid),
+        Edit::MonoPatch { uid, .. } => MergeKey::MonoPatch(*uid),
         Edit::FmBank { uid, .. } => MergeKey::FmBank(*uid),
         Edit::SamplerSlot { uid, slot, .. } => MergeKey::SamplerSlot(*uid, *slot),
         Edit::SlotMeta { uid, slot, .. } => MergeKey::SlotMeta(*uid, *slot),
@@ -747,6 +756,24 @@ impl Document {
                     values: old_values,
                 }
             }
+            Edit::MonoPatch { uid, name, values } => {
+                let old_name =
+                    std::mem::replace(&mut p.mono_mut(uid).expect(NO_MONO).patch_name, name);
+                let mut old_values: Vec<_> = values
+                    .into_iter()
+                    .map(|(id, v)| {
+                        let old = p.param(id);
+                        p.set_param(id, v.clamp(0.0, 1.0));
+                        (id, old)
+                    })
+                    .collect();
+                old_values.reverse();
+                Edit::MonoPatch {
+                    uid,
+                    name: old_name,
+                    values: old_values,
+                }
+            }
             Edit::SamplerSlot {
                 uid,
                 slot,
@@ -858,7 +885,7 @@ impl Document {
                 &p.song,
                 &p.rack_uids(),
             )))],
-            Edit::FmVoice { values, .. } => values
+            Edit::FmVoice { values, .. } | Edit::MonoPatch { values, .. } => values
                 .iter()
                 .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
                 .collect(),

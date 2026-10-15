@@ -12,6 +12,7 @@ mod keys;
 pub mod knob;
 mod mixer_panel;
 mod mono_panel;
+mod mono_patches;
 mod note_panel;
 mod pads;
 mod params_ui;

@@ -8,6 +8,7 @@ pub mod ladder;
 pub mod lfo;
 pub mod osc;
 pub mod patch;
+pub mod starter;
 
 mod synth;
 
