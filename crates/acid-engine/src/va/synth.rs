@@ -342,8 +342,8 @@ impl MonoSynth {
         if wrapped && self.gate && p.trigger == Trigger::Lfo {
             self.env.gate_on();
         }
-        let env = self.env.next();
-        let [drift_pitch, drift_cutoff] = self.drift.next();
+        let env = self.env.advance();
+        let [drift_pitch, drift_cutoff] = self.drift.advance();
         self.pitch += (self.target - self.pitch) * self.glide_coef;
         let semis = self.pitch
             + p.octave_semis
@@ -362,7 +362,7 @@ impl MonoSynth {
         let mix = (o.pulse * p.pulse
             + o.saw * p.saw
             + o.sub * p.sub
-            + self.noise.next() * p.noise)
+            + self.noise.sample() * p.noise)
             * MIX_LEVEL;
         let octaves = p.env_oct * env
             + p.vcf_mod_oct * lfo
@@ -536,7 +536,7 @@ mod tests {
             s.set_param(M::Drift, drift);
             if perturb {
                 for _ in 0..5000 {
-                    s.drift.next();
+                    s.drift.advance();
                 }
                 s.drift.note_offset();
             }

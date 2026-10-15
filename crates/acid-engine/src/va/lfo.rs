@@ -11,7 +11,7 @@ impl Noise {
     }
 
     /// White noise in −1..=1.
-    pub fn next(&mut self) -> f32 {
+    pub fn sample(&mut self) -> f32 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 17;
@@ -63,7 +63,7 @@ impl Lfo {
         let wrapped = self.phase >= 1.0;
         if wrapped {
             self.phase -= self.phase.floor();
-            self.held = self.noise.next();
+            self.held = self.noise.sample();
         }
         let p = self.phase;
         let v = match wave {
@@ -76,7 +76,7 @@ impl Lfo {
                 }
             }
             LfoWave::Random => self.held,
-            LfoWave::Noise => self.noise.next(),
+            LfoWave::Noise => self.noise.sample(),
         };
         (v, wrapped)
     }
@@ -115,9 +115,9 @@ impl Drift {
     }
 
     /// (pitch, cutoff) wander, each in −1..=1.
-    pub fn next(&mut self) -> [f32; 2] {
+    pub fn advance(&mut self) -> [f32; 2] {
         if self.count == 0 {
-            self.targets = [self.noise.next(), self.noise.next()];
+            self.targets = [self.noise.sample(), self.noise.sample()];
             self.count = DRIFT_HOLD;
         }
         self.count -= 1;
@@ -129,7 +129,7 @@ impl Drift {
 
     /// A fresh per-note offset in −1..=1.
     pub fn note_offset(&mut self) -> f32 {
-        self.noise.next()
+        self.noise.sample()
     }
 }
 
@@ -170,11 +170,11 @@ mod tests {
     fn drift_wanders_slowly_and_deterministically() {
         let (mut a, mut b) = (Drift::new(SR), Drift::new(SR));
         let mut moved = false;
-        let mut prev = a.next();
-        b.next();
+        let mut prev = a.advance();
+        b.advance();
         for _ in 0..SR as usize {
-            let v = a.next();
-            assert_eq!(v, b.next());
+            let v = a.advance();
+            assert_eq!(v, b.advance());
             assert!(v.iter().all(|x| (-1.0..=1.0).contains(x)));
             assert!((v[0] - prev[0]).abs() < 0.01, "slow");
             moved |= v != prev;

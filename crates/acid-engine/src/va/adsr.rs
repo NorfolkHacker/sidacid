@@ -81,7 +81,7 @@ impl Adsr {
     }
 
     /// Advances one sample and returns the new level.
-    pub fn next(&mut self) -> f32 {
+    pub fn advance(&mut self) -> f32 {
         match self.stage {
             Stage::Idle => {}
             Stage::Attack => {
@@ -121,7 +121,7 @@ mod tests {
     fn run(e: &mut Adsr, n: usize) -> f32 {
         let mut v = 0.0;
         for _ in 0..n {
-            v = e.next();
+            v = e.advance();
         }
         v
     }
@@ -151,7 +151,7 @@ mod tests {
         e.gate_off();
         let before = run(&mut e, 4800);
         e.gate_on();
-        assert!(e.next() >= before, "no drop to zero (no click)");
+        assert!(e.advance() >= before, "no drop to zero (no click)");
         assert_eq!(e.stage(), Stage::Attack);
     }
 

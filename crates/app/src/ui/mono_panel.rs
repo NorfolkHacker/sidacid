@@ -222,13 +222,14 @@ mod tests {
             let drawn = frame(&mut app, vec![]);
             let head = find(&drawn, &|t| t.starts_with(&title));
             let patches = find(&drawn, &|t| t == "Patches");
-            if let (Some(head), Some(patches)) = (head, patches) {
-                if head.top() >= 0.0 && patches.bottom() <= h {
-                    return drawn
-                        .into_iter()
-                        .filter(|(_, r)| r.top() > head.bottom() && r.bottom() < patches.top())
-                        .collect();
-                }
+            if let (Some(head), Some(patches)) = (head, patches)
+                && head.top() >= 0.0
+                && patches.bottom() <= h
+            {
+                return drawn
+                    .into_iter()
+                    .filter(|(_, r)| r.top() > head.bottom() && r.bottom() < patches.top())
+                    .collect();
             }
             frame(
                 &mut app,

@@ -99,7 +99,7 @@ impl Arp {
     /// arriving later cannot fire off the grid.
     pub fn skip(&mut self) {
         if let Some(n) = self.next_in {
-            self.next_in = (n > 0.5).then(|| n - 1.0);
+            self.next_in = (n > 0.5).then_some(n - 1.0);
         }
     }
 
