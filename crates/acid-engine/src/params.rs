@@ -26,6 +26,20 @@ pub mod fm_steps {
     pub const LFO_WAVES: usize = 6;
 }
 
+/// Positions of the Mono synth's switches.
+pub mod mono_steps {
+    pub const RANGE: usize = 4;
+    pub const PWM_SOURCE: usize = 3;
+    pub const SUB_WAVE: usize = 3;
+    pub const TRIGGER: usize = 3;
+    pub const VCA_MODE: usize = 2;
+    pub const LFO_WAVES: usize = 4;
+    pub const PORTAMENTO: usize = 3;
+    pub const ARP_MODE: usize = 3;
+    pub const ARP_RANGE: usize = 3;
+    pub const ARP_RATE: usize = 6;
+}
+
 macro_rules! param_enum {
     ($name:ident { $($var:ident => $label:literal),+ $(,)? }) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -92,6 +106,60 @@ param_enum!(MasterParam {
     CompAttack => "Attack", CompRelease => "Release", CompMakeup => "Makeup",
     Level => "Master", LoFi => "Lo-Fi",
 });
+param_enum!(MonoParam {
+    Range => "Range", Tune => "Tune", VcoMod => "VCO Mod", PulseWidth => "Pulse Width",
+    PwmSource => "PWM Source", PulseLevel => "Pulse", SawLevel => "Saw", SubLevel => "Sub",
+    SubWave => "Sub Wave", NoiseLevel => "Noise", Cutoff => "Cutoff", Resonance => "Resonance",
+    EnvAmount => "Env", VcfMod => "VCF Mod", KeyFollow => "Key Follow", VelToVcf => "Vel > VCF",
+    Attack => "Attack", Decay => "Decay", Sustain => "Sustain", Release => "Release",
+    Trigger => "Trigger", VcaMode => "VCA Mode", VelToVca => "Vel > VCA",
+    LfoWave => "LFO Wave", LfoRate => "LFO Rate", Portamento => "Portamento",
+    PortaTime => "Porta Time", ArpOn => "Arp", ArpMode => "Arp Mode", ArpRange => "Arp Range",
+    ArpRate => "Arp Rate", Drift => "Drift", ChorusRate => "Chorus Rate",
+    ChorusDepth => "Chorus Depth", ChorusMix => "Chorus Mix", Volume => "Volume",
+});
+
+impl MonoParam {
+    pub fn info(self) -> ParamInfo {
+        use MonoParam as M;
+        use mono_steps as s;
+        let n = self.name();
+        // A switch resting on position `at` of `steps`.
+        let switch = |steps: usize, at: usize| disc(n, at as f32 / (steps - 1) as f32, steps as u8);
+        match self {
+            M::Range => switch(s::RANGE, 1),
+            M::PwmSource => switch(s::PWM_SOURCE, 0),
+            M::SubWave => switch(s::SUB_WAVE, 0),
+            M::Trigger => switch(s::TRIGGER, 0),
+            M::VcaMode => switch(s::VCA_MODE, 0),
+            M::LfoWave => switch(s::LFO_WAVES, 0),
+            M::Portamento => switch(s::PORTAMENTO, 0),
+            M::ArpOn => switch(2, 0),
+            M::ArpMode => switch(s::ARP_MODE, 0),
+            M::ArpRange => switch(s::ARP_RANGE, 0),
+            M::ArpRate => switch(s::ARP_RATE, 3),
+            M::Tune | M::KeyFollow | M::Cutoff | M::ChorusDepth => cont(n, 0.5),
+            M::SawLevel => cont(n, 0.8),
+            M::Resonance => cont(n, 0.2),
+            M::EnvAmount | M::Decay | M::LfoRate => cont(n, 0.4),
+            M::Sustain => cont(n, 0.6),
+            M::Release => cont(n, 0.2),
+            M::PortaTime | M::ChorusRate => cont(n, 0.3),
+            M::Volume => cont(n, 0.7),
+            M::VcoMod
+            | M::PulseWidth
+            | M::PulseLevel
+            | M::SubLevel
+            | M::NoiseLevel
+            | M::VcfMod
+            | M::VelToVcf
+            | M::Attack
+            | M::VelToVca
+            | M::Drift
+            | M::ChorusMix => cont(n, 0.0),
+        }
+    }
+}
 
 /// A control on one machine. Which variants a machine accepts depends on
 /// its type (`fits`); every machine has the channel-strip params.

@@ -6,3 +6,4 @@ pub mod adsr;
 pub mod ladder;
 pub mod lfo;
 pub mod osc;
+pub mod patch;
