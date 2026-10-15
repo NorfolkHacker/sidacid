@@ -328,7 +328,10 @@ mod tests {
         patch.ops[0].rates[0] = 99.0;
         play(&mut v, &patch, 0.01);
         let fast = play(&mut v, &patch, 0.01);
-        assert!(slow < 0.5 * VOICE_GAIN && fast > 0.9 * VOICE_GAIN, "{slow} -> {fast}");
+        assert!(
+            slow < 0.5 * VOICE_GAIN && fast > 0.9 * VOICE_GAIN,
+            "{slow} -> {fast}"
+        );
     }
 
     #[test]

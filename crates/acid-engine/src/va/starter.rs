@@ -107,8 +107,17 @@ mod tests {
         assert_eq!(names.len(), STARTER.len(), "unique names");
         for p in STARTER {
             let params: HashSet<_> = p.values.iter().map(|(m, _)| *m).collect();
-            assert_eq!(params.len(), p.values.len(), "{}: a param listed twice", p.name);
-            assert!(p.values.iter().all(|(_, v)| (0.0..=1.0).contains(v)), "{}", p.name);
+            assert_eq!(
+                params.len(),
+                p.values.len(),
+                "{}: a param listed twice",
+                p.name
+            );
+            assert!(
+                p.values.iter().all(|(_, v)| (0.0..=1.0).contains(v)),
+                "{}",
+                p.name
+            );
             assert_eq!(p.to_params().len(), MonoParam::ALL.len());
         }
     }

@@ -85,7 +85,10 @@ mod tests {
         let tail = &y[y.len() - 24_000..];
         assert!(rms(tail) > 0.05, "{}", rms(tail));
         assert!(peak(&y) < 2.0);
-        let crossings = tail.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
+        let crossings = tail
+            .windows(2)
+            .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+            .count();
         // 1000 Hz over half a second: 1000 sign changes.
         assert!((950..=1050).contains(&crossings), "{crossings}");
     }

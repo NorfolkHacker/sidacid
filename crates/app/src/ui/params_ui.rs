@@ -6,8 +6,8 @@ use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
 use acid_engine::params::{
-    FmParam, FxParam, MachineParam, MonoParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map,
-    step_index,
+    FmParam, FxParam, MachineParam, MonoParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps,
+    sampler_map, step_index,
 };
 use eframe::egui;
 

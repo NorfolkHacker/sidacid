@@ -164,7 +164,11 @@ mod tests {
         ] {
             assert!(!changed(MachineParam::Fm(kept)), "{kept:?} changed");
         }
-        assert_eq!(fm.patterns, before.fm(FM).unwrap().patterns, "the sequence is untouched");
+        assert_eq!(
+            fm.patterns,
+            before.fm(FM).unwrap().patterns,
+            "the sequence is untouched"
+        );
         app.doc.undo();
         assert_eq!(app.doc.project, before);
     }

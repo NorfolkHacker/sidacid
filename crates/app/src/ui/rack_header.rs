@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn the_add_menu_lists_every_type_in_order() {
         let labels: Vec<&str> = MachineType::ALL.iter().map(|t| t.label()).collect();
-        assert_eq!(labels, ["303 Synth", "808 Kit", "909 Kit", "FM", "Sampler", "Mono"]);
+        assert_eq!(
+            labels,
+            ["303 Synth", "808 Kit", "909 Kit", "FM", "Sampler", "Mono"]
+        );
     }
 
     /// The panel's open state lives where its `CollapsingHeader` kept it.

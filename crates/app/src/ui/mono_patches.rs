@@ -39,8 +39,7 @@ impl SidAcidApp {
         if project.mono(uid).is_none() {
             return;
         }
-        let values =
-            acid_engine::random::randomise_mono(|p| project.param(uid.param(p)), seed);
+        let values = acid_engine::random::randomise_mono(|p| project.param(uid.param(p)), seed);
         self.load_mono_patch(uid, "Random", values);
     }
 }
@@ -74,7 +73,10 @@ mod tests {
         app.load_mono_patch(uid, preset.name, preset.to_params());
         assert_eq!(app.doc.project.mono(uid).unwrap().patch_name, preset.name);
         for (p, v) in preset.to_params() {
-            assert!((app.doc.project.param(uid.param(p)) - v).abs() < 1e-6, "{p:?}");
+            assert!(
+                (app.doc.project.param(uid.param(p)) - v).abs() < 1e-6,
+                "{p:?}"
+            );
         }
         app.doc.undo();
         assert_eq!(app.doc.project, before);
@@ -91,7 +93,10 @@ mod tests {
             p.param(uid.param(MonoParam::Volume)),
             before.param(uid.param(MonoParam::Volume))
         );
-        assert_eq!(p.mono(uid).unwrap().patterns, before.mono(uid).unwrap().patterns);
+        assert_eq!(
+            p.mono(uid).unwrap().patterns,
+            before.mono(uid).unwrap().patterns
+        );
         app.doc.undo();
         assert_eq!(app.doc.project, before);
     }

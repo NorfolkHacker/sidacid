@@ -59,7 +59,10 @@ impl MachineType {
 
     /// Whether the song transpose applies to this type.
     pub fn transposes(self) -> bool {
-        matches!(self, MachineType::Synth | MachineType::Fm | MachineType::Mono)
+        matches!(
+            self,
+            MachineType::Synth | MachineType::Fm | MachineType::Mono
+        )
     }
 }
 

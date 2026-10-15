@@ -2,8 +2,8 @@
 //! Source, VCF, Env; then LFO, Porta, Arp, Drift, Chorus), an envelope
 //! sketch, the patch browser, and the pattern row with the poly piano roll.
 
-use super::mono_patches::STARTER;
 use super::knob::CELL;
+use super::mono_patches::STARTER;
 use super::{SidAcidApp, theme};
 use acid_engine::machine::MachineUid;
 use acid_engine::params::MonoParam as M;
@@ -13,24 +13,81 @@ use eframe::egui::{self, Sense, Stroke, pos2, vec2};
 type Group = (&'static str, &'static [(M, &'static str)]);
 
 const FRONT: [Group; 4] = [
-    ("VCO", &[(M::Range, "Range"), (M::Tune, "Tune"), (M::VcoMod, "Mod"), (M::PulseWidth, "PW"), (M::PwmSource, "PWM")]),
-    ("SOURCE", &[(M::PulseLevel, "Pulse"), (M::SawLevel, "Saw"), (M::SubLevel, "Sub"), (M::SubWave, "Sub Wave"), (M::NoiseLevel, "Noise")]),
-    ("VCF", &[(M::Cutoff, "Cutoff"), (M::Resonance, "Reso"), (M::EnvAmount, "Env"), (M::VcfMod, "Mod"), (M::KeyFollow, "Kybd"), (M::VelToVcf, "Vel")]),
-    ("ENV", &[(M::Attack, "A"), (M::Decay, "D"), (M::Sustain, "S"), (M::Release, "R"), (M::Trigger, "Trig"), (M::VcaMode, "VCA"), (M::VelToVca, "Vel")]),
+    (
+        "VCO",
+        &[
+            (M::Range, "Range"),
+            (M::Tune, "Tune"),
+            (M::VcoMod, "Mod"),
+            (M::PulseWidth, "PW"),
+            (M::PwmSource, "PWM"),
+        ],
+    ),
+    (
+        "SOURCE",
+        &[
+            (M::PulseLevel, "Pulse"),
+            (M::SawLevel, "Saw"),
+            (M::SubLevel, "Sub"),
+            (M::SubWave, "Sub Wave"),
+            (M::NoiseLevel, "Noise"),
+        ],
+    ),
+    (
+        "VCF",
+        &[
+            (M::Cutoff, "Cutoff"),
+            (M::Resonance, "Reso"),
+            (M::EnvAmount, "Env"),
+            (M::VcfMod, "Mod"),
+            (M::KeyFollow, "Kybd"),
+            (M::VelToVcf, "Vel"),
+        ],
+    ),
+    (
+        "ENV",
+        &[
+            (M::Attack, "A"),
+            (M::Decay, "D"),
+            (M::Sustain, "S"),
+            (M::Release, "R"),
+            (M::Trigger, "Trig"),
+            (M::VcaMode, "VCA"),
+            (M::VelToVca, "Vel"),
+        ],
+    ),
 ];
 const SECOND: [Group; 6] = [
     ("LFO", &[(M::LfoWave, "Wave"), (M::LfoRate, "Rate")]),
     ("PORTA", &[(M::Portamento, "Mode"), (M::PortaTime, "Time")]),
-    ("ARP", &[(M::ArpOn, "On"), (M::ArpMode, "Mode"), (M::ArpRange, "Range"), (M::ArpRate, "Rate")]),
+    (
+        "ARP",
+        &[
+            (M::ArpOn, "On"),
+            (M::ArpMode, "Mode"),
+            (M::ArpRange, "Range"),
+            (M::ArpRate, "Rate"),
+        ],
+    ),
     ("DRIFT", &[(M::Drift, "Drift")]),
-    ("CHORUS", &[(M::ChorusRate, "Rate"), (M::ChorusDepth, "Depth"), (M::ChorusMix, "Mix")]),
+    (
+        "CHORUS",
+        &[
+            (M::ChorusRate, "Rate"),
+            (M::ChorusDepth, "Depth"),
+            (M::ChorusMix, "Mix"),
+        ],
+    ),
     ("OUT", &[(M::Volume, "Volume")]),
 ];
 
 impl SidAcidApp {
     /// Mono machine `uid`; it must be a Mono machine in the rack.
     fn mono_of(&self, uid: MachineUid) -> &MonoMachine {
-        self.doc.project.mono(uid).expect("a Mono machine in the rack")
+        self.doc
+            .project
+            .mono(uid)
+            .expect("a Mono machine in the rack")
     }
 
     pub(crate) fn mono_panel(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
@@ -118,7 +175,12 @@ impl SidAcidApp {
         }
         let points: Vec<egui::Pos2> = points
             .iter()
-            .map(|(x, y)| pos2(inner.left() + x * inner.width(), inner.bottom() - y * inner.height()))
+            .map(|(x, y)| {
+                pos2(
+                    inner.left() + x * inner.width(),
+                    inner.bottom() - y * inner.height(),
+                )
+            })
             .collect();
         painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, theme::ACID)));
     }
@@ -140,7 +202,10 @@ impl SidAcidApp {
             .spacing([4.0, 2.0])
             .show(ui, |ui| {
                 for (i, preset) in STARTER.iter().enumerate() {
-                    if ui.selectable_label(preset.name == current, preset.name).clicked() {
+                    if ui
+                        .selectable_label(preset.name == current, preset.name)
+                        .clicked()
+                    {
                         picked = Some(i);
                     }
                     if i % 7 == 6 {
@@ -319,7 +384,10 @@ mod tests {
             assert!(mono_seen, "the Mono panel was never on screen at {size:?}");
         }
         assert_eq!(app.doc.undo_depth(), depth, "no undo step without a click");
-        assert!(app.doc.project == project, "the project changed without a click");
+        assert!(
+            app.doc.project == project,
+            "the project changed without a click"
+        );
     }
 
     #[test]

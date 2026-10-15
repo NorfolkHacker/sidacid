@@ -159,7 +159,11 @@ impl Arp {
 
     /// One sample on.
     pub fn advance(&mut self, thirds: u32) -> ArpEvent {
-        let tick = if self.transport { self.tick_len } else { self.free_tick_len };
+        let tick = if self.transport {
+            self.tick_len
+        } else {
+            self.free_tick_len
+        };
         let step_len = thirds as f64 / 3.0 * tick;
         let step = if self.transport {
             match self.next_in {
@@ -215,7 +219,10 @@ mod tests {
     fn up_down_and_up_down_orders() {
         assert_eq!(take(&mut arp(&[60, 48, 55], 1), Up, 4), [48, 55, 60, 48]);
         assert_eq!(take(&mut arp(&[60, 48, 55], 1), Down, 4), [60, 55, 48, 60]);
-        assert_eq!(take(&mut arp(&[48, 55, 60], 1), UpDown, 6), [48, 55, 60, 55, 48, 55]);
+        assert_eq!(
+            take(&mut arp(&[48, 55, 60], 1), UpDown, 6),
+            [48, 55, 60, 55, 48, 55]
+        );
         assert_eq!(take(&mut arp(&[48], 1), UpDown, 2), [48, 48]);
         assert_eq!(arp(&[], 1).next_pitch(Up), None);
     }
@@ -223,7 +230,11 @@ mod tests {
     #[test]
     fn range_adds_octaves() {
         assert_eq!(take(&mut arp(&[48, 55], 2), Up, 5), [48, 55, 60, 67, 48]);
-        assert_eq!(take(&mut arp(&[120], 3), Up, 2), [120, 120], "past 127 is dropped");
+        assert_eq!(
+            take(&mut arp(&[120], 3), Up, 2),
+            [120, 120],
+            "past 127 is dropped"
+        );
     }
 
     #[test]

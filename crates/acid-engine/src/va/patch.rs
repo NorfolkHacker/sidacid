@@ -153,7 +153,11 @@ impl MonoPatch {
     pub fn set(&mut self, p: MonoParam, v: f32) {
         use MonoParam as M;
         use mono_steps as s;
-        let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let v = if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let pick = |n: usize| step_index(v, n as u8);
         match p {
             M::Range => self.octave_semis = [-12.0, 0.0, 12.0, 24.0][pick(s::RANGE)],
@@ -168,8 +172,8 @@ impl MonoPatch {
             M::SawLevel => self.saw = v,
             M::SubLevel => self.sub = v,
             M::SubWave => {
-                self.sub_wave =
-                    [SubWave::Oct1Square, SubWave::Oct2Square, SubWave::Oct2Pulse][pick(s::SUB_WAVE)]
+                self.sub_wave = [SubWave::Oct1Square, SubWave::Oct2Square, SubWave::Oct2Pulse]
+                    [pick(s::SUB_WAVE)]
             }
             M::NoiseLevel => self.noise = v,
             M::Cutoff => self.cutoff_hz = exp(v, 20.0, 18_000.0),

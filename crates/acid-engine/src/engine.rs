@@ -2513,7 +2513,12 @@ mod tests {
             let pat = &mut mono.patterns[0];
             pat.length = 16;
             pat.notes = [48, 52, 55]
-                .map(|pitch| Note { start: 0, len: 64, pitch, vel: 100 })
+                .map(|pitch| Note {
+                    start: 0,
+                    len: 64,
+                    pitch,
+                    vel: 100,
+                })
                 .to_vec();
         }
         let uid = m.uid;
@@ -2546,7 +2551,12 @@ mod tests {
             for (slot, length) in [(0, 6u8), (1, 16)] {
                 let pat = &mut mono.patterns[slot];
                 pat.length = length;
-                pat.notes = vec![Note { start: 0, len: length as u16 * 4, pitch: 48, vel: 100 }];
+                pat.notes = vec![Note {
+                    start: 0,
+                    len: length as u16 * 4,
+                    pitch: 48,
+                    vel: 100,
+                }];
             }
         }
         let uid = m.uid;
@@ -2580,6 +2590,9 @@ mod tests {
         // downbeat: 6 sixteenths in at 120 BPM, not a beat later.
         let bar_two = (6.0 * SR as f64 / 8.0) as usize;
         let third = third.expect("a third arp step");
-        assert!((bar_two..=bar_two + 2).contains(&third), "third step at {third}, bar two at {bar_two}");
+        assert!(
+            (bar_two..=bar_two + 2).contains(&third),
+            "third step at {third}, bar two at {bar_two}"
+        );
     }
 }

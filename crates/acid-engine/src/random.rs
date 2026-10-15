@@ -211,13 +211,15 @@ fn random_op(rng: &mut Pcg32, carrier: bool, character: Character) -> Dx7Op {
         ],
         levels: [
             if carrier { 99 } else { rng.gen_range(60..=99) },
-            rng.gen_range(if sustain {
-                85
-            } else if carrier {
-                60
-            } else {
-                0
-            }..=99),
+            rng.gen_range(
+                if sustain {
+                    85
+                } else if carrier {
+                    60
+                } else {
+                    0
+                }..=99,
+            ),
             rng.gen_range(if sustain { 80 } else { 0 }..=99),
             0,
         ],
@@ -303,7 +305,10 @@ pub fn randomise_voice(current: &Dx7Voice, seed: u64) -> Dx7Voice {
     // Mostly no pitch envelope; sometimes a short blip that settles back
     // to the played pitch (level 50 is no shift).
     let (pitch_rates, pitch_levels) = if rng.gen_bool(0.2) {
-        ([99, rng.gen_range(40..=99), 99, 99], [rng.gen_range(40..=60), 50, 50, 50])
+        (
+            [99, rng.gen_range(40..=99), 99, 99],
+            [rng.gen_range(40..=60), 50, 50, 50],
+        )
     } else {
         ([99; 4], [50; 4])
     };
@@ -517,8 +522,14 @@ pub fn randomise_mono(current: impl Fn(MonoParam) -> f32, seed: u64) -> Vec<(Mon
         v.iter().find(|(q, _)| *q == p).map_or(0.0, |e| e.1)
     }
     for p in [
-        M::ArpOn, M::ArpMode, M::ArpRange, M::ArpRate,
-        M::Drift, M::ChorusRate, M::ChorusDepth, M::ChorusMix,
+        M::ArpOn,
+        M::ArpMode,
+        M::ArpRange,
+        M::ArpRate,
+        M::Drift,
+        M::ChorusRate,
+        M::ChorusDepth,
+        M::ChorusMix,
     ] {
         set(&mut v, p, current(p));
     }
@@ -526,32 +537,67 @@ pub fn randomise_mono(current: impl Fn(MonoParam) -> f32, seed: u64) -> Vec<(Mon
     // (param, low, high) per character; switches pick a position.
     let ranges: &[(MonoParam, f32, f32)] = match r(0.0, 3.999) as u32 {
         0 => &[
-            (M::Range, 0.0, 0.333), (M::SawLevel, 0.0, 1.0), (M::PulseLevel, 0.0, 0.8),
-            (M::SubLevel, 0.4, 0.9), (M::PulseWidth, 0.0, 0.6), (M::Cutoff, 0.15, 0.45),
-            (M::Resonance, 0.0, 0.7), (M::EnvAmount, 0.3, 0.8), (M::Attack, 0.0, 0.05),
-            (M::Decay, 0.4, 0.65), (M::Sustain, 0.0, 0.4), (M::Release, 0.25, 0.45),
-            (M::Portamento, 0.0, 1.0), (M::PortaTime, 0.1, 0.35),
+            (M::Range, 0.0, 0.333),
+            (M::SawLevel, 0.0, 1.0),
+            (M::PulseLevel, 0.0, 0.8),
+            (M::SubLevel, 0.4, 0.9),
+            (M::PulseWidth, 0.0, 0.6),
+            (M::Cutoff, 0.15, 0.45),
+            (M::Resonance, 0.0, 0.7),
+            (M::EnvAmount, 0.3, 0.8),
+            (M::Attack, 0.0, 0.05),
+            (M::Decay, 0.4, 0.65),
+            (M::Sustain, 0.0, 0.4),
+            (M::Release, 0.25, 0.45),
+            (M::Portamento, 0.0, 1.0),
+            (M::PortaTime, 0.1, 0.35),
         ],
         1 => &[
-            (M::Range, 0.333, 0.667), (M::SawLevel, 0.3, 1.0), (M::PulseLevel, 0.0, 0.9),
-            (M::PulseWidth, 0.0, 0.6), (M::PwmSource, 0.0, 0.5), (M::Cutoff, 0.35, 0.75),
-            (M::Resonance, 0.0, 0.6), (M::EnvAmount, 0.1, 0.5), (M::Attack, 0.0, 0.2),
-            (M::Decay, 0.3, 0.7), (M::Sustain, 0.5, 1.0), (M::Release, 0.2, 0.5),
-            (M::VcoMod, 0.0, 0.15), (M::LfoRate, 0.45, 0.6), (M::Portamento, 0.0, 1.0),
+            (M::Range, 0.333, 0.667),
+            (M::SawLevel, 0.3, 1.0),
+            (M::PulseLevel, 0.0, 0.9),
+            (M::PulseWidth, 0.0, 0.6),
+            (M::PwmSource, 0.0, 0.5),
+            (M::Cutoff, 0.35, 0.75),
+            (M::Resonance, 0.0, 0.6),
+            (M::EnvAmount, 0.1, 0.5),
+            (M::Attack, 0.0, 0.2),
+            (M::Decay, 0.3, 0.7),
+            (M::Sustain, 0.5, 1.0),
+            (M::Release, 0.2, 0.5),
+            (M::VcoMod, 0.0, 0.15),
+            (M::LfoRate, 0.45, 0.6),
+            (M::Portamento, 0.0, 1.0),
             (M::PortaTime, 0.1, 0.4),
         ],
         2 => &[
-            (M::Range, 0.667, 1.0), (M::SawLevel, 0.0, 0.5), (M::PulseLevel, 0.6, 1.0),
-            (M::PulseWidth, 0.0, 0.7), (M::Cutoff, 0.3, 0.6), (M::Resonance, 0.4, 0.8),
-            (M::EnvAmount, 0.5, 0.9), (M::Attack, 0.0, 0.0), (M::Decay, 0.3, 0.5),
-            (M::Sustain, 0.0, 0.0), (M::Release, 0.25, 0.4), (M::ArpMode, 0.0, 1.0),
+            (M::Range, 0.667, 1.0),
+            (M::SawLevel, 0.0, 0.5),
+            (M::PulseLevel, 0.6, 1.0),
+            (M::PulseWidth, 0.0, 0.7),
+            (M::Cutoff, 0.3, 0.6),
+            (M::Resonance, 0.4, 0.8),
+            (M::EnvAmount, 0.5, 0.9),
+            (M::Attack, 0.0, 0.0),
+            (M::Decay, 0.3, 0.5),
+            (M::Sustain, 0.0, 0.0),
+            (M::Release, 0.25, 0.4),
+            (M::ArpMode, 0.0, 1.0),
             (M::ArpRange, 0.0, 1.0),
         ],
         _ => &[
-            (M::Range, 0.333, 0.333), (M::SawLevel, 0.5, 1.0), (M::NoiseLevel, 0.0, 0.3),
-            (M::Cutoff, 0.1, 0.3), (M::Resonance, 0.7, 0.95), (M::EnvAmount, 0.6, 1.0),
-            (M::Attack, 0.3, 0.7), (M::Decay, 0.5, 0.9), (M::Sustain, 0.2, 0.6),
-            (M::Release, 0.4, 0.8), (M::VcfMod, 0.0, 0.3), (M::LfoRate, 0.2, 0.4),
+            (M::Range, 0.333, 0.333),
+            (M::SawLevel, 0.5, 1.0),
+            (M::NoiseLevel, 0.0, 0.3),
+            (M::Cutoff, 0.1, 0.3),
+            (M::Resonance, 0.7, 0.95),
+            (M::EnvAmount, 0.6, 1.0),
+            (M::Attack, 0.3, 0.7),
+            (M::Decay, 0.5, 0.9),
+            (M::Sustain, 0.2, 0.6),
+            (M::Release, 0.4, 0.8),
+            (M::VcfMod, 0.0, 0.3),
+            (M::LfoRate, 0.2, 0.4),
         ],
     };
     let blip = ranges.iter().any(|&(p, _, _)| p == M::ArpMode);
@@ -572,7 +618,10 @@ pub fn randomise_mono(current: impl Fn(MonoParam) -> f32, seed: u64) -> Vec<(Mon
         set(&mut v, M::ArpRate, 0.6);
     }
     // Guards: something to hear, a filter that opens, notes that last.
-    if [M::PulseLevel, M::SawLevel, M::SubLevel].iter().all(|&p| get(&v, p) < 0.3) {
+    if [M::PulseLevel, M::SawLevel, M::SubLevel]
+        .iter()
+        .all(|&p| get(&v, p) < 0.3)
+    {
         set(&mut v, M::SawLevel, 0.7);
     }
     if get(&v, M::EnvAmount) < 0.2 && get(&v, M::Cutoff) < 0.35 {
@@ -1098,14 +1147,25 @@ mod tests {
         for seed in 0..300 {
             let v = randomise_mono(defaults, seed);
             let get = |p: M| v.iter().find(|(q, _)| *q == p).unwrap().1;
-            assert!(v.iter().all(|(p, x)| *p != M::Volume && (0.0..=1.0).contains(x)));
+            assert!(
+                v.iter()
+                    .all(|(p, x)| *p != M::Volume && (0.0..=1.0).contains(x))
+            );
             assert_eq!(v.len(), M::ALL.len() - 1);
             assert!(
-                [M::PulseLevel, M::SawLevel, M::SubLevel].iter().any(|&p| get(p) >= 0.3),
+                [M::PulseLevel, M::SawLevel, M::SubLevel]
+                    .iter()
+                    .any(|&p| get(p) >= 0.3),
                 "seed {seed}: silent mixer"
             );
-            assert!(get(M::EnvAmount) >= 0.2 || get(M::Cutoff) >= 0.35, "seed {seed}");
-            assert!(get(M::Sustain) >= 0.1 || get(M::Decay) >= 0.35, "seed {seed}");
+            assert!(
+                get(M::EnvAmount) >= 0.2 || get(M::Cutoff) >= 0.35,
+                "seed {seed}"
+            );
+            assert!(
+                get(M::Sustain) >= 0.1 || get(M::Decay) >= 0.35,
+                "seed {seed}"
+            );
             // The arp is off in `defaults`: only the Blip character turns it on, at 1/16.
             if get(M::ArpOn) >= 0.5 {
                 assert_eq!(get(M::ArpRate), 0.6, "seed {seed}");

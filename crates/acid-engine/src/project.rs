@@ -1642,7 +1642,9 @@ mod tests {
 
     #[test]
     fn version_3_files_still_load() {
-        let text = Project::default().to_ron().replace("version: 4", "version: 3");
+        let text = Project::default()
+            .to_ron()
+            .replace("version: 4", "version: 3");
         let p = Project::from_ron(&text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
     }

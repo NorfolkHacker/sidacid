@@ -180,7 +180,8 @@ impl MonoSynth {
         for (p, h) in pitches.iter_mut().zip(&self.held[..self.held_len]) {
             *p = h.pitch;
         }
-        self.arp.set_notes(&pitches[..self.held_len], self.patch.arp_octaves);
+        self.arp
+            .set_notes(&pitches[..self.held_len], self.patch.arp_octaves);
         if self.arp.is_empty() {
             self.arp.clear_timing();
             self.close_gate();
@@ -205,7 +206,10 @@ impl MonoSynth {
 
     pub fn note_on(&mut self, pitch: u8, vel: u8, live: bool) {
         let mut live = live;
-        if let Some(i) = self.held[..self.held_len].iter().position(|h| h.pitch == pitch) {
+        if let Some(i) = self.held[..self.held_len]
+            .iter()
+            .position(|h| h.pitch == pitch)
+        {
             // A pattern note on a held audition must not un-hold the key.
             live |= self.held[i].live;
             self.remove_at(i);
@@ -356,14 +360,14 @@ impl MonoSynth {
             PwmSource::Lfo => p.pw * 0.5 * (1.0 + lfo),
             PwmSource::Env => p.pw * env,
         };
-        let o = self
-            .vco
-            .next(midi_hz(semis) / self.sample_rate, 0.5 - 0.45 * pwm, p.sub_wave);
-        let mix = (o.pulse * p.pulse
-            + o.saw * p.saw
-            + o.sub * p.sub
-            + self.noise.sample() * p.noise)
-            * MIX_LEVEL;
+        let o = self.vco.next(
+            midi_hz(semis) / self.sample_rate,
+            0.5 - 0.45 * pwm,
+            p.sub_wave,
+        );
+        let mix =
+            (o.pulse * p.pulse + o.saw * p.saw + o.sub * p.sub + self.noise.sample() * p.noise)
+                * MIX_LEVEL;
         let octaves = p.env_oct * env
             + p.vcf_mod_oct * lfo
             + p.key_follow * (self.pitch - 48.0) / 12.0
@@ -371,7 +375,8 @@ impl MonoSynth {
             + p.drift * DRIFT_CUTOFF_OCT * drift_cutoff;
         self.cutoff_oct += (p.cutoff_hz.log2() - self.cutoff_oct) * self.knob_coef;
         self.volume += (p.volume - self.volume) * self.knob_coef;
-        self.filter.set((self.cutoff_oct + octaves).exp2(), p.resonance_k);
+        self.filter
+            .set((self.cutoff_oct + octaves).exp2(), p.resonance_k);
         let y = self.filter.process(mix);
         if p.vca_gate {
             let to = if self.gate { 1.0 } else { 0.0 };
@@ -434,10 +439,18 @@ mod tests {
         s.set_param(M::Cutoff, 0.9);
         let target = s.patch.cutoff_hz.log2();
         render(&mut s, 1);
-        assert!(s.cutoff_oct - low < 0.1 * (target - low), "jumped: {}", s.cutoff_oct - low);
+        assert!(
+            s.cutoff_oct - low < 0.1 * (target - low),
+            "jumped: {}",
+            s.cutoff_oct - low
+        );
         // 100 ms is ten time constants: within 0.01 octave of a ~7 octave jump.
         render(&mut s, 4800);
-        assert!((s.cutoff_oct - target).abs() < 0.01, "not arrived: {}", target - s.cutoff_oct);
+        assert!(
+            (s.cutoff_oct - target).abs() < 0.01,
+            "not arrived: {}",
+            target - s.cutoff_oct
+        );
     }
 
     #[test]
@@ -449,7 +462,11 @@ mod tests {
         assert_eq!(s.volume, s.patch.volume);
         s.note_on(48, 100, false);
         render(&mut s, 1);
-        assert_eq!(s.cutoff_oct, s.patch.cutoff_hz.log2(), "no sweep on the first note");
+        assert_eq!(
+            s.cutoff_oct,
+            s.patch.cutoff_hz.log2(),
+            "no sweep on the first note"
+        );
     }
 
     fn render(s: &mut MonoSynth, n: usize) -> Vec<f32> {
@@ -465,7 +482,12 @@ mod tests {
         s.note_on(48, 100, false);
         let y = render(&mut s, 4800);
         assert!(all_finite(&y));
-        assert!(rms(&y) > 0.01 && peak(&y) < 1.5, "rms {} peak {}", rms(&y), peak(&y));
+        assert!(
+            rms(&y) > 0.01 && peak(&y) < 1.5,
+            "rms {} peak {}",
+            rms(&y),
+            peak(&y)
+        );
     }
 
     #[test]
@@ -473,7 +495,10 @@ mod tests {
         let mut s = MonoSynth::new(SR);
         s.set_param(M::ChorusMix, 0.5);
         s.note_on(48, 100, false);
-        assert!(rms(&render(&mut s, 4800)) > 0.01, "the chorus heard the note");
+        assert!(
+            rms(&render(&mut s, 4800)) > 0.01,
+            "the chorus heard the note"
+        );
         s.set_param(M::ChorusMix, 0.0);
         s.note_off(48, false);
         render(&mut s, SR as usize);
@@ -490,7 +515,11 @@ mod tests {
         s.note_on(60, 100, false);
         assert_eq!(s.sounding(), Some(60));
         s.note_off(48, false);
-        assert_eq!(s.sounding(), Some(60), "a held-under note leaves the sound alone");
+        assert_eq!(
+            s.sounding(),
+            Some(60),
+            "a held-under note leaves the sound alone"
+        );
         s.note_on(48, 100, false);
         s.note_off(48, false);
         assert_eq!(s.sounding(), Some(60));
@@ -557,7 +586,11 @@ mod tests {
             assert_eq!(s.sounding(), Some(p));
             s.note_off(p, false);
         }
-        assert_eq!(s.sounding(), None, "note 40 was dropped and must not come back");
+        assert_eq!(
+            s.sounding(),
+            None,
+            "note 40 was dropped and must not come back"
+        );
     }
 
     #[test]
@@ -664,7 +697,11 @@ mod tests {
         s.pattern_off();
         assert_eq!(s.sounding(), Some(48));
         s.note_off(48, false);
-        assert_eq!(s.sounding(), Some(48), "a pattern NoteOff never releases an audition");
+        assert_eq!(
+            s.sounding(),
+            Some(48),
+            "a pattern NoteOff never releases an audition"
+        );
     }
 
     #[test]

@@ -45,7 +45,10 @@ impl Default for Vco {
 
 impl Vco {
     pub fn new() -> Self {
-        Self { phase: 0.0, cycles: 0 }
+        Self {
+            phase: 0.0,
+            cycles: 0,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -120,11 +123,18 @@ mod tests {
             .map(|n| 2.0 * ((n as f32 * f / SR) % 1.0) - 1.0)
             .collect();
         let ratio = |x: &[f32]| magnitude(x, 21_450.0) / magnitude(x, f as f64);
-        assert!(ratio(&blep) < 0.5 * ratio(&naive), "{} vs {}", ratio(&blep), ratio(&naive));
+        assert!(
+            ratio(&blep) < 0.5 * ratio(&naive),
+            "{} vs {}",
+            ratio(&blep),
+            ratio(&naive)
+        );
     }
 
     fn sign_changes(x: &[f32]) -> usize {
-        x.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count()
+        x.windows(2)
+            .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+            .count()
     }
 
     #[test]
@@ -134,7 +144,11 @@ mod tests {
             .map(|_| vco.next(1000.0 / SR, 0.5, SubWave::Oct1Square).sub)
             .collect();
         // A 500 Hz square changes sign 1000 times a second.
-        assert!((sign_changes(&sub) as i32 - 1000).abs() <= 2, "{}", sign_changes(&sub));
+        assert!(
+            (sign_changes(&sub) as i32 - 1000).abs() <= 2,
+            "{}",
+            sign_changes(&sub)
+        );
     }
 
     #[test]

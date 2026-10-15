@@ -131,7 +131,10 @@ mod tests {
         let mut e = Adsr::new(SR);
         e.set(0.01, 0.1, 0.5, 0.1);
         e.gate_on();
-        assert!((run(&mut e, 240) - 0.5).abs() < 0.01, "half way up the attack");
+        assert!(
+            (run(&mut e, 240) - 0.5).abs() < 0.01,
+            "half way up the attack"
+        );
         run(&mut e, 240);
         assert_eq!(e.stage(), Stage::Decay);
         let after_decay = run(&mut e, 4800);

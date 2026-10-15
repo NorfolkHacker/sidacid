@@ -208,7 +208,10 @@ mod tests {
 
     fn plays(app: &SidAcidApp) -> usize {
         use acid_engine::host::Command;
-        app.pending.iter().filter(|c| matches!(c, Command::Play)).count()
+        app.pending
+            .iter()
+            .filter(|c| matches!(c, Command::Play))
+            .count()
     }
 
     #[test]
@@ -264,7 +267,11 @@ mod tests {
         frame(&mut app, vec![]);
         frame(
             &mut app,
-            vec![space(true, false), egui::Event::Text(" ".into()), space(false, false)],
+            vec![
+                space(true, false),
+                egui::Event::Text(" ".into()),
+                space(false, false),
+            ],
         );
         assert_eq!(text, "Mono ");
         assert_eq!(plays(&app), 0, "typing a space doesn't start playback");

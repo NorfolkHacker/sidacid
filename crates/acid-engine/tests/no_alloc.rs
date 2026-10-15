@@ -597,7 +597,11 @@ fn machines_joining_mid_pattern_do_not_allocate() {
     let (mut host, mut tx, _rx) = host::channel(Engine::from_project(SR, &p));
     let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
     let mut q = p.clone();
-    for (uid, ty) in [(7, MachineType::Synth), (8, MachineType::Fm), (9, MachineType::Mono)] {
+    for (uid, ty) in [
+        (7, MachineType::Synth),
+        (8, MachineType::Fm),
+        (9, MachineType::Mono),
+    ] {
         q.machines
             .push(MachineEntry::new(MachineUid(uid), ty, format!("M{uid}")));
     }
