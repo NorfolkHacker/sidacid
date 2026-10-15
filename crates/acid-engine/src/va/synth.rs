@@ -117,7 +117,10 @@ impl MonoSynth {
     }
 
     pub fn note_on(&mut self, pitch: u8, vel: u8, live: bool) {
+        let mut live = live;
         if let Some(i) = self.held[..self.held_len].iter().position(|h| h.pitch == pitch) {
+            // A pattern note on a held audition must not un-hold the key.
+            live |= self.held[i].live;
             self.remove_at(i);
         }
         if self.held_len == MAX_HELD {
@@ -346,15 +349,130 @@ mod tests {
     }
 
     #[test]
-    fn drift_zero_is_exactly_repeatable_and_drift_changes_the_sound() {
-        let play = |drift: f32| {
+    fn drift_zero_ignores_drift_state_and_drift_changes_the_sound() {
+        let play = |drift: f32, perturb: bool| {
             let mut s = MonoSynth::new(SR);
             s.set_param(M::Drift, drift);
+            if perturb {
+                for _ in 0..5000 {
+                    s.drift.next();
+                }
+                s.drift.note_offset();
+            }
             s.note_on(48, 100, false);
             render(&mut s, 9600)
         };
-        assert_eq!(play(0.0), play(0.0));
-        assert_ne!(play(0.0), play(1.0));
+        assert_eq!(play(0.0, false), play(0.0, true));
+        assert_ne!(play(1.0, false), play(1.0, true));
+    }
+
+    #[test]
+    fn the_held_stack_caps_at_sixteen_and_drops_the_oldest() {
+        let mut s = MonoSynth::new(SR);
+        for p in 40..57 {
+            s.note_on(p, 100, false);
+        }
+        for p in (41..57).rev() {
+            assert_eq!(s.sounding(), Some(p));
+            s.note_off(p, false);
+        }
+        assert_eq!(s.sounding(), None, "note 40 was dropped and must not come back");
+    }
+
+    #[test]
+    fn releasing_a_middle_note_leaves_the_sound_and_repress_moves_to_top() {
+        let mut s = MonoSynth::new(SR);
+        s.note_on(40, 100, false);
+        s.note_on(50, 100, false);
+        s.note_on(60, 100, false);
+        s.note_off(50, false);
+        assert_eq!(s.sounding(), Some(60));
+        s.note_on(40, 100, false);
+        assert_eq!(s.sounding(), Some(40));
+        s.note_off(40, false);
+        assert_eq!(s.sounding(), Some(60));
+    }
+
+    #[test]
+    fn portamento_on_glides_after_a_gap_and_off_never_glides() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Portamento, 0.5);
+        s.set_param(M::PortaTime, 1.0);
+        s.note_on(48, 100, false);
+        s.all_off();
+        s.note_on(60, 100, false);
+        render(&mut s, 100);
+        assert!(s.pitch < 59.0 && s.pitch >= 48.0, "{}", s.pitch);
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Portamento, 0.0);
+        s.set_param(M::PortaTime, 1.0);
+        s.note_on(48, 100, false);
+        s.note_on(60, 100, false);
+        assert_eq!(s.pitch, 60.0);
+    }
+
+    #[test]
+    fn trigger_lfo_retriggers_each_cycle_while_held() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Trigger, 1.0);
+        s.set_param(M::LfoRate, 1.0);
+        s.set_param(M::Attack, 0.0);
+        s.set_param(M::Decay, 0.0);
+        s.note_on(48, 100, false);
+        let mut saw_attack_again = false;
+        let mut reached_sustain = false;
+        for _ in 0..48_000 {
+            render(&mut s, 1);
+            match s.env.stage() {
+                Stage::Sustain => reached_sustain = true,
+                Stage::Attack if reached_sustain => saw_attack_again = true,
+                _ => {}
+            }
+        }
+        assert!(reached_sustain && saw_attack_again);
+    }
+
+    #[test]
+    fn render_adds_into_the_buffers() {
+        let mut s = MonoSynth::new(SR);
+        let (mut l, mut r) = (vec![1.0; 256], vec![1.0; 256]);
+        s.render(&mut l, &mut r);
+        assert!(l.iter().chain(r.iter()).all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn gate_mode_fallback_does_not_retrigger() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Trigger, 0.5);
+        s.set_param(M::Attack, 0.0);
+        s.set_param(M::Decay, 0.0);
+        s.note_on(48, 100, false);
+        s.note_on(60, 100, false);
+        render(&mut s, 4800);
+        assert_eq!(s.env.stage(), Stage::Sustain);
+        s.note_off(60, false);
+        assert_eq!(s.sounding(), Some(48));
+        assert_eq!(s.env.stage(), Stage::Sustain);
+    }
+
+    #[test]
+    fn reset_silences() {
+        let mut s = MonoSynth::new(SR);
+        s.note_on(48, 100, false);
+        render(&mut s, 4800);
+        s.reset();
+        assert!(render(&mut s, 4800).iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn a_pattern_note_on_a_held_audition_does_not_silence_it() {
+        let mut s = MonoSynth::new(SR);
+        s.note_on(48, 100, true);
+        s.note_on(48, 100, false);
+        s.note_off(48, false);
+        assert_eq!(s.sounding(), Some(48));
+        s.note_off(48, true);
+        assert_eq!(s.sounding(), None);
     }
 
     #[test]
