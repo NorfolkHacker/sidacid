@@ -97,10 +97,12 @@ impl MonoSynth {
     }
 
     pub fn set_param(&mut self, p: MonoParam, v: f32) {
+        let was_on = self.patch.arp_on;
         self.patch.set(p, v);
         self.apply_patch();
         match p {
-            MonoParam::ArpOn => {
+            MonoParam::ArpOn if self.patch.arp_on != was_on => {
+                self.arp.clear_timing();
                 // Off → on starts the pattern afresh; on → off re-sounds the
                 // newest held note (forgetting what the arp last played).
                 self.arp.set_notes(&[], 1);
@@ -146,6 +148,7 @@ impl MonoSynth {
         }
         self.arp.set_notes(&pitches[..self.held_len], self.patch.arp_octaves);
         if self.arp.is_empty() {
+            self.arp.clear_timing();
             self.close_gate();
         } else if was_empty {
             self.arp.restart();
@@ -218,6 +221,7 @@ impl MonoSynth {
     pub fn reset(&mut self) {
         self.held_len = 0;
         self.arp.set_notes(&[], 1);
+        self.arp.reset();
         self.sounding = None;
         self.gate = false;
         self.has_pitch = false;
@@ -288,6 +292,8 @@ impl MonoSynth {
                     ArpEvent::GateOff => self.close_gate(),
                     ArpEvent::Idle => {}
                 }
+            } else {
+                self.arp.skip();
             }
             let (l, r) = self.sample();
             left[i] += l;
@@ -616,6 +622,43 @@ mod tests {
         render(&mut s, 10);
         s.set_param(M::ArpOn, 0.0);
         assert_eq!(s.sounding(), Some(60));
+    }
+
+    #[test]
+    fn an_audition_mid_tick_waits_for_the_next_grid_step() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ArpOn, 1.0);
+        s.clock_tick(4, 100.0);
+        render(&mut s, 50);
+        s.note_on(48, 100, true);
+        render(&mut s, 50);
+        for t in 5..8 {
+            s.clock_tick(t, 100.0);
+            render(&mut s, 100);
+        }
+        assert_eq!(s.arp_steps(), 0, "no step off the grid");
+        s.clock_tick(8, 100.0);
+        render(&mut s, 1);
+        assert_eq!(s.arp_steps(), 1);
+    }
+
+    #[test]
+    fn setting_arp_on_to_its_current_value_changes_nothing() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::ArpOn, 1.0);
+        for p in [48, 52, 55] {
+            s.note_on(p, 100, true);
+        }
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            render(&mut s, 1);
+            seen.push(s.sounding());
+            render(&mut s, 5999);
+        }
+        s.set_param(M::ArpOn, 1.0);
+        render(&mut s, 1);
+        seen.push(s.sounding());
+        assert_eq!(seen, [Some(48), Some(52), Some(55)]);
     }
 
     #[test]

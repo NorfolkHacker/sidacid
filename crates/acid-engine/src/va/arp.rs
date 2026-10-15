@@ -80,6 +80,29 @@ impl Arp {
         self.len == 0
     }
 
+    /// Drops pending gate-off and free-run timing (the arp stopped or reset).
+    pub fn clear_timing(&mut self) {
+        self.gate_left = 0.0;
+        self.free_left = 0.0;
+    }
+
+    /// Back to power-on: no notes' timing, no transport, no scheduled step.
+    pub fn reset(&mut self) {
+        self.clear_timing();
+        self.transport = false;
+        self.next_in = None;
+        self.pos = 0;
+    }
+
+    /// One sample passes with no arp notes: a step scheduled in this tick
+    /// counts down and is dropped once its sample is gone, so a note
+    /// arriving later cannot fire off the grid.
+    pub fn skip(&mut self) {
+        if let Some(n) = self.next_in {
+            self.next_in = (n > 0.5).then(|| n - 1.0);
+        }
+    }
+
     pub fn restart(&mut self) {
         self.pos = 0;
     }
@@ -98,7 +121,7 @@ impl Arp {
             ArpMode::UpDown if len >= 2 => 2 * len - 2,
             _ => len,
         };
-        let i = self.pos % period;
+        let i = self.pos.min(period - 1);
         self.pos = (i + 1) % period;
         Some(match mode {
             ArpMode::Up => self.notes[i],
@@ -201,6 +224,24 @@ mod tests {
     fn range_adds_octaves() {
         assert_eq!(take(&mut arp(&[48, 55], 2), Up, 5), [48, 55, 60, 67, 48]);
         assert_eq!(take(&mut arp(&[120], 3), Up, 2), [120, 120], "past 127 is dropped");
+    }
+
+    #[test]
+    fn a_shrinking_chord_clamps_the_place() {
+        let mut a = arp(&[48, 52, 55, 60], 1);
+        take(&mut a, Up, 3);
+        a.set_notes(&[48, 52, 55], 1);
+        assert_eq!(a.next_pitch(Up), Some(55));
+    }
+
+    #[test]
+    fn cleared_timing_leaves_no_stale_gate_off() {
+        let mut a = arp(&[48], 1);
+        a.clock_tick(0, 100.0, 12);
+        assert_eq!(a.advance(12), ArpEvent::Step);
+        a.clear_timing();
+        a.clock_tick(1, 100.0, 12);
+        assert!((0..200).all(|_| a.advance(12) == ArpEvent::Idle));
     }
 
     #[test]
