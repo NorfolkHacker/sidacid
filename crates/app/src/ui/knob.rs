@@ -6,7 +6,8 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, Vec2, pos2, vec
 use std::f32::consts::PI;
 
 pub const KNOB_SIZE: f32 = 36.0;
-const CELL: Vec2 = vec2(KNOB_SIZE + 10.0, KNOB_SIZE + 16.0);
+/// The space one knob or switch takes.
+pub const CELL: Vec2 = vec2(KNOB_SIZE + 10.0, KNOB_SIZE + 16.0);
 const COARSE_PER_PIXEL: f32 = 0.006;
 const FINE_PER_PIXEL: f32 = 0.001;
 const SCROLL_STEP: f32 = 0.02;

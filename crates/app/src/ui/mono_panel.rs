@@ -3,6 +3,7 @@
 //! sketch, the patch browser, and the pattern row with the poly piano roll.
 
 use super::mono_patches::STARTER;
+use super::knob::CELL;
 use super::{SidAcidApp, theme};
 use acid_engine::machine::MachineUid;
 use acid_engine::params::MonoParam as M;
@@ -58,10 +59,32 @@ impl SidAcidApp {
         });
     }
 
+    /// One framed knob group. Its width is worked out before drawing (the
+    /// wrapping row cannot see a group's width until it is drawn), so a
+    /// group that would run past the right edge starts the next row.
     fn mono_group(&mut self, ui: &mut egui::Ui, uid: MachineUid, (label, knobs): Group) {
-        ui.group(|ui| {
+        let text = egui::RichText::new(label).small().color(theme::ACID);
+        let label_w = egui::WidgetText::from(text.clone())
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Small,
+            )
+            .size()
+            .x;
+        let frame = egui::Frame::group(ui.style());
+        let n = knobs.len() as f32;
+        let knobs_w = n * CELL.x + (n - 1.0) * ui.spacing().item_spacing.x;
+        // A switch whose text is wider than its cell grows a little, so the
+        // width drawn last frame wins when it is larger.
+        let id = ui.id().with(("mono_group", label));
+        let drawn = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+        let width = (knobs_w.max(label_w) + frame.total_margin().sum().x).max(drawn);
+        wrap_unless_fits(ui, width);
+        let r = frame.show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new(label).small().color(theme::ACID));
+                ui.label(text);
                 ui.horizontal(|ui| {
                     for &(p, name) in knobs {
                         self.param_knob(ui, uid.param(p), name);
@@ -69,6 +92,8 @@ impl SidAcidApp {
                 });
             });
         });
+        let w = r.response.rect.width();
+        ui.data_mut(|d| d.insert_temp(id, w));
     }
 
     /// Display-only ADSR shape from the current knobs (times drawn on a
@@ -76,7 +101,9 @@ impl SidAcidApp {
     fn mono_env_sketch(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let v = |p: M| self.doc.project.param(uid.param(p));
         let (a, d, s, r) = (v(M::Attack), v(M::Decay), v(M::Sustain), v(M::Release));
-        let (rect, _) = ui.allocate_exact_size(vec2(96.0, 44.0), Sense::hover());
+        let size = vec2(96.0, 44.0);
+        wrap_unless_fits(ui, size.x);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, theme::GRID_DARK);
         let inner = rect.shrink(3.0);
@@ -128,11 +155,117 @@ impl SidAcidApp {
     }
 }
 
+/// Starts a new row of a wrapping layout when an item `width` wide would
+/// run past the visible right edge. The edge is the clip rect as well as
+/// the ui's own: an earlier over-wide row in the rack widens every later
+/// ui's max rect past the window.
+fn wrap_unless_fits(ui: &mut egui::Ui, width: f32) {
+    let x = ui.cursor().min.x;
+    let at_row_start = x <= ui.max_rect().left() + 0.5;
+    let right = ui.max_rect().right().min(ui.clip_rect().right());
+    if !at_row_start && x + width > right {
+        ui.end_row();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::Document;
     use acid_engine::machine::MachineType;
+
+    /// Every text shape drawn in a frame: its string and screen rect.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push((t.galley.job.text.clone(), t.visual_bounding_rect()))
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in shapes {
+            walk(&c.shape, &mut out);
+        }
+        out
+    }
+
+    /// The demo project plus a Mono, drawn in a `w`×`h` window with the
+    /// rack scrolled until the Mono panel (header to patch list) is on
+    /// screen. Returns the texts drawn between the header and "Patches".
+    fn mono_panel_texts(w: f32, h: f32) -> Vec<(String, egui::Rect)> {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let uid = app.add_machine(MachineType::Mono).expect("room for a Mono");
+        let title = app.panel_title(uid).to_uppercase();
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
+        let mut time = 0.0;
+        let mut frame = |app: &mut SidAcidApp, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            texts(&ctx.run(input, |ctx| app.ui(ctx)).shapes)
+        };
+        let find = |drawn: &[(String, egui::Rect)], f: &dyn Fn(&str) -> bool| {
+            drawn.iter().find(|(t, _)| f(t)).map(|(_, r)| *r)
+        };
+        // Scroll with the pointer in the rack's left gutter, clear of knobs,
+        // step grids and rolls (which take the wheel themselves).
+        let pointer = pos2(12.0, h * 0.6);
+        for _ in 0..400 {
+            let drawn = frame(&mut app, vec![]);
+            let head = find(&drawn, &|t| t.starts_with(&title));
+            let patches = find(&drawn, &|t| t == "Patches");
+            if let (Some(head), Some(patches)) = (head, patches) {
+                if head.top() >= 0.0 && patches.bottom() <= h {
+                    return drawn
+                        .into_iter()
+                        .filter(|(_, r)| r.top() > head.bottom() && r.bottom() < patches.top())
+                        .collect();
+                }
+            }
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -20.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        panic!("the Mono panel never came fully on screen at {w}x{h}");
+    }
+
+    #[test]
+    fn every_group_and_knob_is_drawn_inside_the_window() {
+        for (w, h) in [(1280.0, 800.0), (636.0, 1044.0)] {
+            let drawn = mono_panel_texts(w, h);
+            let drawn_as = |want: &str| {
+                // Knobs paint their name; switches draw "name\nvalue".
+                drawn
+                    .iter()
+                    .any(|(t, _)| t == want || t.starts_with(&format!("{want}\n")))
+            };
+            for (label, knobs) in FRONT.iter().chain(SECOND.iter()) {
+                assert!(drawn_as(label), "{label} not drawn at {w}x{h}");
+                for (_, name) in knobs.iter() {
+                    assert!(drawn_as(name), "{label} {name} not drawn at {w}x{h}");
+                }
+            }
+            for (t, r) in &drawn {
+                assert!(r.right() <= w, "{t:?} ends at {} at {w}x{h}", r.right());
+            }
+        }
+    }
 
     #[test]
     fn the_panel_draws_its_sections_and_the_patch_list() {
@@ -158,7 +291,9 @@ mod tests {
         for c in &out.shapes {
             walk(&c.shape, &mut texts);
         }
-        for want in ["VCO", "SOURCE", "VCF", "ENV", "LFO", "ARP", "Squelch", "Randomise"] {
+        // The groups and knobs are checked in
+        // `every_group_and_knob_is_drawn_inside_the_window`.
+        for want in ["Squelch", "Randomise"] {
             assert!(texts.iter().any(|t| t == want), "{want} not drawn");
         }
     }
