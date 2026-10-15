@@ -353,6 +353,58 @@ fn toggling_fm_effects_does_not_allocate() {
 }
 
 #[test]
+fn a_stepping_mono_arp_does_not_allocate() {
+    use acid_engine::machine::MachineType;
+    use acid_engine::params::MonoParam as M;
+    use acid_engine::project::MachineBody;
+    let mut p = busy_project();
+    let mut m = p.new_machine(MachineType::Mono);
+    for (param, v) in [
+        (M::ArpOn, 1.0),
+        (M::ArpRate, 0.8), // 1/16T
+        (M::ChorusMix, 0.7),
+        (M::Drift, 1.0),
+        (M::Portamento, 0.5), // On
+    ] {
+        m.params.insert(MachineParam::Mono(param), v);
+    }
+    if let MachineBody::Mono(mono) = &mut m.body {
+        // Overlapping held notes, so the arp has a chord to step through.
+        mono.patterns[0].notes = [(0, 36), (4, 40), (8, 43), (24, 47), (40, 38)]
+            .map(|(start, pitch)| Note {
+                start,
+                len: 24,
+                pitch,
+                vel: 100,
+            })
+            .to_vec();
+    }
+    let uid = m.uid;
+    p.machines.push(m);
+    p.validate().unwrap();
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    let n = count_allocs(|| {
+        e.play();
+        render_seconds(&mut e, &mut l, &mut r, 1.0);
+        e.set_bpm(97.0);
+        render_seconds(&mut e, &mut l, &mut r, 0.5);
+        for (on, range) in [(0.0, 0.5), (1.0, 1.0), (0.0, 0.0), (1.0, 0.5)] {
+            e.set_param(uid.param(M::ArpOn), on);
+            e.set_param(uid.param(M::ArpRange), range);
+            render_seconds(&mut e, &mut l, &mut r, 0.3);
+        }
+        e.set_bpm(160.0);
+        render_seconds(&mut e, &mut l, &mut r, 0.5);
+        e.stop();
+        render_seconds(&mut e, &mut l, &mut r, 0.1);
+        e.stop();
+        render_seconds(&mut e, &mut l, &mut r, 0.5);
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn cpu_timing_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
