@@ -6,7 +6,7 @@ use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
 use acid_engine::params::{
-    FmParam, FxParam, MachineParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map,
+    FmParam, FxParam, MachineParam, MonoParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps, sampler_map,
     step_index,
 };
 use eframe::egui;
@@ -27,6 +27,20 @@ pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
             &["-Lin", "-Exp", "+Exp", "+Lin"]
         }
         ParamId::Machine(_, M::FmOp(_, OpParam::FixedFreq)) => &["Ratio", "Fixed"],
+        ParamId::Machine(_, M::Mono(p)) => match p {
+            MonoParam::Range => &["16'", "8'", "4'", "2'"],
+            MonoParam::PwmSource => &["Manual", "LFO", "Env"],
+            MonoParam::SubWave => &["-1 Sq", "-2 Sq", "-2 Pls"],
+            MonoParam::Trigger => &["Gate+Trig", "Gate", "LFO"],
+            MonoParam::VcaMode => &["Env", "Gate"],
+            MonoParam::LfoWave => &["Tri", "Square", "Random", "Noise"],
+            MonoParam::Portamento => &["Off", "On", "Auto"],
+            MonoParam::ArpMode => &["Up", "U&D", "Down"],
+            MonoParam::ArpRange => &["1 Oct", "2 Oct", "3 Oct"],
+            MonoParam::ArpRate => &["1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32"],
+            _ if id.info().steps == 2 => &["Off", "On"],
+            _ => &[],
+        },
         _ if id.info().steps == 2 => &["Off", "On"],
         _ => &[],
     }
@@ -254,6 +268,20 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::test_rack::*;
+
+    #[test]
+    fn mono_switches_have_names_for_every_position() {
+        use acid_engine::machine::MachineUid;
+        use acid_engine::params::MonoParam;
+        let uid = MachineUid(9);
+        for p in MonoParam::ALL {
+            let id = uid.param(p);
+            let steps = id.info().steps as usize;
+            if steps >= 2 {
+                assert_eq!(discrete_names(id).len(), steps, "{p:?}");
+            }
+        }
+    }
 
     #[test]
     fn an_edit_without_a_drag_counts_as_a_touch_while_recording() {

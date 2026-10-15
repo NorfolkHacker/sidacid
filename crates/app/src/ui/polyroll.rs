@@ -27,6 +27,8 @@ const VIEW_H: f32 = ROW_H * super::roll_edit::ROLL_ROWS as f32;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
 const FM_START_PITCH: u8 = 48;
+/// Pitch the Mono roll first scrolls to: C2 (MIDI 36), as it is mostly bass.
+const MONO_START_PITCH: u8 = 36;
 const BLACK_KEYS: [bool; 12] = [
     false, true, false, true, false, false, true, false, true, false, true, false,
 ];
@@ -41,6 +43,9 @@ impl SidAcidApp {
     /// Pitch the roll of note machine `uid` first centres on: for a
     /// sampler the lowest loaded zone's base key, or C1 with none; C3 for FM.
     pub(crate) fn roll_start_pitch(&self, uid: MachineUid) -> u8 {
+        if self.doc.project.mono(uid).is_some() {
+            return MONO_START_PITCH;
+        }
         let Some(sampler) = self.doc.project.sampler(uid) else {
             return FM_START_PITCH;
         };
@@ -439,6 +444,15 @@ mod tests {
     use crate::test_rack::*;
     use crate::ui::poly_edit::move_to;
     use acid_engine::project::Project;
+
+    #[test]
+    fn the_mono_roll_opens_on_c2() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.add_machine(acid_engine::machine::MachineType::Mono);
+        let uid = app.doc.project.machines.last().unwrap().uid;
+        assert_eq!(app.doc.project.mono(uid).map(|_| ()), Some(()));
+        assert_eq!(app.roll_start_pitch(uid), 36);
+    }
 
     fn fm_app() -> SidAcidApp {
         SidAcidApp::headless(Document::new(Project::default()))

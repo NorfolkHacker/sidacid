@@ -5,7 +5,6 @@ use super::SidAcidApp;
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::MonoParam;
-#[allow(unused_imports)] // Used by the Mono panel's patch list (Task 10).
 pub(crate) use acid_engine::va::starter::STARTER;
 
 impl SidAcidApp {
@@ -30,7 +29,6 @@ impl SidAcidApp {
 
     /// The Mono panel's Randomise: a new sound that always plays, as one
     /// undo step. Volume, arp, drift and chorus are kept.
-    #[allow(dead_code)] // Used by the Mono panel's Randomise button (Task 10).
     pub(crate) fn randomise_mono_patch(&mut self, uid: MachineUid) {
         let seed = self.next_seed();
         self.randomise_mono_patch_seeded(uid, seed);
