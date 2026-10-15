@@ -3,7 +3,7 @@
 //! envelope trigger modes (every note, after a gap, or each LFO cycle),
 //! the portamento modes, drift and a chorus.
 
-use super::adsr::Adsr;
+use super::adsr::{Adsr, Stage};
 use super::arp::{Arp, ArpEvent};
 use super::ladder::Ladder;
 use super::lfo::{Drift, Lfo, Noise};
@@ -23,6 +23,9 @@ const DRIFT_NOTE_SEMIS: f32 = 0.03;
 const DRIFT_CUTOFF_OCT: f32 = 0.15;
 /// Gate-mode VCA ramp, so on/off doesn't click.
 const VCA_RAMP_S: f32 = 0.002;
+/// Cutoff and Volume knob smoothing, so knob moves and automation steps
+/// don't zipper or click.
+const KNOB_SMOOTH_S: f32 = 0.01;
 
 fn midi_hz(semis: f32) -> f32 {
     440.0 * ((semis - 69.0) / 12.0).exp2()
@@ -63,6 +66,11 @@ pub struct MonoSynth {
     vca: f32,
     vca_coef: f32,
     glide_coef: f32,
+    /// The Cutoff knob, smoothed in octaves (log2 Hz) so sweeps are even.
+    pub(super) cutoff_oct: f32,
+    /// The Volume knob's gain, smoothed.
+    pub(super) volume: f32,
+    knob_coef: f32,
 }
 
 impl MonoSynth {
@@ -91,7 +99,11 @@ impl MonoSynth {
             vca: 0.0,
             vca_coef: 1.0 - (-1.0 / (VCA_RAMP_S * sample_rate)).exp(),
             glide_coef: 1.0,
+            cutoff_oct: 0.0,
+            volume: 0.0,
+            knob_coef: 1.0 - (-1.0 / (KNOB_SMOOTH_S * sample_rate)).exp(),
         };
+        s.snap_knobs();
         s.apply_patch();
         s.arp.set_bpm(120.0, sample_rate);
         s
@@ -102,6 +114,11 @@ impl MonoSynth {
         let chorus_was_on = self.patch.chorus_mix > 0.0;
         self.patch.set(p, v);
         self.apply_patch();
+        // Nothing sounding: no glide to hear, so a loaded project or patch
+        // starts on its values rather than sweeping up from the old ones.
+        if self.is_silent() {
+            self.snap_knobs();
+        }
         // The chorus is not fed while its Mix is 0, so its line still holds
         // the audio from before: clear it rather than replay that.
         if !chorus_was_on && self.patch.chorus_mix > 0.0 {
@@ -119,6 +136,16 @@ impl MonoSynth {
             MonoParam::ArpRange if self.patch.arp_on => self.arp_follow_held(),
             _ => {}
         }
+    }
+
+    fn is_silent(&self) -> bool {
+        !self.gate && self.env.stage() == Stage::Idle && self.vca == 0.0
+    }
+
+    /// Puts the smoothed knobs straight onto their targets.
+    fn snap_knobs(&mut self) {
+        self.cutoff_oct = self.patch.cutoff_hz.log2();
+        self.volume = self.patch.volume;
     }
 
     fn apply_patch(&mut self) {
@@ -239,6 +266,7 @@ impl MonoSynth {
         self.lfo.reset();
         self.drift.reset();
         self.chorus.reset();
+        self.snap_knobs();
     }
 
     /// After the held set changed: sound the newest held note (legato) or
@@ -341,7 +369,9 @@ impl MonoSynth {
             + p.key_follow * (self.pitch - 48.0) / 12.0
             + p.vel_vcf_oct * (self.vel * 2.0 - 1.0)
             + p.drift * DRIFT_CUTOFF_OCT * drift_cutoff;
-        self.filter.set(p.cutoff_hz * octaves.exp2(), p.resonance_k);
+        self.cutoff_oct += (p.cutoff_hz.log2() - self.cutoff_oct) * self.knob_coef;
+        self.volume += (p.volume - self.volume) * self.knob_coef;
+        self.filter.set((self.cutoff_oct + octaves).exp2(), p.resonance_k);
         let y = self.filter.process(mix);
         if p.vca_gate {
             let to = if self.gate { 1.0 } else { 0.0 };
@@ -353,7 +383,7 @@ impl MonoSynth {
             self.vca = env;
         }
         let vel_gain = 1.0 - p.vel_vca * (1.0 - self.vel);
-        let x = y * self.vca * vel_gain * p.volume * OUT_LEVEL;
+        let x = y * self.vca * vel_gain * self.volume * OUT_LEVEL;
         if p.chorus_mix > 0.0 {
             let (wl, wr) = self.chorus.process(x, p.chorus_rate, p.chorus_depth);
             (x + (wl - x) * p.chorus_mix, x + (wr - x) * p.chorus_mix)
@@ -368,9 +398,59 @@ mod tests {
     use super::*;
     use crate::params::MonoParam as M;
     use crate::testutil::{all_finite, peak, rms};
-    use crate::va::adsr::Stage;
 
     const SR: f32 = 48_000.0;
+
+    /// A held, sustained note with a bright, steady sound.
+    fn held_note() -> MonoSynth {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Attack, 0.0);
+        s.set_param(M::Sustain, 1.0);
+        s.set_param(M::EnvAmount, 0.0);
+        s.note_on(48, 127, false);
+        render(&mut s, 4800);
+        s
+    }
+
+    #[test]
+    fn a_volume_jump_ramps_instead_of_stepping() {
+        let mut s = held_note();
+        let before = rms(&render(&mut s, 960));
+        s.set_param(M::Volume, 0.0);
+        let after = render(&mut s, 4800);
+        // The first millisecond has barely moved; 20–30 ms in it is well
+        // down; 100 ms in (ten time constants) it is under 1%.
+        assert!(rms(&after[..48]) > 0.5 * before, "stepped straight down");
+        assert!(rms(&after[960..1440]) < 0.5 * before);
+        assert!(rms(&after[4320..]) < 0.01 * before);
+    }
+
+    #[test]
+    fn a_cutoff_jump_glides_in_octaves() {
+        let mut s = held_note();
+        s.set_param(M::Cutoff, 0.2);
+        render(&mut s, 4800);
+        let low = s.cutoff_oct;
+        s.set_param(M::Cutoff, 0.9);
+        let target = s.patch.cutoff_hz.log2();
+        render(&mut s, 1);
+        assert!(s.cutoff_oct - low < 0.1 * (target - low), "jumped: {}", s.cutoff_oct - low);
+        // 100 ms is ten time constants: within 0.01 octave of a ~7 octave jump.
+        render(&mut s, 4800);
+        assert!((s.cutoff_oct - target).abs() < 0.01, "not arrived: {}", target - s.cutoff_oct);
+    }
+
+    #[test]
+    fn knobs_set_while_silent_take_effect_at_once() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(M::Cutoff, 0.1);
+        s.set_param(M::Volume, 1.0);
+        assert_eq!(s.cutoff_oct, s.patch.cutoff_hz.log2());
+        assert_eq!(s.volume, s.patch.volume);
+        s.note_on(48, 100, false);
+        render(&mut s, 1);
+        assert_eq!(s.cutoff_oct, s.patch.cutoff_hz.log2(), "no sweep on the first note");
+    }
 
     fn render(s: &mut MonoSynth, n: usize) -> Vec<f32> {
         let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
