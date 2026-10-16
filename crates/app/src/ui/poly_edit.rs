@@ -71,7 +71,7 @@ pub enum LaneDrag {
     /// A selection box from `from` (tick, pitch); `add` keeps the old
     /// selection.
     Marquee { from: (u16, u8), add: bool },
-    /// A drag in the velocity strip.
+    /// A drag in a bar strip (velocity, chance or ratchet).
     Velocity,
 }
 

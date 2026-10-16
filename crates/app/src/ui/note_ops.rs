@@ -1,10 +1,12 @@
 //! Pure operations on a note selection (indices into a `NotePattern`),
 //! shared by every lane of the dock: pick, move, resize, delete, copy,
-//! paste, duplicate, and settling edited notes against their neighbours.
+//! paste, duplicate, and settling edited notes against their neighbours;
+//! setting one field (velocity, chance, ratchet, condition, accent, slide)
+//! on the selection, and the labels the inspector and badges show.
 
 use super::key_entry::LaneKind;
 use super::poly_edit::make_mono;
-use acid_engine::project::{MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
+use acid_engine::project::{Cond, MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
 use acid_engine::scale::Key;
 
 /// Why a paste was refused.
@@ -150,6 +152,108 @@ pub fn delete(p: &mut NotePattern, idx: &[usize]) {
         i += 1;
         keep
     });
+}
+
+/// One note field and the value to give it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Vel(u8),
+    Chance(u8),
+    Ratchet(u8),
+    Cond(Cond),
+    Accent(bool),
+    Slide(bool),
+}
+
+/// Sets `f` on every note at `idx`, clamped to the field's range (an
+/// invalid condition is ignored). True when any note changed. Positions in
+/// the vector don't change.
+pub fn set_field(p: &mut NotePattern, idx: &[usize], f: Field) -> bool {
+    if let Field::Cond(c) = f
+        && !c.is_valid()
+    {
+        return false;
+    }
+    let mut changed = false;
+    for &i in idx {
+        let Some(n) = p.notes.get_mut(i) else {
+            continue;
+        };
+        let before = *n;
+        match f {
+            Field::Vel(v) => n.vel = v.clamp(1, 127),
+            Field::Chance(c) => n.chance = c.min(100),
+            Field::Ratchet(r) => n.ratchet = r.clamp(1, 8),
+            Field::Cond(c) => n.cond = c,
+            Field::Accent(a) => n.accent = a,
+            Field::Slide(s) => n.slide = s,
+        }
+        changed |= *n != before;
+    }
+    changed
+}
+
+/// The value every note in `notes` shares, or None when they differ (or
+/// there are none).
+pub fn common<T: PartialEq>(notes: &[Note], get: impl Fn(&Note) -> T) -> Option<T> {
+    let first = get(notes.first()?);
+    notes.iter().all(|n| get(n) == first).then_some(first)
+}
+
+/// Every condition in the inspector's order: Always, the ratios 1:2, 2:2,
+/// 1:3 … 8:8, then First, Not first, Fill, Not fill, Pre, Not pre.
+pub fn conds() -> Vec<Cond> {
+    let mut v = vec![Cond::Always];
+    for b in 2..=8 {
+        for a in 1..=b {
+            v.push(Cond::Ratio(a, b));
+        }
+    }
+    v.extend([
+        Cond::First,
+        Cond::NotFirst,
+        Cond::Fill,
+        Cond::NotFill,
+        Cond::Pre,
+        Cond::NotPre,
+    ]);
+    v
+}
+
+/// A condition as the inspector lists it.
+pub fn cond_label(c: Cond) -> String {
+    match c {
+        Cond::Always => "Always".into(),
+        Cond::Ratio(a, b) => format!("{a}:{b}"),
+        Cond::First => "First".into(),
+        Cond::NotFirst => "Not first".into(),
+        Cond::Fill => "Fill".into(),
+        Cond::NotFill => "Not fill".into(),
+        Cond::Pre => "Pre".into(),
+        Cond::NotPre => "Not pre".into(),
+    }
+}
+
+/// The short text on a note's badge: its condition, chance and ratchet,
+/// those not at their defaults, e.g. "1:4 50% ×3". Empty for a plain note.
+pub fn badge_text(n: &Note) -> String {
+    let cond = match n.cond {
+        Cond::Always => None,
+        Cond::Ratio(a, b) => Some(format!("{a}:{b}")),
+        Cond::First => Some("1st".into()),
+        Cond::NotFirst => Some("!1st".into()),
+        Cond::Fill => Some("F".into()),
+        Cond::NotFill => Some("!F".into()),
+        Cond::Pre => Some("P".into()),
+        Cond::NotPre => Some("!P".into()),
+    };
+    let chance = (n.chance < 100).then(|| format!("{}%", n.chance));
+    let ratchet = (n.ratchet > 1).then(|| format!("×{}", n.ratchet));
+    [cond, chance, ratchet]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The notes at `idx` with starts relative to `origin` (<= every start).
@@ -319,7 +423,7 @@ fn absorb(p: &mut NotePattern, cur: usize) -> Vec<bool> {
 mod tests {
     use super::*;
     use crate::ui::key_entry::LaneKind;
-    use acid_engine::project::{MAX_NOTES, Note, NotePattern};
+    use acid_engine::project::{Cond, MAX_NOTES, Note, NotePattern};
     use acid_engine::scale::{Key, Scale};
 
     fn pat(notes: &[(u16, u16, u8)]) -> NotePattern {
@@ -344,6 +448,72 @@ mod tests {
             scale: Scale::Major,
             snap: true,
         }
+    }
+
+    #[test]
+    fn set_field_sets_each_note_at_the_indices_clamped() {
+        let mut p = pat(&[(0, 4, 60), (4, 4, 62), (8, 4, 64)]);
+        assert!(set_field(&mut p, &[0, 2], Field::Chance(50)));
+        let chances: Vec<_> = p.notes.iter().map(|n| n.chance).collect();
+        assert_eq!(chances, [50, 100, 50], "only the indexed notes");
+        assert!(!set_field(&mut p, &[0, 2], Field::Chance(50)), "no change");
+        set_field(&mut p, &[1], Field::Chance(200));
+        assert_eq!(p.notes[1].chance, 100, "clamped");
+        set_field(&mut p, &[0], Field::Ratchet(0));
+        assert_eq!(p.notes[0].ratchet, 1);
+        set_field(&mut p, &[0], Field::Ratchet(9));
+        assert_eq!(p.notes[0].ratchet, 8);
+        set_field(&mut p, &[0], Field::Vel(0));
+        assert_eq!(p.notes[0].vel, 1);
+        assert!(set_field(&mut p, &[1], Field::Cond(Cond::Ratio(1, 4))));
+        assert!(
+            !set_field(&mut p, &[1], Field::Cond(Cond::Ratio(5, 4))),
+            "invalid"
+        );
+        assert_eq!(p.notes[1].cond, Cond::Ratio(1, 4));
+        set_field(&mut p, &[1, 2], Field::Accent(true));
+        set_field(&mut p, &[2, 7], Field::Slide(true));
+        assert!(p.notes[1].accent && p.notes[2].accent && !p.notes[0].accent);
+        assert!(
+            p.notes[2].slide && !p.notes[1].slide,
+            "out of range skipped"
+        );
+        assert_eq!(p.notes.len(), 3);
+        assert_eq!(p.notes[0].start, 0, "positions stay");
+    }
+
+    #[test]
+    fn common_values_and_labels() {
+        let mut p = pat(&[(0, 4, 60), (4, 4, 62)]);
+        assert_eq!(common(&p.notes, |n| n.chance), Some(100));
+        p.notes[1].chance = 40;
+        assert_eq!(common(&p.notes, |n| n.chance), None, "mixed");
+        assert_eq!(common(&[], |n: &Note| n.chance), None);
+        let all = conds();
+        assert_eq!(all.len(), 1 + 35 + 6);
+        assert!(all.iter().all(|c| c.is_valid()));
+        assert_eq!(cond_label(all[1]), "1:2");
+        assert_eq!(cond_label(Cond::NotFirst), "Not first");
+        let mut n = Note::new(0, 4, 60, 100);
+        assert_eq!(badge_text(&n), "");
+        for (c, t) in [
+            (Cond::Ratio(1, 4), "1:4"),
+            (Cond::First, "1st"),
+            (Cond::NotFirst, "!1st"),
+            (Cond::Fill, "F"),
+            (Cond::NotFill, "!F"),
+            (Cond::Pre, "P"),
+            (Cond::NotPre, "!P"),
+        ] {
+            n.cond = c;
+            assert_eq!(badge_text(&n), t);
+        }
+        n.cond = Cond::Always;
+        n.chance = 50;
+        assert_eq!(badge_text(&n), "50%");
+        n.ratchet = 3;
+        n.cond = Cond::Fill;
+        assert_eq!(badge_text(&n), "F 50% ×3");
     }
 
     #[test]

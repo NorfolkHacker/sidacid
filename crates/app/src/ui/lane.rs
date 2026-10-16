@@ -18,10 +18,14 @@
 //! rows marked and named) and, with snap to scale on, put clicked and
 //! dragged notes on it; drum lanes ignore the key. A folded melodic lane
 //! shows only the rows on the key's scale plus those holding notes.
+//! The strip shows velocity (accent and slide on acid lanes, accent on
+//! drums), or the notes' chance or ratchet (a selector in the header).
+//! Notes with a chance below 100 or a condition get a dashed outline, and
+//! a badge ("1:4 50% ×3") where the note is wide enough.
 
 use super::key_entry::LaneKind;
 use super::lane_geom::{FoldRows, LaneGeom, Rows, ZOOMS, tick_w};
-use super::note_ops;
+use super::note_ops::{self, Field};
 use super::poly_edit::Snap;
 use super::poly_edit::{
     Flag, LaneDrag, add, note_at, set_velocity_in, toggle_accent_in, toggle_flag,
@@ -36,6 +40,7 @@ use acid_engine::project::{
 };
 use acid_engine::scale::Scale;
 use acid_engine::sequencer::Mode;
+use acid_engine::trig;
 use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, UiBuilder, pos2, vec2,
@@ -71,10 +76,79 @@ const BLACK_KEYS: [bool; 12] = [
     false, true, false, true, false, false, true, false, true, false, true, false,
 ];
 
-fn vel_from_y(y: f32, top: f32) -> u8 {
-    ((1.0 - (y - top) / VEL_H) * 127.0)
-        .round()
-        .clamp(1.0, 127.0) as u8
+/// What the expression strip shows (a view setting, not saved).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StripMode {
+    /// Velocity; acid: accent and slide; drums: accent.
+    #[default]
+    Expr,
+    Chance,
+    Ratchet,
+}
+
+impl StripMode {
+    pub(crate) const ALL: [StripMode; 3] = [StripMode::Expr, StripMode::Chance, StripMode::Ratchet];
+
+    fn label(self, kind: LaneKind) -> &'static str {
+        match (self, kind) {
+            (StripMode::Expr, LaneKind::Poly) => "Vel",
+            (StripMode::Expr, LaneKind::Acid) => "Acc/Slide",
+            (StripMode::Expr, LaneKind::Drums) => "Acc",
+            (StripMode::Chance, _) => "Chance",
+            (StripMode::Ratchet, _) => "Ratchet",
+        }
+    }
+}
+
+/// A bar strip: one bar per note, its height the field's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bar {
+    Vel,
+    Chance,
+    Ratchet,
+}
+
+impl Bar {
+    fn label(self) -> &'static str {
+        match self {
+            Bar::Vel => "Vel",
+            Bar::Chance => "Chc",
+            Bar::Ratchet => "Rat",
+        }
+    }
+
+    /// The lowest and highest value.
+    fn range(self) -> (u8, u8) {
+        match self {
+            Bar::Vel => (1, 127),
+            Bar::Chance => (0, 100),
+            Bar::Ratchet => (1, 8),
+        }
+    }
+
+    fn get(self, n: &acid_engine::project::Note) -> u8 {
+        match self {
+            Bar::Vel => n.vel,
+            Bar::Chance => n.chance,
+            Bar::Ratchet => n.ratchet,
+        }
+    }
+
+    fn field(self, v: u8) -> Field {
+        match self {
+            Bar::Vel => Field::Vel(v),
+            Bar::Chance => Field::Chance(v),
+            Bar::Ratchet => Field::Ratchet(v),
+        }
+    }
+
+    /// The value at height `y` in a strip whose top is `top`.
+    fn value_at(self, y: f32, top: f32) -> u8 {
+        let (lo, hi) = self.range();
+        ((1.0 - (y - top) / VEL_H) * hi as f32)
+            .round()
+            .clamp(lo as f32, hi as f32) as u8
+    }
 }
 
 /// One frame's edits to a lane's pattern.
@@ -370,12 +444,15 @@ impl SidAcidApp {
             .clicked();
         row.label(RichText::new(self.panel_title(uid)).strong());
         row.label(RichText::new(PatternRef(slot).label()).monospace().weak());
-        let melodic = self.lane_kind(uid) != LaneKind::Drums;
+        let kind = self.lane_kind(uid);
+        let melodic = kind != LaneKind::Drums;
+        let mode = self.view.panel(uid).strip_mode;
+        let mut picked = mode;
         let (strip, fold) = if strip_toggle {
             row.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let strip = ui
                     .selectable_label(view.strip, RichText::new("Strip").small())
-                    .on_hover_text("Show the velocity / accent strip")
+                    .on_hover_text("Show the expression strip")
                     .clicked();
                 let fold = melodic
                     && ui
@@ -384,12 +461,26 @@ impl SidAcidApp {
                             "Show only the rows on the key's scale, and rows holding notes",
                         )
                         .clicked();
+                if view.strip {
+                    ui.separator();
+                    // Right to left: the last is leftmost.
+                    for m in StripMode::ALL.into_iter().rev() {
+                        if ui
+                            .selectable_label(mode == m, RichText::new(m.label(kind)).small())
+                            .on_hover_text("What the strip shows")
+                            .clicked()
+                        {
+                            picked = m;
+                        }
+                    }
+                }
                 (strip, fold)
             })
             .inner
         } else {
             (false, false)
         };
+        self.view.panel(uid).strip_mode = picked;
         if fold {
             self.toggle_fold(uid, view);
         }
@@ -677,6 +768,22 @@ impl SidAcidApp {
                     Stroke::new(2.0_f32, theme::ACCENT),
                 );
             }
+            if trig::is_conditional(note) {
+                let d = r.shrink(0.5);
+                let corners = [
+                    d.left_top(),
+                    d.right_top(),
+                    d.right_bottom(),
+                    d.left_bottom(),
+                    d.left_top(),
+                ];
+                grid.extend(Shape::dashed_line(
+                    &corners,
+                    Stroke::new(1.0_f32, Color32::WHITE),
+                    3.0,
+                    2.0,
+                ));
+            }
             if sel.binary_search(&i).is_ok() {
                 grid.rect_stroke(
                     r,
@@ -684,6 +791,14 @@ impl SidAcidApp {
                     Stroke::new(1.5_f32, theme::ACID_LIGHT),
                     StrokeKind::Inside,
                 );
+            }
+            let badge = note_ops::badge_text(note);
+            if !badge.is_empty() {
+                let galley = grid.layout_no_wrap(badge, FontId::monospace(7.0), Color32::BLACK);
+                if galley.size().x + 3.0 <= r.width() {
+                    let at = pos2(r.left() + 2.0, r.center().y - galley.size().y / 2.0);
+                    grid.galley(at, galley, Color32::BLACK);
+                }
             }
         }
 
@@ -761,19 +876,32 @@ impl SidAcidApp {
         }
 
         if view.strip {
-            match kind {
-                LaneKind::Poly => {
-                    self.velocity_strip(ui, uid, &geom, width, &mut pattern, &mut frame)
+            // Strip edits change fields in place: the selection follows.
+            let before = std::mem::take(&mut frame.changed);
+            let g = &geom;
+            match (self.view.panel(uid).strip_mode, kind) {
+                (StripMode::Chance, _) => {
+                    self.bar_strip(ui, uid, g, width, &mut pattern, &mut frame, Bar::Chance)
                 }
-                LaneKind::Acid => {
+                (StripMode::Ratchet, _) => {
+                    self.bar_strip(ui, uid, g, width, &mut pattern, &mut frame, Bar::Ratchet)
+                }
+                (StripMode::Expr, LaneKind::Poly) => {
+                    self.bar_strip(ui, uid, g, width, &mut pattern, &mut frame, Bar::Vel)
+                }
+                (StripMode::Expr, LaneKind::Acid) => {
                     for (label, flag) in [("Acc", Flag::Accent), ("Slide", Flag::Slide)] {
-                        flag_strip(ui, &geom, width, &mut pattern, label, flag, &mut frame);
+                        flag_strip(ui, g, width, &mut pattern, label, flag, &mut frame);
                     }
                 }
-                LaneKind::Drums => {
-                    drum_accent_strip(ui, &geom, width, snap, &mut pattern, &mut frame)
+                (StripMode::Expr, LaneKind::Drums) => {
+                    drum_accent_strip(ui, g, width, snap, &mut pattern, &mut frame)
                 }
             }
+            if frame.changed {
+                self.set_selection(uid, note_ops::values(&pattern, &sel));
+            }
+            frame.changed |= before;
         }
         if frame.pressed {
             // As on the grid: a press in a strip focuses the lane.
@@ -1053,9 +1181,10 @@ impl SidAcidApp {
         });
     }
 
-    /// The velocity strip of a poly lane: click or drag sets the velocity
-    /// of the notes starting in the snap cell under the pointer.
-    fn velocity_strip(
+    /// A bar strip (velocity, chance or ratchet): click or drag sets the
+    /// value of the notes starting in the snap cell under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn bar_strip(
         &mut self,
         ui: &mut egui::Ui,
         uid: MachineUid,
@@ -1063,6 +1192,7 @@ impl SidAcidApp {
         width: f32,
         pattern: &mut NotePattern,
         frame: &mut Frame,
+        bar: Bar,
     ) {
         let snap = self.view.dock.snap;
         let (lane, lresp) = strip_row(
@@ -1071,13 +1201,14 @@ impl SidAcidApp {
             width,
             VEL_H,
             Sense::click_and_drag(),
-            "Vel",
+            bar.label(),
             frame,
         );
         let painter = ui.painter_at(lane);
+        let hi = bar.range().1 as f32;
         for note in pattern.notes.iter().filter(|n| n.start < geom.ticks) {
             let x = geom.x_of(note.start);
-            let h = VEL_H * note.vel as f32 / 127.0;
+            let h = VEL_H * bar.get(note) as f32 / hi;
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(x, lane.bottom() - h),
@@ -1095,12 +1226,16 @@ impl SidAcidApp {
             && let Some(tick) = geom.tick_at(p.x)
         {
             let from = snap.floor(tick);
-            frame.changed |= set_velocity_in(
-                pattern,
-                from,
-                from + snap.ticks(),
-                vel_from_y(p.y, lane.top()),
-            );
+            let to = from + snap.ticks();
+            let v = bar.value_at(p.y, lane.top());
+            frame.changed |= if bar == Bar::Vel {
+                set_velocity_in(pattern, from, to, v)
+            } else {
+                let idx: Vec<usize> = (0..pattern.notes.len())
+                    .filter(|&i| (from..to).contains(&pattern.notes[i].start))
+                    .collect();
+                note_ops::set_field(pattern, &idx, bar.field(v))
+            };
             frame.finished |= lresp.clicked();
         }
         if lresp.drag_stopped() {
@@ -2628,5 +2763,134 @@ mod tests {
             _ => None,
         });
         assert_eq!(cursor, Some(want));
+    }
+
+    /// Where the strip of `uid`'s lane (drawn at `origin`) is `frac` of
+    /// the way down, at `tick`.
+    fn strip_at(app: &SidAcidApp, origin: egui::Pos2, tick: f32, frac: f32) -> egui::Pos2 {
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let height = LaneView::default().clamped_height() as f32;
+        pos2(
+            origin.x + app.lane_key_w() + tick * tw - app.view.dock.scroll_x,
+            origin.y + HEADER_H + height + VEL_H * frac,
+        )
+    }
+
+    #[test]
+    fn the_header_picks_what_the_strip_shows() {
+        let mut app = app_with(FM, &[]);
+        let at = text_at(&mut app, FM, "Chance").expect("a Chance choice");
+        let mut m = Mouse::new(&mut app, FM, 64);
+        m.click(&mut app, at, NONE);
+        assert_eq!(app.view.panel(FM).strip_mode, StripMode::Chance);
+        let (texts, _) = painted(&mut app, FM);
+        assert!(texts.iter().any(|t| t == "Chc"), "the strip is labelled");
+        assert!(!app.doc.can_undo(), "a view setting");
+        // A shut strip offers no choice.
+        app.doc.project.machine_mut(FM).unwrap().lane.strip = false;
+        assert!(text_at(&mut app, FM, "Chance").is_none());
+    }
+
+    #[test]
+    fn a_chance_strip_click_sets_the_chance_of_the_notes_under_it() {
+        let mut app = app_with(FM, &[(0, 4, 60), (0, 4, 64), (8, 4, 62)]);
+        let first = app.doc.project.roll(FM, 0).unwrap().notes[0];
+        app.set_selection(FM, vec![first]);
+        app.view.panel(FM).strip_mode = StripMode::Chance;
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let at = strip_at(&app, m.origin, 1.0, 0.5);
+        m.click(&mut app, at, NONE);
+        let roll = app.doc.project.roll(FM, 0).unwrap();
+        let chances: Vec<_> = roll.notes.iter().map(|n| n.chance).collect();
+        assert_eq!(chances, [50, 50, 100], "the notes starting in the cell");
+        assert_eq!(app.selection(FM), vec![0], "the selection follows");
+        assert_eq!(app.doc.undo_depth(), 1);
+    }
+
+    #[test]
+    fn a_ratchet_strip_drag_is_one_undo_step() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62)]);
+        app.view.panel(FM).strip_mode = StripMode::Ratchet;
+        let before = app.doc.project.clone();
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let from = strip_at(&app, m.origin, 1.0, 0.05);
+        let to = strip_at(&app, m.origin, 9.0, 0.05);
+        m.drag(&mut app, from, to, NONE);
+        let roll = app.doc.project.roll(FM, 0).unwrap();
+        let ratchets: Vec<_> = roll.notes.iter().map(|n| n.ratchet).collect();
+        assert_eq!(ratchets, [8, 8]);
+        assert_eq!(app.doc.undo_depth(), 1, "one step for the drag");
+        app.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn drum_and_acid_strips_show_chance_too() {
+        for uid in [KIT808, SYNTH1] {
+            let pitch = if uid == KIT808 { 0 } else { 36 };
+            let mut app = app_with(uid, &[(0, 4, pitch)]);
+            app.view.panel(uid).strip_mode = StripMode::Chance;
+            let mut m = Mouse::new(&mut app, uid, 64);
+            let at = strip_at(&app, m.origin, 1.0, 0.75);
+            m.click(&mut app, at, NONE);
+            let n = app.doc.project.roll(uid, 0).unwrap().notes[0];
+            assert_eq!(n.chance, 25, "{uid:?}");
+        }
+    }
+
+    /// White (dashed outline) line segments painted by a frame of `uid`'s lane.
+    fn dashes(app: &mut SidAcidApp, uid: MachineUid) -> usize {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.lane(ui, uid, 800.0));
+        });
+        out.shapes
+            .iter()
+            .filter(|c| {
+                matches!(&c.shape, Shape::LineSegment { stroke, .. } if stroke.color == Color32::WHITE)
+            })
+            .count()
+    }
+
+    #[test]
+    fn conditional_notes_get_a_dashed_outline_and_a_badge() {
+        use acid_engine::project::Cond;
+        let mut app = app_with(FM, &[(0, 16, 48), (16, 16, 48), (32, 1, 48)]);
+        assert_eq!(dashes(&mut app, FM), 0, "plain notes");
+        let (texts, _) = painted(&mut app, FM);
+        assert!(!texts.iter().any(|t| t.contains('%')));
+        for (c, badge) in [
+            (Cond::Ratio(1, 4), "1:4"),
+            (Cond::First, "1st"),
+            (Cond::NotFirst, "!1st"),
+            (Cond::Fill, "F"),
+            (Cond::NotFill, "!F"),
+            (Cond::Pre, "P"),
+            (Cond::NotPre, "!P"),
+        ] {
+            app.doc.project.roll_mut(FM, 0).unwrap().notes[0].cond = c;
+            let (texts, _) = painted(&mut app, FM);
+            assert!(texts.iter().any(|t| t == badge), "{badge}: {texts:?}");
+        }
+        assert!(dashes(&mut app, FM) > 0, "a condition is dashed");
+        let p = app.doc.project.roll_mut(FM, 0).unwrap();
+        p.notes[0].cond = Cond::Always;
+        p.notes[1].chance = 50;
+        p.notes[1].ratchet = 3;
+        p.notes[2].cond = Cond::Fill;
+        let (texts, _) = painted(&mut app, FM);
+        assert!(texts.iter().any(|t| t == "50% ×3"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "F"), "too narrow for a badge");
+        assert!(dashes(&mut app, FM) > 0, "a chance is dashed");
+        let p = app.doc.project.roll_mut(FM, 0).unwrap();
+        p.notes[1].chance = 100;
+        p.notes[2].cond = Cond::Always;
+        assert_eq!(dashes(&mut app, FM), 0, "a ratchet alone is not dashed");
+        let (texts, _) = painted(&mut app, FM);
+        assert!(texts.iter().any(|t| t == "×3"), "but badged");
     }
 }

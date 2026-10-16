@@ -58,6 +58,8 @@ pub struct PanelState {
     pub bank: u8,
     /// The lane's mouse drag in progress (note machines).
     pub drag: Option<poly_edit::LaneDrag>,
+    /// What the lane's expression strip shows.
+    pub strip_mode: lane::StripMode,
     /// The lane's selected notes, by value (see `note_ops::resolve`).
     pub selected: Vec<acid_engine::project::Note>,
     /// The pattern `selected` belongs to; another selected pattern means

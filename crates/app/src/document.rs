@@ -68,6 +68,8 @@ pub enum Edit {
     },
     Bpm(f32),
     Swing(f32),
+    /// The project's chance seed (the inspector's Reroll).
+    Seed(u32),
     /// The project key's root and scale; the snap toggle is a view setting
     /// and stays as it is.
     Key {
@@ -146,6 +148,7 @@ enum MergeKey {
     NoteLength(MachineUid, u8),
     Bpm,
     Swing,
+    Seed,
     Key,
     Song,
     FmVoice(MachineUid),
@@ -168,6 +171,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::NoteLength { uid, slot, .. } => MergeKey::NoteLength(*uid, *slot),
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
+        Edit::Seed(_) => MergeKey::Seed,
         Edit::Key { .. } => MergeKey::Key,
         Edit::Song { .. } => MergeKey::Song,
         Edit::FmVoice { uid, .. } => MergeKey::FmVoice(*uid),
@@ -402,6 +406,7 @@ impl Document {
             Edit::Param { id, value } => p.param(*id) == *value,
             Edit::Bpm(bpm) => p.bpm == *bpm,
             Edit::Swing(swing) => p.swing == *swing,
+            Edit::Seed(seed) => p.seed == *seed,
             Edit::Key { key } => p.key.root == key.root % 12 && p.key.scale == key.scale,
             Edit::SynthTranspose {
                 uid,
@@ -725,6 +730,7 @@ impl Document {
             Edit::Swing(swing) => {
                 Edit::Swing(std::mem::replace(&mut p.swing, swing.clamp(0.0, 0.75)))
             }
+            Edit::Seed(seed) => Edit::Seed(std::mem::replace(&mut p.seed, seed)),
             Edit::Key { key } => {
                 let old = p.key;
                 p.key = Key {
@@ -869,6 +875,7 @@ impl Document {
             | Edit::NoteLength { uid, slot, .. } => vec![pattern_command(p, *uid, *slot)],
             Edit::Bpm(_) => vec![Command::SetBpm(p.bpm)],
             Edit::Swing(_) => vec![Command::SetSwing(p.swing)],
+            Edit::Seed(_) => vec![Command::SetSeed(p.seed)],
             Edit::Song { .. } => vec![Command::Song(Box::new(CompiledSong::compile(
                 &p.song,
                 &p.rack_uids(),
@@ -1441,6 +1448,20 @@ mod tests {
                 .is_empty()
         );
         assert!(d.project.fm(FM).unwrap().patterns[7].notes.is_empty());
+    }
+
+    #[test]
+    fn a_seed_edit_sends_the_seed_and_undoes() {
+        let mut d = doc();
+        let before = d.project.seed;
+        let cmds = d.apply(Edit::Seed(before.wrapping_add(7)), false);
+        assert_eq!(d.project.seed, before.wrapping_add(7));
+        assert!(matches!(cmds[..], [Command::SetSeed(s)] if s == before.wrapping_add(7)));
+        let cmds = d.undo();
+        assert_eq!(d.project.seed, before);
+        assert!(matches!(cmds[..], [Command::SetSeed(s)] if s == before));
+        d.apply(Edit::Seed(before), false);
+        assert_eq!(d.undo_depth(), 0, "the same seed is no undo step");
     }
 
     #[test]

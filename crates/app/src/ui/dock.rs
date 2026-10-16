@@ -1,11 +1,12 @@
 //! The editor dock at the bottom of the window: a header row (snap, key,
-//! zoom, follow), a ruler that doubles as the shared horizontal scrollbar, and
-//! every machine's lane stacked in rack order. Its height is a share of
-//! the window kept in the settings file.
+//! zoom, follow, and in Pattern mode the note inspector for the focused
+//! lane's selection; it wraps when narrow), a ruler that doubles as the
+//! shared horizontal scrollbar, and every machine's lane stacked in rack
+//! order. Its height is a share of the window kept in the settings file.
 
 use super::key_entry::LaneKind;
 use super::lane_geom::{ZOOMS, follow_scroll, tick_w};
-use super::note_ops::PasteError;
+use super::note_ops::{self, Field, PasteError};
 use super::poly_edit::Snap;
 use super::{NoteClip, SidAcidApp, song_lane, song_ops, theme};
 use crate::document::Edit;
@@ -166,8 +167,155 @@ impl SidAcidApp {
             if song {
                 ui.separator();
                 self.song_tools(ui);
+            } else {
+                self.inspector(ui);
             }
         });
+    }
+
+    /// The note inspector: the focused lane's selected notes' velocity
+    /// (not on acid lanes), chance (with Reroll), ratchet and condition,
+    /// and accent (acid, drums) and slide (acid). A field the notes differ
+    /// in shows "–". A change applies to every selected note as one undo
+    /// step (a drag on a number is one step), and they stay selected.
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let Some(uid) = self.focused() else {
+            return;
+        };
+        let idx = self.selection(uid);
+        let slot = self.selected(uid);
+        let Some(pattern) = self.doc.project.roll(uid, slot) else {
+            return;
+        };
+        if idx.is_empty() {
+            return;
+        }
+        let notes = note_ops::values(pattern, &idx);
+        let kind = self.lane_kind(uid);
+        // Test builds note where each tool sits.
+        #[cfg(test)]
+        let mut rects: Vec<(String, Rect)> = Vec::new();
+        #[cfg(test)]
+        let mut note = |name: &str, r: &egui::Response| rects.push((name.to_string(), r.rect));
+        #[cfg(not(test))]
+        let note = |_: &str, _: &egui::Response| {};
+        let mut edit: Option<Field> = None;
+        let (mut dragging, mut finished) = (false, false);
+        let mut number = |ui: &mut egui::Ui,
+                          name: &str,
+                          get: fn(&Note) -> u8,
+                          (lo, hi): (u8, u8),
+                          (prefix, suffix): (&str, &str),
+                          field: fn(u8) -> Field|
+         -> egui::Response {
+            let shared = note_ops::common(&notes, get);
+            let mut v = shared.unwrap_or_else(|| get(&notes[0]));
+            ui.label(RichText::new(name).small().color(theme::ACID));
+            let dv = egui::DragValue::new(&mut v).range(lo..=hi).speed(0.2);
+            // Mixed: a bare dash (the formatter's text gets the affixes too).
+            let dv = if shared.is_some() {
+                dv.prefix(prefix).suffix(suffix)
+            } else {
+                dv.custom_formatter(|_, _| "–".into())
+            };
+            let r = ui.add(dv);
+            if r.changed() {
+                edit = Some(field(v));
+                dragging |= r.dragged();
+                finished |= !r.dragged();
+            }
+            finished |= r.drag_stopped();
+            r
+        };
+        ui.separator();
+        if kind != LaneKind::Acid {
+            let r = number(ui, "Vel", |n| n.vel, (1, 127), ("", ""), Field::Vel);
+            note("Vel", &r);
+        }
+        let r = number(
+            ui,
+            "Chance",
+            |n| n.chance,
+            (0, 100),
+            ("", "%"),
+            Field::Chance,
+        );
+        note("Chance", &r);
+        let reroll = ui
+            .button(RichText::new("Reroll").small())
+            .on_hover_text("New dice for every chance in the project");
+        note("Reroll", &reroll);
+        let r = number(
+            ui,
+            "Ratchet",
+            |n| n.ratchet,
+            (1, 8),
+            ("×", ""),
+            Field::Ratchet,
+        );
+        note("Ratchet", &r);
+        ui.label(RichText::new("Cond").small().color(theme::ACID));
+        let cond = note_ops::common(&notes, |n| n.cond);
+        let combo = egui::ComboBox::from_id_salt("note_cond")
+            .width(70.0)
+            .selected_text(cond.map_or("–".into(), note_ops::cond_label))
+            .show_ui(ui, |ui| {
+                for c in note_ops::conds() {
+                    let item = ui.selectable_label(cond == Some(c), note_ops::cond_label(c));
+                    note(&format!("Cond {}", note_ops::cond_label(c)), &item);
+                    if item.clicked() {
+                        edit = Some(Field::Cond(c));
+                        finished = true;
+                    }
+                }
+            });
+        note("Cond", &combo.response);
+        let mut flag =
+            |ui: &mut egui::Ui, name: &str, get: fn(&Note) -> bool, field: fn(bool) -> Field| {
+                let shared = note_ops::common(&notes, get);
+                let text = if shared.is_none() {
+                    format!("{name} –")
+                } else {
+                    name.to_string()
+                };
+                let r = ui.selectable_label(shared == Some(true), text);
+                if r.clicked() {
+                    edit = Some(field(shared != Some(true)));
+                    finished = true;
+                }
+                r
+            };
+        if kind != LaneKind::Poly {
+            let r = flag(ui, "Accent", |n| n.accent, Field::Accent);
+            note("Accent", &r);
+        }
+        if kind == LaneKind::Acid {
+            let r = flag(ui, "Slide", |n| n.slide, Field::Slide);
+            note("Slide", &r);
+        }
+        #[cfg(test)]
+        self.view.dock.tool_rects.extend(rects);
+        let mut p = pattern.clone();
+        let changed = edit.is_some_and(|f| note_ops::set_field(&mut p, &idx, f));
+        if changed {
+            self.set_selection(uid, note_ops::values(&p, &idx));
+        }
+        self.commit_poly(uid, slot, changed.then_some(p), dragging, finished);
+        if reroll.clicked() {
+            self.reroll();
+        }
+    }
+
+    /// A new chance seed for the project, one undo step.
+    pub(crate) fn reroll(&mut self) {
+        let old = self.doc.project.seed;
+        let mut seed = self.next_seed() as u32;
+        if seed == old {
+            seed ^= 1;
+        }
+        let cmds = self.doc.apply(Edit::Seed(seed), false);
+        self.send(cmds);
+        self.doc.end_gesture();
     }
 
     /// The project key: root and scale combos (one undo step each) and
@@ -2925,5 +3073,172 @@ mod tests {
         app.paste_blocks();
         assert_eq!(app.doc.project.song, before);
         assert!(app.view.message.is_some());
+    }
+
+    /// Every text painted by one 1280x800 frame of the whole app.
+    fn texts(app: &mut SidAcidApp, ctx: &egui::Context, time: f64) -> Vec<String> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| app.ui(ctx));
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn chances(app: &SidAcidApp, uid: acid_engine::machine::MachineUid) -> Vec<u8> {
+        let roll = app.doc.project.roll(uid, 0).unwrap();
+        roll.notes.iter().map(|n| n.chance).collect()
+    }
+
+    #[test]
+    fn the_inspector_shows_only_with_a_selection_in_pattern_mode() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        assert!(tool(&app, "Chance").is_none(), "no selection, no inspector");
+        let all = app.doc.project.roll(FM, 0).unwrap().notes.clone();
+        app.set_selection(FM, all);
+        frame(&mut app, &ctx, 1.0, vec![]);
+        for name in ["Vel", "Chance", "Reroll", "Ratchet", "Cond"] {
+            assert!(tool(&app, name).is_some(), "{name}");
+        }
+        assert!(tool(&app, "Accent").is_none(), "no accent on a poly lane");
+        app.view.mode = Mode::Song;
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(tool(&app, "Chance").is_none(), "not in Song mode");
+    }
+
+    #[test]
+    fn a_chance_drag_edits_every_selected_note_in_one_undo_step() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62), (16, 4, 64)], &[0, 2]);
+        let before = app.doc.project.clone();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let at = tool(&app, "Chance").unwrap().center();
+        drag_by(&mut app, &ctx, at, vec2(-100.0, 0.0), 10, 1.0);
+        let c = chances(&app, FM);
+        assert!(c[0] < 100 && c[0] == c[2], "both selected notes: {c:?}");
+        assert_eq!(c[1], 100, "the unselected note stays");
+        assert_eq!(app.selection(FM), vec![0, 2], "still selected");
+        assert_eq!(app.doc.undo_depth(), 1, "one undo step for the drag");
+        app.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn mixed_values_show_a_dash() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62)], &[0, 1]);
+        let ctx = egui::Context::default();
+        let t = texts(&mut app, &ctx, 0.0);
+        assert!(!t.iter().any(|t| t == "–"), "shared values: {t:?}");
+        assert!(t.iter().any(|t| t == "100%"), "the shared chance");
+        assert!(t.iter().any(|t| t == "Always"), "the shared condition");
+        let p = app.doc.project.roll_mut(FM, 0).unwrap();
+        p.notes[1].chance = 50;
+        p.notes[1].cond = acid_engine::project::Cond::Fill;
+        let all = p.notes.clone();
+        app.set_selection(FM, all);
+        let t = texts(&mut app, &ctx, 1.0);
+        let dashes = t.iter().filter(|t| *t == "–").count();
+        assert_eq!(dashes, 2, "chance and condition differ: {t:?}");
+        assert!(t.iter().any(|t| t == "×1"), "the ratchet is shared");
+    }
+
+    #[test]
+    fn picking_a_condition_sets_it_on_the_selection() {
+        use crate::test_rack::FM;
+        use acid_engine::project::Cond;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62), (16, 4, 64)], &[1, 2]);
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Cond", 0.0);
+        click_tool(&mut app, &ctx, "Cond 1:4", 1.0);
+        let roll = app.doc.project.roll(FM, 0).unwrap();
+        let conds: Vec<_> = roll.notes.iter().map(|n| n.cond).collect();
+        assert_eq!(conds, [Cond::Always, Cond::Ratio(1, 4), Cond::Ratio(1, 4)]);
+        assert_eq!(app.selection(FM), vec![1, 2], "still selected");
+        assert_eq!(app.doc.undo_depth(), 1);
+    }
+
+    #[test]
+    fn drum_and_acid_inspectors_toggle_accent_and_slide() {
+        use crate::test_rack::{KIT808, SYNTH1};
+        let mut app = sel_app(KIT808, &[(0, 4, 0), (4, 4, 1)], &[0, 1]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        assert!(tool(&app, "Vel").is_some(), "drums keep velocity");
+        assert!(tool(&app, "Slide").is_none(), "no slide on drums");
+        click_tool(&mut app, &ctx, "Accent", 1.0);
+        let roll = app.doc.project.roll(KIT808, 0).unwrap();
+        assert!(roll.notes.iter().all(|n| n.accent), "every selected hit");
+        assert_eq!(app.selection(KIT808), vec![0, 1]);
+        assert_eq!(app.doc.undo_depth(), 1);
+
+        let mut app = sel_app(SYNTH1, &[(0, 4, 36), (4, 4, 38)], &[0]);
+        app.doc.project.roll_mut(SYNTH1, 0).unwrap().notes[1].accent = true;
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(tool(&app, "Vel").is_none(), "acid lanes have no velocity");
+        click_tool(&mut app, &ctx, "Slide", 3.0);
+        click_tool(&mut app, &ctx, "Accent", 4.0);
+        let roll = app.doc.project.roll(SYNTH1, 0).unwrap();
+        assert!(roll.notes[0].slide && roll.notes[0].accent);
+        assert!(!roll.notes[1].slide, "the unselected note stays");
+        assert_eq!(app.doc.undo_depth(), 2, "one step per change");
+    }
+
+    #[test]
+    fn reroll_changes_the_seed_in_one_undo_step() {
+        use crate::test_rack::FM;
+        use acid_engine::host::Command;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        let seed = app.doc.project.seed;
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Reroll", 0.0);
+        let new = app.doc.project.seed;
+        assert_ne!(new, seed);
+        let told = app
+            .flushed
+            .iter()
+            .chain(&app.pending)
+            .any(|c| matches!(c, Command::SetSeed(s) if *s == new));
+        assert!(told, "the engine is told");
+        assert_eq!(app.doc.undo_depth(), 1);
+        app.undo();
+        assert_eq!(app.doc.project.seed, seed);
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn a_narrow_header_wraps_the_inspector_instead_of_clipping_it() {
+        use crate::test_rack::SYNTH1;
+        let mut app = sel_app(SYNTH1, &[(0, 4, 36)], &[0]);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 800.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+        for name in [
+            "Snap to scale",
+            "Chance",
+            "Reroll",
+            "Cond",
+            "Accent",
+            "Slide",
+        ] {
+            let r = tool(&app, name).unwrap_or_else(|| panic!("{name}"));
+            assert!(r.right() <= 640.0, "{name} fits: {r:?}");
+        }
+        let rows = [tool(&app, "Snap to scale"), tool(&app, "Slide")].map(|r| r.unwrap().top());
+        assert!(rows[1] > rows[0], "the header wrapped onto a second row");
     }
 }
