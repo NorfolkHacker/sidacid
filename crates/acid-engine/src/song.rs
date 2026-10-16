@@ -308,6 +308,8 @@ pub fn insert_time(song: &mut Song, at: u32, n: u32, lens: Lens<'_>) {
     if n == 0 {
         return;
     }
+    // A block starting before `at` stays where it is, even when `at` is
+    // inside it: it isn't split, so the new time opens after its end.
     for (_, blocks) in &mut song.lanes {
         for b in blocks.iter_mut().filter(|b| b.start >= at) {
             b.start += n;

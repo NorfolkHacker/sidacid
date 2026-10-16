@@ -218,7 +218,8 @@ engine act on `chance`, `ratchet` and `cond`.
   the pattern loops it; shorter plays only its start.
 - Automation stays keyed by global step. `loop_range` becomes a step
   range. The song ends at its last block's end, or at a later end point a
-  converted song carries (`end`).
+  converted song carries (`end`). A loop reaching past that end extends
+  the song to the loop's end, so it still loops.
 
 ### Ripple and overlap
 
@@ -243,7 +244,8 @@ engine act on `chance`, `ratchet` and `cond`.
   Ctrl+C/V/D, Delete and ←/→ (one bar) work on blocks as in section 3.
 - Drag a block's right edge to fix its length.
 - Ruler selection: **Loop**, **Insert time** (push everything after it
-  right on every lane), **Delete time** (remove it and close the gap; a
+  right on every lane; a block the insert point falls inside stays put,
+  unsplit), **Delete time** (remove it and close the gap; a
   block spanning the deleted range shrinks and keeps its tail). The loop
   triggers when playback crosses its end; a song start after the loop
   plays on.
