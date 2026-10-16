@@ -226,16 +226,29 @@ impl SidAcidApp {
         let tick_at = |x: f32, scroll_x: f32| {
             (((x - left + scroll_x) / tw).max(0.0) as u32).min(u16::MAX as u32) as u16
         };
+        // The press tick, taken with this frame's scroll: later frames
+        // may scroll (follow) under the drag.
+        let pressed_on = ui.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.press_origin())
+                .flatten()
+                .filter(|o| numbers.contains(*o))
+        });
+        if let Some(o) = pressed_on {
+            self.view.dock.range_from = Some(tick_at(o.x, self.view.dock.scroll_x));
+        }
         if picker.clicked() {
             // Only the band goes: the selections it made stay (the plan),
             // so a click on the ruler doesn't lose them.
             self.view.dock.range = None;
         } else if picker.dragged() {
-            let origin = ui.input(|i| i.pointer.press_origin());
-            if let (Some(o), Some(p)) = (origin, picker.interact_pointer_pos()) {
+            if let (Some(from), Some(p)) =
+                (self.view.dock.range_from, picker.interact_pointer_pos())
+            {
                 let snap = self.view.dock.snap;
                 let scroll = self.view.dock.scroll_x;
-                let a = snap.floor(tick_at(o.x, scroll));
+                let a = snap.floor(from);
                 let b = snap.floor(tick_at(p.x, scroll));
                 let lo = a.min(b);
                 let hi = a.max(b).saturating_add(snap.ticks());
@@ -1074,6 +1087,35 @@ mod tests {
             assert_eq!(app.selection(uid), vec![1], "the note at 16 only");
         }
         assert_eq!(app.doc.project, before, "no edit to the project");
+    }
+
+    #[test]
+    fn a_ruler_range_keeps_its_start_when_the_lanes_scroll_mid_drag() {
+        let mut app = range_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let y = ruler.top() + 4.0;
+        let button = |x: f32, pressed| egui::Event::PointerButton {
+            pos: pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let moved = |x: f32| egui::Event::PointerMoved(pos2(x, y));
+        let x0 = left + 14.0 * tw;
+        frame(&mut app, &ctx, 1.0, vec![moved(x0)]);
+        frame(&mut app, &ctx, 1.05, vec![button(x0, true)]);
+        frame(&mut app, &ctx, 1.1, vec![moved(left + 20.0 * tw)]);
+        assert_eq!(app.view.dock.range, Some((12, 24)));
+        // Follow (or anything) scrolls the lanes 32 ticks on mid-drag.
+        app.view.dock.scroll_x = 32.0 * tw;
+        let x1 = left + 28.0 * tw;
+        frame(&mut app, &ctx, 1.15, vec![moved(x1)]);
+        frame(&mut app, &ctx, 1.2, vec![button(x1, false)]);
+        assert_eq!(app.view.dock.range, Some((12, 64)), "the start stays at 12");
     }
 
     #[test]

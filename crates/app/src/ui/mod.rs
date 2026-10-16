@@ -105,6 +105,9 @@ pub struct DockState {
     /// Delete/Backspace is held after its press removed the selection:
     /// its auto-repeats are swallowed, not passed on to keyboard entry.
     pub delete_held: bool,
+    /// The tick a ruler range drag was pressed on, fixed at the press so
+    /// the start holds while the lanes scroll under it.
+    pub range_from: Option<u16>,
 }
 
 impl Default for DockState {
@@ -123,6 +126,7 @@ impl Default for DockState {
             lanes_offset: 0.0,
             range: None,
             delete_held: false,
+            range_from: None,
         }
     }
 }
