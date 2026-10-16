@@ -11,7 +11,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
 
 ## What's in the box
 
-- **Two SID bass synths with 303-style controls:**
+- **Two SID bass synths with classic acid-bass controls:**
   - Tune, Cutoff, Resonance, Env Mod, Decay and Accent.
   - Saw or pulse wave, LP/BP/HP filter, hard sync.
   - Accent sweep that builds over consecutive accents, and slide/tie.
@@ -20,12 +20,12 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - An 808-flavoured and a 909-flavoured kit: BD, SD, LT, HT, CP, RS, CH and OH.
   - Tune, Decay, Tone and Level per instrument.
   - Closed hat chokes open hat.
-- **FM synth** in the style of the DX7 / M-VAVE FM-1:
-  - 6 operators, 32 algorithms with a live algorithm diagram, DX7 envelopes, keyboard and velocity scaling.
+- **FM synth** in the style of classic 6-operator FM synths:
+  - 6 operators, 32 algorithms with a live algorithm diagram, 4-rate / 4-level envelopes, keyboard and velocity scaling.
   - LFO and pitch EG.
   - 12-voice poly, or mono with glide.
   - Filter, chorus and phaser, plus a Vintage switch for 12-bit grit.
-  - A 16-voice starter bank, and **DX7 .syx import** (32-voice banks or single voices).
+  - A 16-voice starter bank, and **.syx import** of standard 6-operator FM SysEx files (32-voice banks or single voices).
 - **Mono synth**, a virtual-analog mono voice:
   - One band-limited saw and pulse oscillator, a phase-locked sub oscillator (one octave down square, two octaves down square, or a two-octave-down 25% pulse) and a noise source, each with its own level. Range switch (-12 / 0 / +12 / +24 semitones) and fine Tune.
   - Pulse width from the PW knob, the LFO or the envelope. The LFO can also modulate pitch (VCO Mod).
@@ -39,7 +39,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
 - **Sampler** with 16 slots:
   - **Slice mode** for breaks: chop into 4/8/16/32 equal slices or by detected transients, drag the slice markers, and use choke and tempo lock.
   - **Chromatic mode** for voices and stabs: root key, start/end, and a crossfaded loop.
-  - Per slot: level, pan, tune, filter, ADSR and reverse. Grit adds SP-1200-style 12-bit, 26 kHz crunch.
+  - Per slot: level, pan, tune, filter, ADSR and reverse. Grit adds vintage-sampler-style 12-bit, 26 kHz crunch.
   - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
 - **Editor dock:**
   - Every part's pattern sits in a resizable dock at the bottom, as stacked lanes on one shared time ruler. Snap runs from 1/4 to 1/64, with zoom and follow-playhead; a thumb strip along the bottom of the ruler is the horizontal scrollbar.
