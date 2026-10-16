@@ -1616,6 +1616,35 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_past_the_song_end_still_loops() {
+        let mut f = Fixture::new();
+        f.synths[0][0].roll.length = 12;
+        f.song
+            .lane_mut(MachineUid(1))
+            .push(Block::new(0, PatternRef(0)));
+        f.song.loop_range = Some((0, 16));
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 20 * 5513);
+        assert!(s.is_playing(), "the loop extends the 12-step song");
+        assert!(!s.take_ended());
+        assert_eq!(s.song_step(), 4, "looped back at step 16");
+    }
+
+    #[test]
+    fn a_two_bar_song_with_a_loop_over_bars_1_to_4_loops() {
+        let mut f = Fixture::new();
+        f.set_bars(&[[Some(0), None, None, None]; 2]);
+        f.song.loop_range = Some((16, 80));
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 84 * 5513);
+        assert!(s.is_playing());
+        assert!(!s.take_ended());
+        assert_eq!(s.song_step(), 20, "back to bar 1 after bar 4");
+    }
+
+    #[test]
     fn starting_exactly_at_the_loop_end_plays_on() {
         let mut f = Fixture::new();
         f.set_bars(&[[None; 4]; 3]);

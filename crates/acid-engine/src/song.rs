@@ -151,7 +151,15 @@ pub fn compiled_song_end(song: &CompiledSong, banks: Banks<'_>) -> u32 {
         .iter()
         .enumerate()
         .filter_map(|(pos, lane)| Some(compiled_block_end(lane.last()?, pos, banks)))
-        .fold(song.end.unwrap_or(0), u32::max)
+        .fold(floor_end(song.end, song.loop_range), u32::max)
+}
+
+/// The least a song's end can be: its own `end`, or a loop's end when
+/// later (a loop reaching past the blocks extends the song, so it loops
+/// rather than the song stopping first).
+fn floor_end(end: Option<u32>, loop_range: Option<(u32, u32)>) -> u32 {
+    let looped = loop_range.filter(|(a, b)| a < b).map_or(0, |(_, b)| b);
+    end.unwrap_or(0).max(looped)
 }
 
 /// `block_at` on the lane at rack position `pos` of a compiled song
@@ -194,12 +202,13 @@ pub fn block_end(b: &Block, uid: MachineUid, lens: Lens<'_>) -> u32 {
     b.start.saturating_add(len)
 }
 
-/// Where the song ends: its last block's end, or `song.end` if later.
+/// Where the song ends: its last block's end, or `song.end` or the loop's
+/// end if later.
 pub fn song_end(song: &Song, lens: Lens<'_>) -> u32 {
     song.lanes
         .iter()
         .flat_map(|(uid, blocks)| blocks.iter().map(|b| block_end(b, *uid, lens)))
-        .fold(song.end.unwrap_or(0), u32::max)
+        .fold(floor_end(song.end, song.loop_range), u32::max)
 }
 
 /// The block of a sorted lane that covers `step`.
@@ -537,6 +546,10 @@ mod tests {
         assert_eq!(song_end(&song, &lens), 64, "trailing empty bars");
         song.end = Some(20);
         assert_eq!(song_end(&song, &lens), 48);
+        song.loop_range = Some((16, 80));
+        assert_eq!(song_end(&song, &lens), 80, "a loop past the end extends it");
+        song.loop_range = Some((0, 32));
+        assert_eq!(song_end(&song, &lens), 48, "a loop inside changes nothing");
     }
 
     #[test]
