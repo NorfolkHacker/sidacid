@@ -33,7 +33,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Per slot: level, pan, tune, filter, ADSR and reverse. Grit adds SP-1200-style 12-bit, 26 kHz crunch.
   - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
   - The piano roll labels each sampler row with its slot and slice.
-- Both use a **polyphonic piano roll**: chords, 1/16 to 1/64 snap, a velocity lane, and click-to-audition keys.
+- The FM synth and the sampler use a **polyphonic piano roll**: chords, 1/16 to 1/64 snap, a velocity lane, and click-to-audition keys.
 - **Piano roll for the bass synths:** 1/16 to 1/64 snap, one note at a time, accent and slide lanes, and slides drawn as ties.
 - **Patterns:** 128 per machine, in banks A–H × 16. Each pattern is up to 64 steps, and a pattern switch queues to the next loop.
 - **Mixer and effects:**

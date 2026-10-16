@@ -151,8 +151,10 @@ engine act on `chance`, `ratchet` and `cond`.
 - The focused lane has a cursor at a step and pitch (a drum row on drum
   lanes).
 - Arrow keys move the cursor by one grid step or one semitone/row.
-- The tracker key layout of the removed step-writer (`crates/app/src/ui/step_edit.rs` at commit `32308c6`: Z S X D C V G B H N J M for the lower octave, Q 2 W 3 E R 5 T 6 Y 7 U I above) write a note one grid step long at
-  the cursor and advance it. On drum lanes any note key writes a hit on
+- The note keys (the tracker layout of the removed step-writer,
+  `crates/app/src/ui/step_edit.rs` at commit `32308c6`: Z S X D C V G B H N J M
+  for the lower octave, Q 2 W 3 E R 5 T 6 Y 7 U I above) write a note one grid
+  step long at the cursor and advance it. On drum lanes any note key writes a hit on
   the cursor's row.
 - Backspace deletes the note under the cursor. Space still plays/stops.
 
