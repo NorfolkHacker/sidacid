@@ -1,0 +1,933 @@
+//! The dock's Tools menu: runs a note tool (`note_tools`) on the focused
+//! lane's selection, or on its whole visible pattern when nothing is
+//! selected. Opening a tool snapshots the pattern and the scope; its popup
+//! holds the tool's settings, and every frame the tool runs on that
+//! snapshot (never on the last result) and the result is committed into
+//! one merged undo step, so the lane previews it live. Apply closes the
+//! step and selects the result; Cancel (or closing the popup) takes the
+//! step back as if it never happened. While a tool is open nothing else
+//! edits that lane (see `SidAcidApp::mouse_editing`).
+
+use super::SidAcidApp;
+use super::key_entry::LaneKind;
+use super::lane::INST_NAMES;
+use super::note_ops;
+use super::note_tools::{self, Arp, ArpStyle, Euclid, Humanize, Quantize, Randomize, Strum};
+use super::poly_edit::Snap;
+use crate::document::{Edit, RedoStash};
+use acid_engine::machine::MachineUid;
+use acid_engine::project::{Note, NotePattern};
+use acid_engine::scale::{Key, ROOT_NAMES};
+use acid_engine::sequencer::Mode;
+use eframe::egui::{self, Align2, Rect, RichText};
+
+/// The tools, in menu order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolKind {
+    Quantize,
+    Humanize,
+    Legato,
+    Reverse,
+    Invert,
+    Strum,
+    Randomize,
+    Arpeggiate,
+    Euclid,
+}
+
+impl ToolKind {
+    pub const ALL: [ToolKind; 9] = [
+        ToolKind::Quantize,
+        ToolKind::Humanize,
+        ToolKind::Legato,
+        ToolKind::Reverse,
+        ToolKind::Invert,
+        ToolKind::Strum,
+        ToolKind::Randomize,
+        ToolKind::Arpeggiate,
+        ToolKind::Euclid,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolKind::Quantize => "Quantize",
+            ToolKind::Humanize => "Humanize",
+            ToolKind::Legato => "Legato",
+            ToolKind::Reverse => "Reverse",
+            ToolKind::Invert => "Invert",
+            ToolKind::Strum => "Strum",
+            ToolKind::Randomize => "Randomize in scale",
+            ToolKind::Arpeggiate => "Arpeggiate",
+            ToolKind::Euclid => "Euclidean",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            ToolKind::Quantize => "Move notes toward the grid",
+            ToolKind::Humanize => "Small random shifts in timing and velocity",
+            ToolKind::Legato => "Each note runs to the next one",
+            ToolKind::Reverse => "Play the notes backwards",
+            ToolKind::Invert => "Mirror the pitches within their range",
+            ToolKind::Strum => "Stagger the notes of each chord",
+            ToolKind::Randomize => "Replace the notes with random ones in the key",
+            ToolKind::Arpeggiate => "Turn each chord into a run of its notes",
+            ToolKind::Euclid => "Spread hits as evenly as they go",
+        }
+    }
+
+    /// Only for melodic lanes (greyed on drums).
+    pub fn melodic_only(self) -> bool {
+        matches!(
+            self,
+            ToolKind::Invert | ToolKind::Strum | ToolKind::Arpeggiate
+        )
+    }
+}
+
+/// Every tool's settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToolParams {
+    pub quantize: Quantize,
+    pub humanize: Humanize,
+    pub strum: Strum,
+    pub randomize: Randomize,
+    pub arp: Arp,
+    pub euclid: Euclid,
+}
+
+impl ToolParams {
+    /// `tool` with these settings on `p`'s `scope` (indices): the new
+    /// pattern and the scope notes' (or new notes') indices in it.
+    pub fn run(
+        &self,
+        tool: ToolKind,
+        p: &NotePattern,
+        scope: &[usize],
+        kind: LaneKind,
+        key: Key,
+        snap: Snap,
+    ) -> (NotePattern, Vec<usize>) {
+        use note_tools::*;
+        match tool {
+            ToolKind::Quantize => quantize(p, scope, &self.quantize, kind),
+            ToolKind::Humanize => humanize(p, scope, &self.humanize, kind),
+            ToolKind::Legato => legato(p, scope, kind),
+            ToolKind::Reverse => reverse(p, scope, kind),
+            ToolKind::Invert => invert(p, scope, kind),
+            ToolKind::Strum => strum(p, scope, &self.strum, kind),
+            ToolKind::Randomize => randomize(p, scope, &self.randomize, kind, key, snap),
+            ToolKind::Arpeggiate => arpeggiate(p, scope, &self.arp, kind),
+            ToolKind::Euclid => euclid(p, scope, &self.euclid, kind, snap),
+        }
+    }
+}
+
+/// An open tool on one lane's pattern.
+pub(crate) struct ToolSession {
+    pub uid: MachineUid,
+    pub slot: u8,
+    /// The pattern when the tool opened: every preview starts from it.
+    pub origin: NotePattern,
+    /// The notes the tool acts on (indices into `origin`).
+    pub scope: Vec<usize>,
+    pub tool: ToolKind,
+    pub params: ToolParams,
+    /// The pattern as the session last left it (`origin` until a preview
+    /// is committed): anything else there means another edit changed it.
+    last: NotePattern,
+    /// The result's selection (indices into `last`).
+    result_sel: Vec<usize>,
+    /// The lane's selection when the tool opened, given back by Cancel.
+    sel_before: (Vec<Note>, u8),
+    /// Once a preview is committed: the edit serial right after the latest
+    /// one (so the step on top is known to be the preview's), and the redo
+    /// history set aside before the first.
+    committed: Option<(u64, RedoStash)>,
+}
+
+/// Seeds the popup hands out: short enough to read and type back.
+const SEEDS: u64 = 100_000;
+
+/// A MIDI pitch's name, C2 = 36.
+fn pitch_name(p: u8) -> String {
+    format!("{}{}", ROOT_NAMES[p as usize % 12], p as i32 / 12 - 1)
+}
+
+impl SidAcidApp {
+    /// The Tools menu button (first in the Pattern-mode inspector row,
+    /// with or without a selection) and the open tool's popup.
+    pub(crate) fn tools_menu(&mut self, ui: &mut egui::Ui) {
+        let Some(uid) = self.focused() else {
+            ui.add_enabled(false, egui::Button::new("Tools"));
+            return;
+        };
+        let kind = self.lane_kind(uid);
+        let mut rects: Vec<(String, Rect)> = Vec::new();
+        let mut picked = None;
+        let menu = ui.menu_button("Tools", |ui| {
+            for t in ToolKind::ALL {
+                let ok = kind != LaneKind::Drums || !t.melodic_only();
+                let item = ui
+                    .add_enabled(ok, egui::Button::new(t.label()))
+                    .on_hover_text(t.hint())
+                    .on_disabled_hover_text("Melodic lanes only");
+                rects.push((format!("Tool {}", t.label()), item.rect));
+                if item.clicked() {
+                    picked = Some(t);
+                    ui.close_menu();
+                }
+            }
+        });
+        let anchor = menu
+            .response
+            .on_hover_text("Run a tool on the selection, or the whole pattern")
+            .rect;
+        rects.push(("Tools".into(), anchor));
+        if let Some(t) = picked {
+            self.open_tool(t);
+        }
+        self.tool_window(ui.ctx(), anchor, &mut rects);
+        #[cfg(test)]
+        self.view.dock.tool_rects.extend(rects);
+        #[cfg(not(test))]
+        drop(rects);
+    }
+
+    /// Opens `tool` on the focused lane: a snapshot of its pattern and of
+    /// the scope (the selection, else every visible note). Any open tool
+    /// is cancelled first.
+    pub(crate) fn open_tool(&mut self, tool: ToolKind) {
+        self.cancel_tool();
+        let Some(uid) = self.focused() else {
+            return;
+        };
+        let slot = self.selected(uid);
+        let Some(origin) = self.doc.project.roll(uid, slot).cloned() else {
+            return;
+        };
+        if self.view.mode != Mode::Pattern {
+            return;
+        }
+        let sel = self.selection(uid);
+        let scope = if sel.is_empty() {
+            note_tools::default_scope(&origin)
+        } else {
+            sel
+        };
+        let kind = self.lane_kind(uid);
+        let mut params = self.view.tool_params;
+        // Euclidean starts on the cursor's pitch or drum row.
+        let pitch = self.view.panel(uid).cursor.pitch;
+        params.euclid.pitch = if kind == LaneKind::Drums {
+            pitch.min(INST_NAMES.len() as u8 - 1)
+        } else {
+            pitch.min(127)
+        };
+        let panel = self.view.panel(uid);
+        let sel_before = (panel.selected.clone(), panel.sel_slot);
+        // The preview's edits must not merge into an earlier gesture.
+        self.doc.end_gesture();
+        self.view.focus = Some(uid);
+        self.view.tool = Some(ToolSession {
+            uid,
+            slot,
+            last: origin.clone(),
+            result_sel: scope.clone(),
+            origin,
+            scope,
+            tool,
+            params,
+            sel_before,
+            committed: None,
+        });
+        self.preview_tool();
+    }
+
+    /// Once a frame, ahead of the dock: a tool whose pattern was changed
+    /// by something else (a load, a rack edit) is closed, leaving the
+    /// pattern as it now is; one whose lane, pattern slot or mode is no
+    /// longer the one it opened on is cancelled.
+    pub(crate) fn check_tool(&mut self) {
+        let Some(t) = &self.view.tool else {
+            return;
+        };
+        let (uid, slot) = (t.uid, t.slot);
+        if self.doc.project.roll(uid, slot) != Some(&t.last) {
+            self.view.tool = None;
+            self.doc.end_gesture();
+            return;
+        }
+        if self.view.mode != Mode::Pattern
+            || self.focused() != Some(uid)
+            || self.selected(uid) != slot
+        {
+            self.cancel_tool();
+        }
+    }
+
+    /// The open tool's lane: edits to it are held off.
+    pub(crate) fn tool_lane(&self) -> Option<(MachineUid, u8)> {
+        self.view.tool.as_ref().map(|t| (t.uid, t.slot))
+    }
+
+    /// Runs the open tool on its snapshot with its current settings and
+    /// commits the result (merged into the session's undo step) when it
+    /// differs from what the lane holds; the result is selected.
+    fn preview_tool(&mut self) {
+        let key = self.doc.project.key;
+        let snap = self.view.dock.snap;
+        let Some(t) = &self.view.tool else {
+            return;
+        };
+        let kind = self.lane_kind(t.uid);
+        let (result, sel) = t.params.run(t.tool, &t.origin, &t.scope, kind, key, snap);
+        let (uid, slot) = (t.uid, t.slot);
+        if result != t.last {
+            let redo = match self.view.tool.as_mut().and_then(|t| t.committed.take()) {
+                Some((_, redo)) => redo,
+                None => self.doc.take_redo(),
+            };
+            self.commit_poly(uid, slot, Some(result.clone()), true, false);
+            let serial = self.doc.edit_serial();
+            if let Some(t) = &mut self.view.tool {
+                t.committed = Some((serial, redo));
+                t.last = result.clone();
+            }
+        }
+        if let Some(t) = &mut self.view.tool {
+            t.result_sel = sel.clone();
+        }
+        self.set_selection(uid, note_ops::values(&result, &sel));
+    }
+
+    /// Apply: the result stays as one undo step (none when it is the
+    /// pattern as it was) and is selected.
+    pub(crate) fn apply_tool(&mut self) {
+        let Some(t) = self.view.tool.take() else {
+            return;
+        };
+        self.view.tool_params = t.params;
+        if let Some((serial, redo)) = t.committed
+            && t.last == t.origin
+            && serial == self.doc.edit_serial()
+        {
+            // Previews that came back to where they started.
+            let cmds = self.doc.discard_step(redo);
+            self.send(cmds);
+        }
+        self.doc.end_gesture();
+        if self.view.mode == Mode::Pattern && self.selected(t.uid) == t.slot {
+            self.set_selection(t.uid, note_ops::values(&t.last, &t.result_sel));
+        }
+    }
+
+    /// Cancel: the pattern as it was, no undo step, the old selection.
+    pub(crate) fn cancel_tool(&mut self) {
+        let Some(t) = self.view.tool.take() else {
+            return;
+        };
+        self.view.tool_params = t.params;
+        if let Some((serial, redo)) = t.committed {
+            if serial == self.doc.edit_serial() {
+                let cmds = self.doc.discard_step(redo);
+                self.send(cmds);
+            } else if self.doc.project.roll(t.uid, t.slot) != Some(&t.origin) {
+                // Another edit went on top of the preview's step: put the
+                // pattern back as an edit of its own.
+                let cmds = self.doc.apply(
+                    Edit::NotePattern {
+                        uid: t.uid,
+                        slot: t.slot,
+                        pattern: Box::new(t.origin.clone()),
+                    },
+                    false,
+                );
+                self.send(cmds);
+            }
+        }
+        self.doc.end_gesture();
+        if self.view.mode == Mode::Pattern {
+            let panel = self.view.panel(t.uid);
+            (panel.selected, panel.sel_slot) = t.sel_before;
+        }
+    }
+
+    /// The open tool's popup: its settings, Apply and Cancel. Closing it
+    /// cancels. The preview follows the settings in the same frame.
+    fn tool_window(&mut self, ctx: &egui::Context, anchor: Rect, rects: &mut Vec<(String, Rect)>) {
+        let Some(t) = &self.view.tool else {
+            return;
+        };
+        let (tool, mut params) = (t.tool, t.params);
+        let kind = self.lane_kind(t.uid);
+        let snap = self.view.dock.snap;
+        let mut open = true;
+        let (mut apply, mut cancel, mut new_seed) = (false, false, false);
+        egui::Window::new(tool.label())
+            .id(egui::Id::new("note_tool"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(Align2::LEFT_BOTTOM)
+            .default_pos(anchor.left_top())
+            .show(ctx, |ui| {
+                settings(ui, tool, &mut params, kind, snap, &mut new_seed, rects);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let a = ui.button("Apply");
+                    let c = ui.button("Cancel");
+                    rects.push(("Apply".into(), a.rect));
+                    rects.push(("Cancel".into(), c.rect));
+                    apply = a.clicked();
+                    cancel = c.clicked();
+                });
+            });
+        if new_seed {
+            let seed = self.next_seed() % SEEDS;
+            match tool {
+                ToolKind::Humanize => params.humanize.seed = seed,
+                ToolKind::Randomize => params.randomize.seed = seed,
+                ToolKind::Arpeggiate => params.arp.seed = seed,
+                _ => {}
+            }
+        }
+        if let Some(t) = &mut self.view.tool {
+            t.params = params;
+        }
+        if cancel || !open {
+            return self.cancel_tool();
+        }
+        self.preview_tool();
+        if apply {
+            self.apply_tool();
+        }
+    }
+}
+
+/// A labelled number in `range` with `suffix`.
+fn number(
+    ui: &mut egui::Ui,
+    name: &str,
+    v: &mut u8,
+    range: std::ops::RangeInclusive<u8>,
+    suffix: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.label(name);
+        ui.add(
+            egui::DragValue::new(v)
+                .range(range)
+                .speed(0.2)
+                .suffix(suffix),
+        );
+    });
+}
+
+/// A labelled pitch, shown by name.
+fn pitch(ui: &mut egui::Ui, name: &str, v: &mut u8) {
+    ui.horizontal(|ui| {
+        ui.label(name);
+        ui.add(
+            egui::DragValue::new(v)
+                .range(0..=127)
+                .speed(0.3)
+                .custom_formatter(|p, _| pitch_name(p as u8)),
+        );
+    });
+}
+
+/// One choice per snap.
+fn snaps(ui: &mut egui::Ui, name: &str, v: &mut Snap) {
+    ui.horizontal(|ui| {
+        ui.label(name);
+        for s in Snap::ALL {
+            if ui.selectable_label(*v == s, s.label()).clicked() {
+                *v = s;
+            }
+        }
+    });
+}
+
+/// The seed (typed or dragged) and a "New seed" button.
+fn seed(ui: &mut egui::Ui, v: &mut u64, new_seed: &mut bool, rects: &mut Vec<(String, Rect)>) {
+    ui.horizontal(|ui| {
+        ui.label("Seed");
+        ui.add(egui::DragValue::new(v).range(0..=SEEDS - 1).speed(1.0));
+        let b = ui
+            .button("New seed")
+            .on_hover_text("Roll again: the same seed gives the same notes");
+        rects.push(("New seed".into(), b.rect));
+        *new_seed |= b.clicked();
+    });
+}
+
+/// `tool`'s settings (the plan's table).
+fn settings(
+    ui: &mut egui::Ui,
+    tool: ToolKind,
+    p: &mut ToolParams,
+    kind: LaneKind,
+    snap: Snap,
+    new_seed: &mut bool,
+    rects: &mut Vec<(String, Rect)>,
+) {
+    let drums = kind == LaneKind::Drums;
+    let note = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).weak());
+    match tool {
+        ToolKind::Quantize => {
+            let q = &mut p.quantize;
+            snaps(ui, "Grid", &mut q.grid);
+            number(ui, "Strength", &mut q.strength, 0..=100, "%");
+            ui.checkbox(&mut q.ends, "Quantize ends");
+        }
+        ToolKind::Humanize => {
+            let h = &mut p.humanize;
+            number(ui, "Timing ±", &mut h.timing, 0..=8, " ticks");
+            number(ui, "Velocity ±", &mut h.vel, 0..=40, "");
+            seed(ui, &mut h.seed, new_seed, rects);
+        }
+        ToolKind::Legato => {
+            note(
+                ui,
+                "Each note runs to the next note's start; the last to the pattern end.",
+            );
+        }
+        ToolKind::Reverse => {
+            note(ui, "The notes play backwards over their span.");
+        }
+        ToolKind::Invert => {
+            note(ui, "Pitches mirror within the notes' range.");
+        }
+        ToolKind::Strum => {
+            let s = &mut p.strum;
+            number(ui, "Ticks apart", &mut s.ticks, 1..=8, "");
+            ui.horizontal(|ui| {
+                ui.label("Order");
+                if ui.selectable_label(s.up, "Up").clicked() {
+                    s.up = true;
+                }
+                if ui.selectable_label(!s.up, "Down").clicked() {
+                    s.up = false;
+                }
+            });
+        }
+        ToolKind::Randomize => {
+            let r = &mut p.randomize;
+            number(ui, "Density", &mut r.density, 10..=100, "%");
+            if !drums {
+                pitch(ui, "Lowest", &mut r.pitch_lo);
+                pitch(ui, "Highest", &mut r.pitch_hi);
+            }
+            let unit = format!(" × {}", snap.label());
+            number(ui, "Shortest", &mut r.len_min, 1..=16, &unit);
+            number(ui, "Longest", &mut r.len_max, 1..=16, &unit);
+            seed(ui, &mut r.seed, new_seed, rects);
+        }
+        ToolKind::Arpeggiate => {
+            let a = &mut p.arp;
+            ui.horizontal(|ui| {
+                ui.label("Style");
+                for (style, name) in [
+                    (ArpStyle::Up, "Up"),
+                    (ArpStyle::Down, "Down"),
+                    (ArpStyle::UpDown, "Up-down"),
+                    (ArpStyle::Random, "Random"),
+                ] {
+                    if ui.selectable_label(a.style == style, name).clicked() {
+                        a.style = style;
+                    }
+                }
+            });
+            snaps(ui, "Rate", &mut a.rate);
+            number(ui, "Gate", &mut a.gate, 10..=100, "%");
+            if a.style == ArpStyle::Random {
+                seed(ui, &mut a.seed, new_seed, rects);
+            }
+        }
+        ToolKind::Euclid => {
+            let e = &mut p.euclid;
+            number(ui, "Steps", &mut e.steps, 1..=64, "");
+            let steps = e.steps.clamp(1, 64);
+            number(ui, "Hits", &mut e.hits, 0..=steps, "");
+            number(ui, "Rotation", &mut e.rotation, 0..=steps - 1, "");
+            if drums {
+                ui.horizontal(|ui| {
+                    ui.label("Row");
+                    let row = (e.pitch as usize).min(INST_NAMES.len() - 1);
+                    egui::ComboBox::from_id_salt("euclid_row")
+                        .width(50.0)
+                        .selected_text(INST_NAMES[row])
+                        .show_ui(ui, |ui| {
+                            for (i, name) in INST_NAMES.iter().enumerate() {
+                                ui.selectable_value(&mut e.pitch, i as u8, *name);
+                            }
+                        });
+                });
+            } else {
+                pitch(ui, "Pitch", &mut e.pitch);
+            }
+            note(
+                ui,
+                &format!("One cell is {} (the dock's snap).", snap.label()),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::test_rack::{FM, KIT808, SYNTH1};
+    use acid_engine::project::Project;
+    use eframe::egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+
+    /// The test rack with `notes` in `uid`'s first pattern (64 ticks), the
+    /// dock focused on `uid`, and `sel` (indices) selected.
+    fn app_with(uid: MachineUid, notes: &[(u16, u16, u8)], sel: &[usize]) -> SidAcidApp {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let p = app.doc.project.roll_mut(uid, 0).unwrap();
+        p.length = 16;
+        p.notes = notes
+            .iter()
+            .map(|&(s, l, pi)| Note::new(s, l, pi, 100))
+            .collect();
+        let chosen = sel.iter().map(|&i| p.notes[i]).collect();
+        app.view.focus = Some(uid);
+        app.view.dock.keyboard = true;
+        app.set_selection(uid, chosen);
+        app
+    }
+
+    fn frame(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, events: Vec<Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+    }
+
+    fn press(app: &mut SidAcidApp, ctx: &egui::Context, at: Pos2, time: f64) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(app, ctx, time, vec![Event::PointerMoved(at)]);
+        frame(app, ctx, time + 0.05, vec![button(true)]);
+        frame(app, ctx, time + 0.1, vec![button(false)]);
+    }
+
+    fn rect(app: &SidAcidApp, name: &str) -> Option<Rect> {
+        let rects = &app.view.dock.tool_rects;
+        rects.iter().find(|(n, _)| n == name).map(|(_, r)| *r)
+    }
+
+    /// Draws a frame, then clicks `name` (which must be there).
+    fn click(app: &mut SidAcidApp, ctx: &egui::Context, name: &str, time: f64) {
+        frame(app, ctx, time, vec![]);
+        let r = rect(app, name).unwrap_or_else(|| panic!("no {name}"));
+        press(app, ctx, r.center(), time + 0.1);
+    }
+
+    /// Opens `tool` from the Tools menu, from egui time `time`.
+    fn open(app: &mut SidAcidApp, ctx: &egui::Context, tool: ToolKind, time: f64) {
+        click(app, ctx, "Tools", time);
+        click(app, ctx, &format!("Tool {}", tool.label()), time + 1.0);
+    }
+
+    fn starts(app: &SidAcidApp, uid: MachineUid) -> Vec<u16> {
+        let roll = app.doc.project.roll(uid, 0).unwrap();
+        roll.notes.iter().map(|n| n.start).collect()
+    }
+
+    fn set_params(app: &mut SidAcidApp, f: impl FnOnce(&mut ToolParams)) {
+        f(&mut app.view.tool.as_mut().expect("a tool is open").params);
+    }
+
+    /// One frame of only the keyboard shortcuts (and the dock's keys).
+    fn shortcuts(app: &mut SidAcidApp, events: Vec<Event>) {
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = egui::Context::default().run(input, |ctx| app.handle_shortcuts(ctx));
+    }
+
+    fn key(key: egui::Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn quantize_previews_live_and_cancel_leaves_no_trace() {
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let before = app.doc.project.clone();
+        assert!(!app.doc.is_dirty());
+        open(&mut app, &ctx, ToolKind::Quantize, 1.0);
+        assert!(app.view.tool.is_some(), "the popup is open");
+        assert_eq!(starts(&app, FM), [4, 12], "full strength, live");
+        set_params(&mut app, |p| p.quantize.strength = 50);
+        frame(&mut app, &ctx, 3.0, vec![]);
+        assert_eq!(starts(&app, FM), [3, 11], "half way, from the snapshot");
+        assert_eq!(app.doc.undo_depth(), 1, "one merged preview step");
+        assert_eq!(app.selection(FM), [0, 1], "the result is selected");
+        click(&mut app, &ctx, "Cancel", 4.0);
+        assert!(app.view.tool.is_none());
+        assert_eq!(app.doc.project, before, "the pattern as it was");
+        assert_eq!(app.doc.undo_depth(), 0, "no undo step");
+        assert!(!app.doc.is_dirty(), "and clean");
+        assert!(app.selection(FM).is_empty(), "the old (empty) selection");
+    }
+
+    #[test]
+    fn apply_is_one_undo_step_and_selects_the_result() {
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[1]);
+        let ctx = egui::Context::default();
+        let before = app.doc.project.clone();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        for (i, s) in [25, 75, 100].into_iter().enumerate() {
+            set_params(&mut app, |p| p.quantize.strength = s);
+            frame(&mut app, &ctx, 2.0 + i as f64, vec![]);
+        }
+        assert_eq!(starts(&app, FM), [2, 12], "only the selected note");
+        click(&mut app, &ctx, "Apply", 6.0);
+        assert!(app.view.tool.is_none());
+        assert_eq!(app.doc.undo_depth(), 1, "one undo step");
+        assert_eq!(app.selection(FM), [1], "the moved note is selected");
+        assert_eq!(app.view.tool_params.quantize.strength, 100, "remembered");
+        app.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn a_tool_that_changes_nothing_applies_no_step() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62)], &[]);
+        let ctx = egui::Context::default();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        assert_eq!(app.doc.undo_depth(), 0, "on the grid already");
+        click(&mut app, &ctx, "Apply", 2.0);
+        assert_eq!(app.doc.undo_depth(), 0);
+        // A preview that came back to where it started.
+        let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+        open(&mut app, &ctx, ToolKind::Quantize, 3.0);
+        set_params(&mut app, |p| p.quantize.strength = 0);
+        frame(&mut app, &ctx, 5.0, vec![]);
+        click(&mut app, &ctx, "Apply", 6.0);
+        assert_eq!(app.doc.undo_depth(), 0);
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn keys_clipboard_and_undo_wait_while_a_tool_is_open() {
+        use egui::Key;
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[0]);
+        let ctx = egui::Context::default();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        let preview = app.doc.project.clone();
+        let cmd = Modifiers::COMMAND;
+        let events = vec![
+            key(Key::ArrowRight, Modifiers::NONE),
+            key(Key::Delete, Modifiers::NONE),
+            key(Key::A, Modifiers::NONE),
+            key(Key::Z, cmd),
+            key(Key::X, cmd),
+            key(Key::D, cmd),
+        ];
+        shortcuts(&mut app, events);
+        assert_eq!(app.doc.project, preview, "nothing but the preview");
+        assert_eq!(app.doc.undo_depth(), 1);
+        app.undo();
+        app.paste_pattern();
+        assert_eq!(
+            app.doc.project, preview,
+            "the menu's undo and paste wait too"
+        );
+        assert!(app.view.tool.is_some(), "still open");
+        // Once applied, undo works again.
+        click(&mut app, &ctx, "Apply", 3.0);
+        shortcuts(&mut app, vec![key(Key::Z, cmd)]);
+        assert_eq!(starts(&app, FM), [2, 10]);
+    }
+
+    #[test]
+    fn mouse_edits_on_the_tools_lane_wait() {
+        let ctx = egui::Context::default();
+        // A click on Synth 1's (top) grid adds a note...
+        let click_grid = |app: &mut SidAcidApp, time: f64| {
+            frame(app, &ctx, time, vec![]);
+            let lanes = app.view.dock.lanes.unwrap();
+            let at = pos2(
+                lanes.left() + app.lane_key_w() + 41.0,
+                lanes.top() + super::super::lane::HEADER_H + 30.0,
+            );
+            press(app, &ctx, at, time + 0.1);
+        };
+        let mut app = app_with(SYNTH1, &[(0, 4, 48)], &[]);
+        click_grid(&mut app, 0.0);
+        assert_eq!(starts(&app, SYNTH1).len(), 2, "a click adds a note");
+        // ...but not under an open tool.
+        let mut app = app_with(SYNTH1, &[(2, 4, 48)], &[]);
+        open(&mut app, &ctx, ToolKind::Quantize, 1.0);
+        let preview = app.doc.project.clone();
+        click_grid(&mut app, 3.0);
+        assert_eq!(app.doc.project, preview);
+        assert!(app.view.tool.is_some());
+    }
+
+    #[test]
+    fn the_scope_is_the_selection_or_every_visible_note() {
+        // Note 2 starts past the 16-step end.
+        let notes = [(0, 4, 60), (8, 4, 62), (70, 4, 64)];
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &notes, &[]);
+        open(&mut app, &ctx, ToolKind::Reverse, 0.0);
+        assert_eq!(app.view.tool.as_ref().unwrap().scope, [0, 1]);
+        assert_eq!(starts(&app, FM), [8, 0, 70], "the hidden note stays");
+        let mut app = app_with(FM, &notes, &[1, 2]);
+        open(&mut app, &ctx, ToolKind::Reverse, 2.0);
+        assert_eq!(app.view.tool.as_ref().unwrap().scope, [1, 2]);
+    }
+
+    #[test]
+    fn melodic_tools_are_greyed_on_drums() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(KIT808, &[(0, 4, 0), (0, 4, 2)], &[]);
+        let mut time = 0.0;
+        for t in [ToolKind::Invert, ToolKind::Strum, ToolKind::Arpeggiate] {
+            open(&mut app, &ctx, t, time);
+            assert!(app.view.tool.is_none(), "{t:?} is off on drums");
+            // Close the menu.
+            press(&mut app, &ctx, pos2(640.0, 100.0), time + 3.0);
+            time += 4.0;
+        }
+        open(&mut app, &ctx, ToolKind::Euclid, time);
+        let t = app.view.tool.as_ref().expect("Euclidean works on drums");
+        assert!(t.params.euclid.pitch < 8, "on a drum row");
+    }
+
+    #[test]
+    fn song_mode_has_no_tools_button() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(0, 4, 60)], &[]);
+        frame(&mut app, &ctx, 0.0, vec![]);
+        assert!(rect(&app, "Tools").is_some(), "first in the inspector row");
+        app.view.mode = Mode::Song;
+        frame(&mut app, &ctx, 1.0, vec![]);
+        assert!(rect(&app, "Tools").is_none());
+    }
+
+    #[test]
+    fn the_tools_button_sits_first_in_the_inspector_row() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(0, 4, 60)], &[0]);
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let (tools, vel) = (rect(&app, "Tools").unwrap(), rect(&app, "Vel").unwrap());
+        assert!(tools.right() <= vel.left(), "left of the inspector");
+        let snap = rect(&app, "Snap to scale").unwrap();
+        assert!(
+            tools.top() >= snap.bottom(),
+            "in the row under the snap and key"
+        );
+        assert!(tools.left() < snap.left(), "at the row's start");
+    }
+
+    #[test]
+    fn leaving_the_lane_its_pattern_or_pattern_mode_cancels() {
+        let ctx = egui::Context::default();
+        let leave: [fn(&mut SidAcidApp); 3] = [
+            |app| app.view.focus = Some(SYNTH1),
+            |app| app.select_pad(FM, 1),
+            |app| app.view.mode = Mode::Song,
+        ];
+        for (i, leave) in leave.into_iter().enumerate() {
+            let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+            let before = app.doc.project.roll(FM, 0).unwrap().clone();
+            let time = i as f64 * 10.0;
+            open(&mut app, &ctx, ToolKind::Quantize, time);
+            assert_eq!(starts(&app, FM), [4]);
+            leave(&mut app);
+            frame(&mut app, &ctx, time + 3.0, vec![]);
+            assert!(app.view.tool.is_none(), "case {i}");
+            assert_eq!(app.doc.project.roll(FM, 0).unwrap(), &before, "case {i}");
+            assert_eq!(app.doc.undo_depth(), 0, "case {i}");
+        }
+    }
+
+    #[test]
+    fn a_press_on_another_lane_cancels_before_its_edit() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        let lanes = app.view.dock.lanes.unwrap();
+        // Synth 1's grid, on top.
+        let at = pos2(
+            lanes.left() + app.lane_key_w() + 41.0,
+            lanes.top() + super::super::lane::HEADER_H + 30.0,
+        );
+        press(&mut app, &ctx, at, 3.0);
+        assert!(app.view.tool.is_none());
+        assert_eq!(starts(&app, FM), [2], "FM as it was");
+        assert_eq!(app.doc.undo_depth(), 1, "only Synth 1's new note");
+        app.undo();
+        assert_eq!(app.doc.undo_depth(), 0);
+    }
+
+    #[test]
+    fn a_new_seed_rolls_again_and_a_seed_repeats() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(0, 4, 60), (60, 4, 62)], &[]);
+        app.view.tool_params.randomize.density = 100;
+        open(&mut app, &ctx, ToolKind::Randomize, 0.0);
+        let first = app.doc.project.roll(FM, 0).unwrap().clone();
+        let seed = app.view.tool.as_ref().unwrap().params.randomize.seed;
+        click(&mut app, &ctx, "New seed", 2.0);
+        let new = app.view.tool.as_ref().unwrap().params.randomize.seed;
+        assert_ne!(new, seed);
+        assert!(new < SEEDS);
+        assert_ne!(app.doc.project.roll(FM, 0).unwrap(), &first);
+        set_params(&mut app, |p| p.randomize.seed = seed);
+        frame(&mut app, &ctx, 4.0, vec![]);
+        assert_eq!(app.doc.project.roll(FM, 0).unwrap(), &first, "same seed");
+        assert_eq!(app.doc.undo_depth(), 1, "still one step");
+    }
+
+    #[test]
+    fn every_tool_opens_and_draws_its_popup() {
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        for (uid, notes) in [
+            (FM, vec![(0, 8, 60), (0, 8, 64), (8, 4, 67)]),
+            (KIT808, vec![(0, 4, 0), (4, 4, 1)]),
+            (SYNTH1, vec![(0, 4, 36), (6, 4, 38)]),
+        ] {
+            for t in ToolKind::ALL {
+                let mut app = app_with(uid, &notes, &[]);
+                app.view.tool_params = ToolParams::default();
+                app.view.tool_params.arp.style = ArpStyle::Random;
+                if app.lane_kind(uid) == LaneKind::Drums && t.melodic_only() {
+                    continue;
+                }
+                open(&mut app, &ctx, t, time);
+                frame(&mut app, &ctx, time + 3.0, vec![]);
+                assert!(rect(&app, "Apply").is_some(), "{uid:?} {t:?}");
+                click(&mut app, &ctx, "Apply", time + 4.0);
+                time += 10.0;
+                assert!(app.view.tool.is_none(), "{uid:?} {t:?}");
+                assert!(app.doc.undo_depth() <= 1, "{uid:?} {t:?}");
+            }
+        }
+    }
+}

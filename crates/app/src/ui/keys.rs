@@ -182,6 +182,13 @@ impl SidAcidApp {
                 // Not under a lane's live mouse move or resize, whose next
                 // frame would redo its edit on top.
                 Shortcut::Undo | Shortcut::Redo if self.mouse_editing() => {}
+                // Nor under an open note tool, which holds its lane.
+                Shortcut::Copy
+                | Shortcut::Paste
+                | Shortcut::Cut
+                | Shortcut::Duplicate
+                | Shortcut::SelectAll
+                    if self.view.tool.is_some() => {}
                 Shortcut::Undo => {
                     self.undo();
                 }

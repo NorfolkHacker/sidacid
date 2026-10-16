@@ -187,6 +187,9 @@ fn merge_key(edit: &Edit) -> MergeKey {
     }
 }
 
+/// A redo history set aside by `Document::take_redo`.
+pub(crate) struct RedoStash(Vec<Step>);
+
 /// One undo or redo step: the edit that reverses it, and the generation
 /// of the document state the step leads to when redone.
 struct Step {
@@ -449,6 +452,31 @@ impl Document {
 
     pub fn end_gesture(&mut self) {
         self.gesture = None;
+    }
+
+    /// Sets the redo history aside, ahead of a preview's first edit (which
+    /// would clear it), so `discard_step` can give it back.
+    pub(crate) fn take_redo(&mut self) -> RedoStash {
+        RedoStash(std::mem::take(&mut self.redo))
+    }
+
+    /// Takes back the newest undo step as if it never happened (a
+    /// cancelled preview): what it changed is restored, no redo step is
+    /// made, and `redo` (from `take_redo`) is the redo history again. The
+    /// dirty state is what it was before the step. Returns the engine
+    /// commands to send.
+    pub(crate) fn discard_step(&mut self, redo: RedoStash) -> Vec<Command> {
+        self.gesture = None;
+        self.pass_open = false;
+        let Some(step) = self.undo.pop() else {
+            return Vec::new();
+        };
+        let untaken = self.refusal.take();
+        let inverse = self.apply_raw(step.edit);
+        debug_assert!(self.refusal.is_none(), "history steps always fit");
+        self.refusal = untaken;
+        self.redo = redo.0;
+        self.commands_for(&inverse)
     }
 
     /// Changes with each edit that changes the project (not undo/redo):
@@ -1023,6 +1051,33 @@ mod tests {
             matches!(cmds.as_slice(), [Command::SetParam(id, v)] if *id == CUTOFF && *v == 0.9)
         );
         assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn a_discarded_step_leaves_the_history_as_it_was() {
+        let mut d = doc();
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(8, 4, 51, 100)), false);
+        d.mark_saved();
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(16, 4, 53, 100)), false);
+        d.undo();
+        let before = d.project.clone();
+        // A preview: the redo history set aside, then merged edits.
+        let redo = d.take_redo();
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)), true);
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(4, 4, 41, 100)), true);
+        assert_eq!(d.undo_depth(), 2);
+        assert!(d.is_dirty());
+        let cmds = d.discard_step(redo);
+        assert!(!cmds.is_empty(), "the engine is told");
+        assert_eq!(d.project, before);
+        assert_eq!(d.undo_depth(), 1);
+        assert!(!d.is_dirty(), "clean again");
+        assert!(d.can_redo(), "the redo history is back");
+        d.redo();
+        assert_eq!(
+            d.project.roll(SYNTH2, 5).unwrap().notes.len(),
+            before.roll(SYNTH2, 5).unwrap().notes.len() + 1
+        );
     }
 
     #[test]

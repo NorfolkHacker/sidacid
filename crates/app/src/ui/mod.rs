@@ -19,9 +19,7 @@ mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
 mod note_ops;
-// The Tools menu (phase 7, task 3) calls these.
 mod note_panel;
-#[allow(dead_code)]
 mod note_tools;
 mod pads;
 mod params_ui;
@@ -40,6 +38,7 @@ mod song_panel;
 mod song_tools;
 mod synth_panel;
 pub mod theme;
+mod tool_menu;
 mod transport;
 
 use crate::audio::AudioLink;
@@ -250,6 +249,10 @@ pub struct ViewState {
     pub fill_latched: bool,
     /// The Fill button as last drawn.
     pub fill_rect: Option<egui::Rect>,
+    /// The note tool open on the focused lane (its popup is showing).
+    pub(crate) tool: Option<tool_menu::ToolSession>,
+    /// Each tool's settings as last used.
+    pub(crate) tool_params: tool_menu::ToolParams,
 }
 
 pub struct SidAcidApp {
@@ -477,6 +480,10 @@ impl SidAcidApp {
     /// guard can't tell same-named rows apart), and undoing a bank import
     /// puts other voices under the stored index.
     pub(crate) fn undo(&mut self) {
+        // An open note tool's preview is the newest step: Apply or Cancel first.
+        if self.view.tool.is_some() {
+            return;
+        }
         self.view.voice_source_before(self.doc.next_undo());
         let (key, middles) = (self.doc.project.key, self.fold_middles());
         let cmds = self.doc.undo();
@@ -491,6 +498,9 @@ impl SidAcidApp {
 
     /// Redo; see `undo`.
     pub(crate) fn redo(&mut self) {
+        if self.view.tool.is_some() {
+            return;
+        }
         self.view.voice_source_before(self.doc.next_redo());
         let (key, middles) = (self.doc.project.key, self.fold_middles());
         let cmds = self.doc.redo();

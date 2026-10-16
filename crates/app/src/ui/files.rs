@@ -122,14 +122,20 @@ impl SidAcidApp {
         });
         ui.menu_button("Edit", |ui| {
             if ui
-                .add_enabled(self.doc.can_undo(), egui::Button::new("Undo  (Ctrl+Z)"))
+                .add_enabled(
+                    self.doc.can_undo() && self.view.tool.is_none(),
+                    egui::Button::new("Undo  (Ctrl+Z)"),
+                )
                 .clicked()
             {
                 ui.close_menu();
                 self.undo();
             }
             if ui
-                .add_enabled(self.doc.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
+                .add_enabled(
+                    self.doc.can_redo() && self.view.tool.is_none(),
+                    egui::Button::new("Redo  (Ctrl+Y)"),
+                )
                 .clicked()
             {
                 ui.close_menu();
@@ -203,6 +209,8 @@ impl SidAcidApp {
             self.write_project(save.path);
         }
         self.doc = doc;
+        // An open note tool belonged to the old document (and its history).
+        self.view.tool = None;
         // An empty imported bank is no bank (the Imported tab stays off).
         for m in &mut self.doc.project.machines {
             if let MachineBody::Fm(fm) = &mut m.body
@@ -443,6 +451,10 @@ impl SidAcidApp {
     /// synth, drums onto any kit (808 and 909 alike), notes onto FM, Mono
     /// or Sampler.
     pub(crate) fn paste_pattern(&mut self) {
+        // Not over an open note tool's preview.
+        if self.view.tool.is_some() {
+            return;
+        }
         let Some(entry) = self.focused().and_then(|uid| self.doc.project.machine(uid)) else {
             return;
         };

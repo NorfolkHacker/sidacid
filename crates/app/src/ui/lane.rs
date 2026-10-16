@@ -503,6 +503,9 @@ impl SidAcidApp {
         let kind = self.lane_kind(uid);
         let drums = kind == LaneKind::Drums;
         let acid = kind == LaneKind::Acid;
+        // An open note tool previews into this pattern: the mouse and the
+        // strip edit nothing here until it is applied or cancelled.
+        let locked = self.tool_lane() == Some((uid, slot));
         let key_w = self.lane_key_w();
         let height = view.clamped_height() as f32;
         let ticks = pattern.ticks();
@@ -825,7 +828,7 @@ impl SidAcidApp {
         }
 
         // Mouse editing.
-        let pointer = resp.interact_pointer_pos();
+        let pointer = resp.interact_pointer_pos().filter(|_| !locked);
         if resp.is_pointer_button_down_on()
             && let Some(p) = pointer
             && p.x < geom.left
@@ -850,7 +853,9 @@ impl SidAcidApp {
                 cursor.tick = snap.floor(geom.tick_at_clamped(p.x));
             }
         }
-        self.lane_mouse(ui, uid, &resp, &geom, &mut pattern, &mut sel, &mut frame);
+        if !locked {
+            self.lane_mouse(ui, uid, &resp, &geom, &mut pattern, &mut sel, &mut frame);
+        }
         if let Some(LaneDrag::Marquee { from, .. }) = &self.view.panel(uid).drag
             && let Some(p) = pointer
         {
@@ -898,7 +903,7 @@ impl SidAcidApp {
                     drum_accent_strip(ui, g, width, snap, &mut pattern, &mut frame)
                 }
             }
-            if frame.changed {
+            if frame.changed && !locked {
                 self.set_selection(uid, note_ops::values(&pattern, &sel));
             }
             frame.changed |= before;
@@ -911,6 +916,18 @@ impl SidAcidApp {
         self.lane_handle(ui, uid, height, width);
 
         self.audition(uid, key_down);
+        if locked {
+            // Whatever the strip did this frame is dropped.
+            if matches!(self.view.panel(uid).drag, Some(LaneDrag::Velocity)) {
+                self.view.panel(uid).drag = None;
+            }
+            return;
+        }
+        // A press here moved the focus off an open tool's lane: it is
+        // cancelled before this lane's edit lands.
+        if self.view.focus == Some(uid) && self.tool_lane().is_some_and(|(u, _)| u != uid) {
+            self.cancel_tool();
+        }
         self.commit_poly_frame(
             uid,
             slot,

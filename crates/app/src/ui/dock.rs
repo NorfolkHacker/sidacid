@@ -1,6 +1,6 @@
 //! The editor dock at the bottom of the window: a header row (snap, key,
-//! zoom, follow, and in Pattern mode the note inspector for the focused
-//! lane's selection; it wraps when narrow), a ruler that doubles as the
+//! zoom, follow, and in Pattern mode the Tools menu (`tool_menu`) and the
+//! note inspector for the focused lane's selection; it wraps when narrow), a ruler that doubles as the
 //! shared horizontal scrollbar, and every machine's lane stacked in rack
 //! order. Its height is a share of the window kept in the settings file.
 
@@ -28,6 +28,7 @@ impl SidAcidApp {
     /// Draws the dock as a bottom panel; call before the central panel so
     /// the rack takes what is left.
     pub(crate) fn dock(&mut self, ctx: &egui::Context) {
+        self.check_tool();
         let window_h = ctx.screen_rect().height().max(0.0);
         let frac = self.settings.ui.clamped_dock_frac();
         self.latch_dock_resize(ctx);
@@ -118,8 +119,8 @@ impl SidAcidApp {
     }
 
     /// Snap choices and the key picker (Pattern mode), zoom buttons and
-    /// the follow toggle;
-    /// in Song mode then the song tools (`song_tools`).
+    /// the follow toggle; in Pattern mode then a row with the Tools menu
+    /// and the inspector, in Song mode the song tools (`song_tools`).
     fn dock_header(&mut self, ui: &mut egui::Ui) {
         #[cfg(test)]
         self.view.dock.tool_rects.clear();
@@ -135,7 +136,9 @@ impl SidAcidApp {
                     }
                 }
                 ui.separator();
-                self.key_picker(ui);
+                // A key change is an edit of its own: not under an open tool.
+                let free = self.view.tool.is_none();
+                ui.add_enabled_ui(free, |ui| self.key_picker(ui));
                 ui.separator();
             }
             ui.label(RichText::new("Zoom").small().color(theme::ACID));
@@ -174,7 +177,11 @@ impl SidAcidApp {
             // lanes don't move when the inspector comes and goes.
             ui.horizontal_wrapped(|ui| {
                 ui.set_min_height(ui.spacing().interact_size.y);
-                self.inspector(ui);
+                self.tools_menu(ui);
+                ui.separator();
+                // Under an open tool the lane holds its preview: no edits.
+                let free = self.view.tool.is_none();
+                ui.add_enabled_ui(free, |ui| self.inspector(ui));
             });
         } else {
             self.inspector_closed(None);
@@ -822,20 +829,22 @@ impl SidAcidApp {
         (key.snap && key.scale != Scale::Chromatic && kind != LaneKind::Drums).then_some(key)
     }
 
-    /// A lane's mouse move or resize is in progress: keyboard and
-    /// clipboard edits wait until it is dropped.
+    /// A lane's mouse move or resize is in progress, or a note tool is
+    /// open (its preview is redone every frame): keyboard, clipboard and
+    /// undo edits wait until it is dropped, applied or cancelled.
     pub(crate) fn mouse_editing(&self) -> bool {
         use super::poly_edit::LaneDrag;
         use super::song_lane::SongDrag;
-        self.view.panels.values().any(|p| {
-            matches!(
-                p.drag,
-                Some(LaneDrag::Move { .. } | LaneDrag::Resize { .. })
-            ) || matches!(
-                p.song_drag,
-                Some(SongDrag::Move { .. } | SongDrag::Resize { .. })
-            )
-        })
+        self.view.tool.is_some()
+            || self.view.panels.values().any(|p| {
+                matches!(
+                    p.drag,
+                    Some(LaneDrag::Move { .. } | LaneDrag::Resize { .. })
+                ) || matches!(
+                    p.song_drag,
+                    Some(SongDrag::Move { .. } | SongDrag::Resize { .. })
+                )
+            })
     }
 
     /// Forgets the ruler range and the selections it made in the other
