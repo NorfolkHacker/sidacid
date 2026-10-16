@@ -355,6 +355,20 @@ impl SidAcidApp {
         true
     }
 
+    /// Forgets the ruler range and the selections it made in the other
+    /// lanes; the focused lane keeps its own, which the caller handles.
+    fn drop_range(&mut self) {
+        if self.view.dock.range.take().is_none() {
+            return;
+        }
+        let focus = self.focused();
+        for (uid, panel) in self.view.panels.iter_mut() {
+            if Some(*uid) != focus {
+                panel.selected.clear();
+            }
+        }
+    }
+
     /// A key acting on `uid`'s selection: arrows move it (Alt: by ticks;
     /// Shift+up/down: by octaves on melodic lanes), Delete/Backspace remove
     /// it, Esc clears it and the ruler range. `None` when the key is not
@@ -402,17 +416,24 @@ impl SidAcidApp {
             _ => return None,
         };
         let slot = self.selected(uid);
-        let mut pattern = self.doc.project.roll(uid, slot)?.clone();
+        let original = self.doc.project.roll(uid, slot)?;
+        let mut pattern = original.clone();
         if matches!(key, Key::Delete | Key::Backspace) {
             delete(&mut pattern, &sel);
             self.set_selection(uid, Vec::new());
-        } else if (dt, dp) != (0, 0) {
+        } else if (dt, dp) == (0, 0) {
+            return Some(true);
+        } else {
             let moved = shift(&mut pattern, &sel, dt, dp, kind);
             let kept = settle(&mut pattern, &moved, kind);
+            if pattern == *original {
+                // Clamped to nothing: no edit, and the range still holds.
+                return Some(true);
+            }
             self.set_selection(uid, values(&pattern, &kept));
         }
         // The range no longer describes what is selected.
-        self.view.dock.range = None;
+        self.drop_range();
         self.commit_poly(uid, slot, Some(pattern), false, true);
         Some(true)
     }
@@ -496,6 +517,13 @@ impl SidAcidApp {
             return;
         }
         self.view.note_clip = Some(NoteClip { lanes });
+        if cut && self.view.dock.range.is_some() {
+            // The selected notes are gone, in every lane.
+            self.drop_range();
+            if let Some(uid) = self.focused() {
+                self.set_selection(uid, Vec::new());
+            }
+        }
         self.apply_note_edits(edits);
     }
 
@@ -510,6 +538,7 @@ impl SidAcidApp {
             return;
         };
         let melodic = |k: LaneKind| k != LaneKind::Drums;
+        let single = clip.lanes.len() == 1;
         let at = self.view.panel(focus).cursor.tick;
         let targets: Vec<(MachineUid, &Vec<Note>)> = if let [(_, kind, notes)] = &clip.lanes[..] {
             let to = self.lane_kind(focus);
@@ -553,10 +582,14 @@ impl SidAcidApp {
                 Err(e) => return self.paste_refused(e),
             }
         }
+        if single {
+            self.drop_range();
+        } else {
+            self.view.dock.range = None;
+        }
         for (uid, notes) in selections {
             self.set_selection(uid, notes);
         }
-        self.view.dock.range = None;
         self.apply_note_edits(edits);
     }
 
@@ -625,8 +658,8 @@ impl SidAcidApp {
             return;
         };
         let notes = p.notes.clone();
+        self.drop_range();
         self.set_selection(uid, notes);
-        self.view.dock.range = None;
     }
 }
 
@@ -1240,6 +1273,48 @@ mod tests {
         assert_eq!(app.view.dock.range, None);
         assert!(app.selection(FM).is_empty() && app.selection(SYNTH1).is_empty());
         assert!(!app.doc.is_dirty());
+    }
+
+    /// `range_app` with a range selected over (12, 32), focus on FM.
+    fn ranged_app() -> SidAcidApp {
+        let mut app = range_app();
+        app.view.focus = Some(crate::test_rack::FM);
+        app.view.dock.keyboard = true;
+        app.view.dock.range = Some((12, 32));
+        app.select_range(12, 32);
+        app
+    }
+
+    #[test]
+    fn a_keyboard_move_drops_the_range_and_the_other_lanes_selections() {
+        use crate::test_rack::{FM, SYNTH1};
+        use egui::{Key, Modifiers};
+        let mut app = ranged_app();
+        assert!(!app.selection(SYNTH1).is_empty());
+        assert!(app.dock_key(Key::ArrowRight, Modifiers::NONE));
+        assert_eq!(app.view.dock.range, None);
+        assert!(app.selection(SYNTH1).is_empty(), "the other lane let go");
+        assert!(!app.selection(FM).is_empty(), "the focused lane keeps it");
+    }
+
+    #[test]
+    fn a_range_cut_clears_the_range_and_every_selection() {
+        use crate::test_rack::{FM, SYNTH1};
+        let mut app = ranged_app();
+        app.copy_notes(true);
+        assert_eq!(app.view.dock.range, None);
+        assert!(app.selection(FM).is_empty() && app.selection(SYNTH1).is_empty());
+    }
+
+    #[test]
+    fn a_no_op_move_keeps_the_range_and_commits_nothing() {
+        use crate::test_rack::KIT808;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(KIT808, &[(0, 4, 2)], &[0]);
+        app.view.dock.range = Some((0, 8));
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::SHIFT));
+        assert_eq!(app.view.dock.range, Some((0, 8)));
+        assert!(!app.doc.can_undo(), "nothing committed");
     }
 
     #[test]
