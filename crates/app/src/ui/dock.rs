@@ -3493,4 +3493,59 @@ mod tests {
             assert_eq!(now, start + 4, "an arrow still moves the note ({mods:?})");
         }
     }
+
+    fn tab_tap() -> Vec<egui::Event> {
+        let ev = |pressed| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![ev(true), ev(false)]
+    }
+
+    #[test]
+    fn tab_from_a_typed_inspector_number_commits_and_moves_on() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62)], &[0, 1]);
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Chance", 0.0);
+        let field = ctx.memory(|m| m.focused()).expect("the field has focus");
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        frame(&mut app, &ctx, 1.1, vec![select_all]);
+        frame(&mut app, &ctx, 1.2, vec![egui::Event::Text("42".into())]);
+        frame(&mut app, &ctx, 1.3, tab_tap());
+        frame(&mut app, &ctx, 1.4, vec![]);
+        assert_ne!(
+            ctx.memory(|m| m.focused()),
+            Some(field),
+            "Tab left the field"
+        );
+        assert_eq!(chances(&app, FM), [42, 42], "and committed the value");
+    }
+
+    #[test]
+    fn tab_reaches_a_dialog_opened_with_nothing_focused() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        assert!(app.view.dock.keyboard);
+        assert_eq!(ctx.memory(|m| m.focused()), None);
+        app.view.message = Some("Nothing to paste".into());
+        frame(&mut app, &ctx, 0.1, vec![]);
+        frame(&mut app, &ctx, 0.2, tab_tap());
+        frame(&mut app, &ctx, 0.3, vec![]);
+        assert!(
+            ctx.memory(|m| m.focused()).is_some(),
+            "Tab gave the dialog's button the focus"
+        );
+    }
 }

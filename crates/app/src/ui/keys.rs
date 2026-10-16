@@ -202,7 +202,14 @@ impl SidAcidApp {
     /// An arrow from a dock widget that has focus is moved by egui after
     /// the frame, so that one is put back a frame on, unless it landed in
     /// the tool's popup.
+    ///
+    /// Typing into a field, or with a dialog open, Tab and the arrows are
+    /// egui's (as for `handle_shortcuts`).
     pub(crate) fn hold_dock_focus(&mut self, ctx: &egui::Context) {
+        if typing(ctx) || self.view.confirm.is_some() || self.view.message.is_some() {
+            self.view.dock.focus_held = None;
+            return;
+        }
         if let Some(before) = self.view.dock.focus_held.take()
             && self.view.dock.keyboard
             && self.widget_keyboard(ctx)
