@@ -10,6 +10,8 @@ const EDGE_PX: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Snap {
+    Quarter,
+    Eighth,
     #[default]
     Step,
     Half,
@@ -17,10 +19,18 @@ pub enum Snap {
 }
 
 impl Snap {
-    pub const ALL: [Snap; 3] = [Snap::Step, Snap::Half, Snap::Tick];
+    pub const ALL: [Snap; 5] = [
+        Snap::Quarter,
+        Snap::Eighth,
+        Snap::Step,
+        Snap::Half,
+        Snap::Tick,
+    ];
 
     pub fn ticks(self) -> u16 {
         match self {
+            Snap::Quarter => TICKS_PER_STEP * 4,
+            Snap::Eighth => TICKS_PER_STEP * 2,
             Snap::Step => TICKS_PER_STEP,
             Snap::Half => TICKS_PER_STEP / 2,
             Snap::Tick => 1,
@@ -29,6 +39,8 @@ impl Snap {
 
     pub fn label(self) -> &'static str {
         match self {
+            Snap::Quarter => "1/4",
+            Snap::Eighth => "1/8",
             Snap::Step => "1/16",
             Snap::Half => "1/32",
             Snap::Tick => "1/64",
@@ -338,7 +350,7 @@ mod tests {
         assert_eq!(Snap::Step.floor(7), 4);
         assert_eq!(Snap::Half.floor(7), 6);
         assert_eq!(Snap::Tick.floor(7), 7);
-        assert_eq!(Snap::ALL.map(Snap::ticks), [4, 2, 1]);
+        assert_eq!(Snap::ALL.map(Snap::ticks), [16, 8, 4, 2, 1]);
         assert_eq!(Snap::default(), Snap::Step);
     }
 

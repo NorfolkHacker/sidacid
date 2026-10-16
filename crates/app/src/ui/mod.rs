@@ -10,6 +10,8 @@ mod fm_panel;
 mod fm_voices;
 mod keys;
 pub mod knob;
+#[allow(dead_code)] // used by the dock (phase 2, tasks 4-6)
+mod lane_geom;
 mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
