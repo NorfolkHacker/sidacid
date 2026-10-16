@@ -98,8 +98,9 @@ engine act on `chance`, `ratchet` and `cond`.
 - Sequencer synth and drum playback (`sequencer.rs`).
 - Smart randomiser (`random.rs`): dice, Template and Evolve are rewritten
   to produce notes. Behaviour is kept: same scales, groove-aware placement
-  and chained slides. Dice work on the 1/16 grid; a step the Rest die
-  turns on repeats the nearest earlier note's pitch.
+  and chained slides. The Rest die and the drum dice work on the 1/16
+  grid; the other synth dice change the existing notes in place. A step
+  the Rest die turns on repeats the nearest earlier note's pitch.
 - Song record and pattern copy/paste.
 - Removed: `step303.rs`, `step_edit.rs`, the 303 pitch-scroll use of
   `scroll.rs` (its knob wheel gestures stay) and the `SeqView` toggle (including `Edit::View` and the saved view).

@@ -1,13 +1,14 @@
 //! Seeded pattern randomisers (spec §11). Pure functions: the same seed
-//! always gives the same pattern, so tests are deterministic. Synth and
-//! drum dice work on the 1/16 grid: a roll snaps off-grid notes to it.
+//! always gives the same pattern, so tests are deterministic. The Rest
+//! die and the drum dice work on the 1/16 grid; the other synth dice
+//! change the existing notes in place.
 
 use crate::drums::{BD, CH, CP, OH, SD};
 use crate::fm::algorithms::ALGORITHMS;
 use crate::fm::sysex::{Dx7Op, Dx7Voice};
 use crate::params::DRUM_INSTRUMENTS;
 use crate::params::MonoParam;
-use crate::project::{DrumPattern, STEPS, SynthPattern, steps_of};
+use crate::project::{DrumPattern, STEPS, SynthPattern, TICKS_PER_STEP, steps_of};
 use crate::steps::{DrumGrid, DrumHit, Gate, SynthGrid};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
@@ -99,6 +100,7 @@ pub fn randomise_synth(
 ) -> SynthPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
     let mut grid = SynthGrid::from_roll(&p.roll);
+    let before = grid.clone();
     let groove = DrumGrid::from_roll(&groove.roll);
     let len = steps_of(p.roll.length);
     let hits = groove_hits(&groove, len);
@@ -194,8 +196,40 @@ pub fn randomise_synth(
         }
     }
     let mut out = p.clone();
-    out.roll = grid.to_roll();
+    if dice.rest {
+        out.roll = grid.to_roll();
+    } else {
+        write_back(&mut out, &grid, &before, dice);
+    }
     out
+}
+
+/// Writes the dice's grid results onto the existing notes, keeping each
+/// note's start and length (off-grid notes, pitches outside the grid's
+/// octaves and notes past the length stay as they are). A note reads its
+/// pitch and accent from its first step, its slide from its last.
+fn write_back(out: &mut SynthPattern, grid: &SynthGrid, before: &SynthGrid, dice: Dice) {
+    let ticks = out.roll.ticks();
+    let step = |t: u16| (t / TICKS_PER_STEP) as usize;
+    for n in out.roll.notes.iter_mut().filter(|n| n.start < ticks) {
+        let s = step(n.start);
+        let e = step(n.start.saturating_add(n.len.max(1)).min(ticks) - 1);
+        if dice.notes {
+            n.pitch = grid.steps[s].midi(0);
+        } else if dice.octave {
+            let shift = 12 * (grid.steps[s].octave as i32 - before.steps[s].octave as i32);
+            n.pitch = (n.pitch as i32 + shift).clamp(0, 127) as u8;
+        }
+        if dice.accent {
+            n.accent = grid.steps[s].accent;
+        } else if dice.slide && s > 0 && grid.steps[s - 1].slide {
+            // The post-pass: a step after a slide loses its accent.
+            n.accent = false;
+        }
+        if dice.slide {
+            n.slide = grid.steps[e].slide;
+        }
+    }
 }
 
 /// Operator ratios a random voice picks from (DX7 coarse; 0 is ×0.5):
@@ -1152,6 +1186,102 @@ mod tests {
         let hit_rate = on_hit as f32 / (300.0 * 4.0);
         let off_rate = on_off as f32 / (300.0 * 12.0);
         assert!(hit_rate > off_rate + 0.2, "hit {hit_rate} off {off_rate}");
+    }
+
+    /// (start, len, pitch): a 1/64 note, a pitch outside the grid's
+    /// octaves and a note crossing the pattern's end.
+    fn off_grid() -> SynthPattern {
+        use crate::project::Note;
+        let mut p = SynthPattern::default();
+        p.roll.length = 16;
+        p.roll.notes = [(0, 4, 64), (5, 1, 40), (56, 16, 40)]
+            .map(|(start, len, pitch)| Note::new(start, len, pitch, crate::steps::ACID_VEL))
+            .to_vec();
+        p
+    }
+
+    fn shapes(p: &SynthPattern) -> Vec<(u16, u16, u8)> {
+        p.roll
+            .notes
+            .iter()
+            .map(|n| (n.start, n.len, n.pitch))
+            .collect()
+    }
+
+    #[test]
+    fn accent_and_slide_dice_keep_every_note() {
+        let base = off_grid();
+        let g = groove_four_on_floor();
+        for die in [
+            Dice {
+                accent: true,
+                ..Dice::default()
+            },
+            Dice {
+                slide: true,
+                ..Dice::default()
+            },
+        ] {
+            let mut changed = false;
+            for seed in 0..50 {
+                let r = randomise_synth(&base, die, &g, seed);
+                assert_eq!(shapes(&r), shapes(&base), "{die:?} seed {seed}");
+                changed |= r != base;
+            }
+            assert!(changed, "{die:?}");
+        }
+    }
+
+    #[test]
+    fn the_octave_die_shifts_by_octaves_without_folding() {
+        use crate::project::Note;
+        let mut base = SynthPattern::default();
+        base.roll.notes = [(0, 100), (4, 10), (8, 40)]
+            .map(|(start, pitch)| Note::new(start, 4, pitch, crate::steps::ACID_VEL))
+            .to_vec();
+        let (mut kept, mut shifted) = (false, false);
+        for seed in 0..100 {
+            let r = randomise_synth(
+                &base,
+                Dice {
+                    octave: true,
+                    ..Dice::default()
+                },
+                &groove_four_on_floor(),
+                seed,
+            );
+            for (a, b) in base.roll.notes.iter().zip(&r.roll.notes) {
+                let d = b.pitch as i32 - a.pitch as i32;
+                assert!([-12, 0, 12].contains(&d), "seed {seed}: {a:?} -> {b:?}");
+                assert_eq!((a.start, a.len), (b.start, b.len));
+                kept |= a.pitch == 100 && d == 0;
+                shifted |= d != 0;
+            }
+        }
+        assert!(kept && shifted);
+    }
+
+    #[test]
+    fn the_notes_die_keeps_starts_and_lengths() {
+        let base = off_grid();
+        for seed in 0..50 {
+            let r = randomise_synth(
+                &base,
+                Dice {
+                    notes: true,
+                    ..Dice::default()
+                },
+                &groove_four_on_floor(),
+                seed,
+            );
+            let span = |p: &SynthPattern| -> Vec<(u16, u16)> {
+                p.roll.notes.iter().map(|n| (n.start, n.len)).collect()
+            };
+            assert_eq!(span(&r), span(&base), "seed {seed}");
+            for n in &r.roll.notes[..2] {
+                assert!((24..=59).contains(&n.pitch), "seed {seed}: {n:?}");
+            }
+        }
     }
 
     #[test]
