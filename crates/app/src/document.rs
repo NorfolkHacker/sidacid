@@ -5,7 +5,7 @@
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
 use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid, default_name};
-use acid_engine::params::ParamId;
+use acid_engine::params::{DRUM_INSTRUMENTS, ParamId};
 use acid_engine::project::{
     DrumPattern, MachineBody, MachineEntry, NotePattern, Project, RemovedMachine, STEPS, Song,
     SynthPattern,
@@ -590,6 +590,14 @@ impl Document {
                 let mut pattern = *pattern;
                 pattern.length = pattern.length.clamp(1, STEPS as u8);
                 debug_assert!(pattern.is_well_formed(), "malformed note pattern");
+                debug_assert!(
+                    !matches!(p.machine(uid).map(|m| &m.body), Some(MachineBody::Kit(_)))
+                        || pattern
+                            .notes
+                            .iter()
+                            .all(|n| (n.pitch as usize) < DRUM_INSTRUMENTS),
+                    "a kit note's pitch must be a drum instrument"
+                );
                 let pat = p.roll_mut(uid, slot).expect(NO_NOTES);
                 let old = std::mem::replace(pat, pattern);
                 Edit::NotePattern {
@@ -1161,7 +1169,16 @@ mod tests {
                 false,
             );
             assert_eq!(d.project.roll(uid, 2), Some(&roll));
-            assert!(matches!(&cmds[..], [Command::Pattern { .. }]));
+            // The engine drops a pattern of the wrong variant silently.
+            let [Command::Pattern { pattern, .. }] = &cmds[..] else {
+                panic!("{uid:?}: one Pattern command");
+            };
+            let variant_ok = match **pattern {
+                PatternData::Synth(_) => uid == SYNTH1,
+                PatternData::Drum(_) => uid == KIT808,
+                PatternData::Notes(_) => false,
+            };
+            assert!(variant_ok, "{uid:?}: wrong pattern variant");
             d.apply(
                 Edit::NoteLength {
                     uid,
@@ -1174,6 +1191,26 @@ mod tests {
         }
         d.undo();
         assert_eq!(d.project.roll(KIT808, 2).unwrap().length, 12);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "drum instrument")]
+    fn a_kit_note_must_be_a_drum_instrument() {
+        use acid_engine::project::{Note, NotePattern};
+        let mut d = Document::new(Project::default());
+        let roll = NotePattern {
+            notes: vec![Note::new(0, 4, 40, 100)],
+            length: 16,
+        };
+        d.apply(
+            Edit::NotePattern {
+                uid: KIT808,
+                slot: 0,
+                pattern: Box::new(roll),
+            },
+            false,
+        );
     }
 
     #[test]
