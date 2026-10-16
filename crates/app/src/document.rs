@@ -490,6 +490,9 @@ impl Document {
         }
         let cmds = self.commands_for(&inverse);
         self.gesture = None;
+        // As an edit would: a record pass's later edits don't merge under
+        // the preview, so the steps above its depth are the edits since.
+        self.pass_open = false;
         self.last_generation += 1;
         match &mut self.preview {
             None => {
@@ -592,9 +595,12 @@ impl Document {
         self.redo.last().map(|step| &step.edit)
     }
 
-    /// Undoes the newest step. An open preview is settled first (callers
-    /// close it themselves; this keeps the history whole if one doesn't).
+    /// Undoes the newest step. Callers close an open preview first (the
+    /// app holds undo off while a note tool is open); a debug build stops
+    /// on one left open, and a release build settles it so the history
+    /// stays whole.
     pub fn undo(&mut self) -> Vec<Command> {
+        debug_assert!(self.preview.is_none(), "undo with a preview open");
         self.settle_preview();
         self.gesture = None;
         self.pass_open = false;
@@ -613,7 +619,9 @@ impl Document {
         cmds
     }
 
+    /// Redoes the newest undone step; see `undo` about previews.
     pub fn redo(&mut self) -> Vec<Command> {
+        debug_assert!(self.preview.is_none(), "redo with a preview open");
         self.settle_preview();
         self.gesture = None;
         self.pass_open = false;
@@ -1209,6 +1217,43 @@ mod tests {
         assert_eq!(d.project, previewed);
         d.undo();
         assert_eq!(d.project, before);
+    }
+
+    #[test]
+    fn a_preview_closes_the_record_pass() {
+        let mut d = doc();
+        d.record(Edit::Bpm(150.0));
+        let tempo = d.project.clone();
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        let previewed = d.project.clone();
+        // Recorded after the preview began: a step of its own above it.
+        d.record(Edit::Bpm(151.0));
+        assert_eq!(d.undo_depth(), 2, "the second record is a new step");
+        d.settle_preview();
+        assert_eq!(d.undo_depth(), 3);
+        d.undo();
+        assert_eq!(d.project, previewed, "the later tempo went alone");
+        d.undo();
+        assert_eq!(d.project, tempo);
+    }
+
+    #[test]
+    #[should_panic(expected = "undo with a preview open")]
+    fn undo_with_a_preview_open_is_a_bug() {
+        let mut d = doc();
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(8, 4, 51, 100)), false);
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        d.undo();
+    }
+
+    #[test]
+    #[should_panic(expected = "redo with a preview open")]
+    fn redo_with_a_preview_open_is_a_bug() {
+        let mut d = doc();
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(8, 4, 51, 100)), false);
+        d.undo();
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        d.redo();
     }
 
     #[test]

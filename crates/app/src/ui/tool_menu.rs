@@ -153,11 +153,21 @@ pub(crate) struct ToolSession {
     result_sel: Vec<usize>,
     /// The lane's selection when the tool opened, given back by Cancel.
     sel_before: (Vec<Note>, u8),
+    /// The popup's combo whose list was open when the popup last drew.
+    combo: Option<egui::Id>,
+    /// The popup's Cancel button as last drawn (Shift+Tab from the dock).
+    pub cancel: Option<egui::Id>,
 }
 
 /// The tool popup's window (and so its layer) id.
 pub(crate) fn tool_window_id() -> egui::Id {
     egui::Id::new("note_tool")
+}
+
+/// The tool popup's move handle: the first widget in it that takes
+/// focus, ahead of its fields (egui's `Area` names it so).
+pub(crate) fn tool_window_handle() -> egui::Id {
+    tool_window_id().with("move")
 }
 
 /// Seeds the popup hands out: short enough to read and type back.
@@ -255,6 +265,8 @@ impl SidAcidApp {
             tool,
             params,
             sel_before,
+            combo: None,
+            cancel: None,
         });
         self.preview_tool();
     }
@@ -270,7 +282,7 @@ impl SidAcidApp {
         };
         let (uid, slot) = (t.uid, t.slot);
         if self.doc.project.roll(uid, slot) != Some(&t.last) {
-            self.view.tool = None;
+            self.end_tool();
             self.doc.settle_preview();
             self.doc.end_gesture();
             return;
@@ -289,6 +301,33 @@ impl SidAcidApp {
     pub(crate) fn tool_yield(&mut self, uid: MachineUid, slot: u8) {
         if self.tool_lane() == Some((uid, slot)) {
             self.cancel_tool();
+        }
+    }
+
+    /// Ends the session (the caller settles its preview). A combo list it
+    /// left open is shut next frame.
+    pub(crate) fn end_tool(&mut self) -> Option<ToolSession> {
+        let t = self.view.tool.take()?;
+        if t.combo.is_some() {
+            self.view.tool_popup = t.combo;
+        }
+        Some(t)
+    }
+
+    /// The open tool's popup had one of its combo lists open when it last
+    /// drew: Esc is that list's.
+    pub(crate) fn tool_combo_open(&self) -> bool {
+        self.view.tool.as_ref().is_some_and(|t| t.combo.is_some())
+    }
+
+    /// Start of a frame: a combo list in a tool popup that closed without
+    /// drawing again (a mode switch, a rack edit, a load) is still egui's
+    /// open popup, which only its widget would close; shut it.
+    pub(crate) fn close_stale_tool_popup(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.view.tool_popup.take()
+            && egui::ComboBox::is_open(ctx, id)
+        {
+            ctx.memory_mut(|m| m.close_popup());
         }
     }
 
@@ -334,7 +373,7 @@ impl SidAcidApp {
     /// edit made while it was open (none when the result is the pattern
     /// as it was), and is selected.
     pub(crate) fn apply_tool(&mut self) {
-        let Some(t) = self.view.tool.take() else {
+        let Some(t) = self.end_tool() else {
             return;
         };
         self.view.tool_params = t.params;
@@ -355,7 +394,7 @@ impl SidAcidApp {
     /// history exactly as before the tool opened (plus any other edit made
     /// meanwhile).
     pub(crate) fn cancel_tool(&mut self) {
-        let Some(t) = self.view.tool.take() else {
+        let Some(t) = self.end_tool() else {
             return;
         };
         self.view.tool_params = t.params;
@@ -379,6 +418,7 @@ impl SidAcidApp {
         let snap = self.view.dock.snap;
         let mut open = true;
         let (mut apply, mut cancel, mut new_seed) = (false, false, false);
+        let (mut combo, mut cancel_id) = (None, None);
         egui::Window::new(tool.label())
             .id(tool_window_id())
             .open(&mut open)
@@ -387,7 +427,12 @@ impl SidAcidApp {
             .pivot(Align2::LEFT_BOTTOM)
             .default_pos(anchor.left_top())
             .show(ctx, |ui| {
-                settings(ui, tool, &mut params, kind, snap, &mut new_seed, rects);
+                let out = Out {
+                    new_seed: &mut new_seed,
+                    combo: &mut combo,
+                    rects,
+                };
+                settings(ui, tool, &mut params, kind, snap, out);
                 ui.separator();
                 ui.horizontal(|ui| {
                     let a = ui.button("Apply");
@@ -396,6 +441,7 @@ impl SidAcidApp {
                     rects.push(("Cancel".into(), c.rect));
                     apply = a.clicked();
                     cancel = c.clicked();
+                    cancel_id = Some(c.id);
                 });
             });
         if new_seed {
@@ -409,6 +455,8 @@ impl SidAcidApp {
         }
         if let Some(t) = &mut self.view.tool {
             t.params = params;
+            t.combo = combo;
+            t.cancel = cancel_id;
         }
         if cancel || !open {
             return self.cancel_tool();
@@ -480,6 +528,16 @@ fn seed(ui: &mut egui::Ui, v: &mut u64, new_seed: &mut bool, rects: &mut Vec<(St
     });
 }
 
+/// What drawing the settings reports back.
+struct Out<'a> {
+    /// "New seed" was clicked.
+    new_seed: &'a mut bool,
+    /// The combo whose list is open, if any.
+    combo: &'a mut Option<egui::Id>,
+    /// Tests: where named widgets sit.
+    rects: &'a mut Vec<(String, Rect)>,
+}
+
 /// `tool`'s settings (the plan's table).
 fn settings(
     ui: &mut egui::Ui,
@@ -487,9 +545,13 @@ fn settings(
     p: &mut ToolParams,
     kind: LaneKind,
     snap: Snap,
-    new_seed: &mut bool,
-    rects: &mut Vec<(String, Rect)>,
+    out: Out,
 ) {
+    let Out {
+        new_seed,
+        combo: open_combo,
+        rects,
+    } = out;
     let drums = kind == LaneKind::Drums;
     let note = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).weak());
     match tool {
@@ -590,6 +652,9 @@ fn settings(
                             }
                         });
                     rects.push(("Row".into(), combo.response.rect));
+                    if egui::ComboBox::is_open(ui.ctx(), combo.response.id) {
+                        *open_combo = Some(combo.response.id);
+                    }
                 });
             } else {
                 pitch(ui, "Pitch", &mut e.pitch);
@@ -839,6 +904,70 @@ mod tests {
         assert_eq!(app.doc.undo_depth(), 0);
     }
 
+    /// Opens Euclidean on the drum lane and its Row list.
+    fn euclid_row_open(app: &mut SidAcidApp, ctx: &egui::Context, time: f64) {
+        open(app, ctx, ToolKind::Euclid, time);
+        click(app, ctx, "Row", time + 2.0);
+        frame(app, ctx, time + 3.0, vec![]);
+        assert!(app.tool_combo_open(), "the row list is open");
+    }
+
+    #[test]
+    fn a_row_list_left_open_by_a_mode_switch_never_holds_esc() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(KIT808, &[(0, 4, 0)], &[]);
+        euclid_row_open(&mut app, &ctx, 0.0);
+        // Song in the transport: the dock cancels the tool before its
+        // popup (and the list) would draw again.
+        app.set_mode(Mode::Song);
+        frame(&mut app, &ctx, 4.0, vec![]);
+        assert!(app.view.tool.is_none(), "the switch cancelled the tool");
+        frame(&mut app, &ctx, 4.5, vec![]);
+        assert!(!ctx.memory(|m| m.any_popup_open()), "the list was shut");
+        app.view.dock.keyboard = true;
+        app.view.dock.range = Some((0, 4));
+        tap(&mut app, &ctx, 5.0, egui::Key::Escape);
+        assert_eq!(app.view.dock.range, None, "Esc clears the ruler range");
+        app.set_mode(Mode::Pattern);
+        app.view.dock.keyboard = true;
+        open(&mut app, &ctx, ToolKind::Quantize, 6.0);
+        assert!(app.view.tool.is_some());
+        app.view.dock.keyboard = true;
+        tap(&mut app, &ctx, 9.0, egui::Key::Escape);
+        assert!(app.view.tool.is_none(), "Esc cancels the next tool");
+    }
+
+    #[test]
+    fn a_row_list_left_open_by_a_rack_edit_never_holds_esc() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(KIT808, &[(0, 4, 0)], &[0]);
+        euclid_row_open(&mut app, &ctx, 0.0);
+        app.tool_yield(KIT808, 0);
+        assert!(app.view.tool.is_none());
+        frame(&mut app, &ctx, 4.0, vec![]);
+        assert!(!ctx.memory(|m| m.any_popup_open()), "the list was shut");
+        app.set_selection(
+            KIT808,
+            app.doc.project.roll(KIT808, 0).unwrap().notes.clone(),
+        );
+        app.view.dock.keyboard = true;
+        tap(&mut app, &ctx, 5.0, egui::Key::Escape);
+        assert!(app.selection(KIT808).is_empty(), "Esc clears the selection");
+        // Removing the lane under an open list does the same.
+        euclid_row_open(&mut app, &ctx, 10.0);
+        app.remove_machine(KIT808);
+        frame(&mut app, &ctx, 14.0, vec![]);
+        frame(&mut app, &ctx, 15.0, vec![]);
+        assert!(!ctx.memory(|m| m.any_popup_open()), "the list was shut");
+        app.view.focus = Some(FM);
+        app.view.dock.keyboard = true;
+        open(&mut app, &ctx, ToolKind::Quantize, 16.0);
+        assert!(app.view.tool.is_some());
+        app.view.dock.keyboard = true;
+        tap(&mut app, &ctx, 19.0, egui::Key::Escape);
+        assert!(app.view.tool.is_none(), "Esc cancels the next tool");
+    }
+
     /// One frame pressing and releasing `k`, leaving the dock's keyboard
     /// focus as it is.
     fn tap(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, k: egui::Key) {
@@ -878,11 +1007,6 @@ mod tests {
         // Focus Timing's value, then Tab on to the Apply button.
         click(&mut app, &ctx, "Timing", 2.0);
         let apply = rect(&app, "Apply").unwrap();
-        let focused_rect = |ctx: &egui::Context| {
-            ctx.memory(|m| m.focused())
-                .and_then(|id| ctx.read_response(id))
-                .map(|r| r.rect)
-        };
         let mut time = 3.0;
         while focused_rect(&ctx) != Some(apply) {
             assert!(time < 20.0, "Tab never reached Apply");
@@ -895,6 +1019,55 @@ mod tests {
         tap(&mut app, &ctx, time, egui::Key::Enter);
         assert!(app.view.tool.is_none(), "Enter pressed Apply");
         assert_eq!(app.doc.undo_depth(), 1, "applied, not cancelled");
+    }
+
+    fn focused_rect(ctx: &egui::Context) -> Option<Rect> {
+        ctx.memory(|m| m.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map(|r| r.rect)
+    }
+
+    fn tab(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, mods: Modifiers) {
+        let ev = |pressed| Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: mods,
+        };
+        frame(app, ctx, time, vec![ev(true), ev(false)]);
+    }
+
+    #[test]
+    fn tab_from_the_dock_goes_into_an_open_tool() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
+        open(&mut app, &ctx, ToolKind::Humanize, 0.0);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        let (timing, apply, cancel) = (
+            rect(&app, "Timing").unwrap(),
+            rect(&app, "Apply").unwrap(),
+            rect(&app, "Cancel").unwrap(),
+        );
+        app.view.dock.keyboard = true;
+        assert_eq!(ctx.memory(|m| m.focused()), None);
+        tab(&mut app, &ctx, 3.0, Modifiers::NONE);
+        assert_eq!(focused_rect(&ctx), Some(timing), "Tab: the first field");
+        // On through the popup's fields, never pulled back to the dock.
+        let mut time = 4.0;
+        while focused_rect(&ctx) != Some(apply) {
+            assert!(time < 20.0, "Tab never reached Apply");
+            assert!(app.focus_in_tool(&ctx), "the focus stays in the popup");
+            tab(&mut app, &ctx, time, Modifiers::NONE);
+            time += 1.0;
+        }
+        frame(&mut app, &ctx, time, vec![]);
+        assert_eq!(focused_rect(&ctx), Some(apply), "and stays");
+        // Shift+Tab from the dock: the popup's last button.
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        tab(&mut app, &ctx, time + 1.0, Modifiers::SHIFT);
+        assert_eq!(focused_rect(&ctx), Some(cancel), "Shift+Tab: Cancel");
+        assert!(app.view.tool.is_some());
     }
 
     #[test]

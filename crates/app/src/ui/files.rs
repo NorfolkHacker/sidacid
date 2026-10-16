@@ -210,7 +210,7 @@ impl SidAcidApp {
         }
         self.doc = doc;
         // An open note tool belonged to the old document (and its history).
-        self.view.tool = None;
+        self.end_tool();
         // An empty imported bank is no bank (the Imported tab stays off).
         for m in &mut self.doc.project.machines {
             if let MachineBody::Fm(fm) = &mut m.body

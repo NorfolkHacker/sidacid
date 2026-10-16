@@ -124,10 +124,10 @@ pub struct DockState {
     /// The inspector number being dragged or typed into, whose edits
     /// merge into one undo step.
     pub inspector_open: Option<egui::Id>,
-    /// A key that moves egui's focus (Tab, an arrow) came while the dock
-    /// had the keys: the focus before it, put back next frame if the key
-    /// moved it off the dock (see `SidAcidApp::hold_dock_focus`).
-    pub focus_held: Option<Option<egui::Id>>,
+    /// An arrow came while the dock had the keys and a widget the focus:
+    /// that widget, given the focus back next frame if egui moved it off
+    /// the dock (see `SidAcidApp::hold_dock_focus`).
+    pub focus_held: Option<egui::Id>,
     /// Tests only: where each Song-mode header tool was drawn this frame.
     #[cfg(test)]
     pub tool_rects: Vec<(String, egui::Rect)>,
@@ -256,6 +256,10 @@ pub struct ViewState {
     pub fill_rect: Option<egui::Rect>,
     /// The note tool open on the focused lane (its popup is showing).
     pub(crate) tool: Option<tool_menu::ToolSession>,
+    /// A combo in the tool's popup whose list was open when the tool
+    /// closed: egui keeps one popup open until its widget closes it, so
+    /// the next frame shuts it (see `SidAcidApp::close_stale_tool_popup`).
+    pub(crate) tool_popup: Option<egui::Id>,
     /// Each tool's settings as last used.
     pub(crate) tool_params: tool_menu::ToolParams,
 }
@@ -485,7 +489,8 @@ impl SidAcidApp {
     /// guard can't tell same-named rows apart), and undoing a bank import
     /// puts other voices under the stored index.
     pub(crate) fn undo(&mut self) {
-        // An open note tool's preview is the newest step: Apply or Cancel first.
+        // An open note tool's preview sits outside the history, on the lane
+        // it isolates: Apply or Cancel first.
         if self.view.tool.is_some() {
             return;
         }
@@ -601,6 +606,7 @@ impl SidAcidApp {
         if self.take_audio_retry() {
             self.start_audio();
         }
+        self.close_stale_tool_popup(ctx);
         self.hold_dock_focus(ctx);
         self.handle_shortcuts(ctx);
         self.record_automation();

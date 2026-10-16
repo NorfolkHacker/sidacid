@@ -74,9 +74,11 @@ impl SidAcidApp {
     fn dock_keys(&mut self, ctx: &egui::Context) {
         // Esc cancels an open note tool wherever the keyboard is (a click
         // in its popup takes it from the dock); nothing is being typed.
-        // An open egui popup (a combo's list in the tool's popup) takes Esc
-        // first: it closes just that, and the next Esc cancels.
-        let popup = ctx.memory(|m| m.any_popup_open());
+        // A combo's list open in the tool's popup takes Esc first: egui
+        // closes just that, and the next Esc cancels. Only the popup's own
+        // combo counts (as it last drew), so a list left behind when the
+        // tool closed some other way never holds Esc.
+        let popup = self.tool_combo_open();
         if self.view.tool.is_some() && !popup {
             let esc = |e: &egui::Event| {
                 matches!(
@@ -179,46 +181,108 @@ impl SidAcidApp {
                 .is_some_and(|d| !d.contains_rect(r.rect))
     }
 
-    /// Start of a frame: Tab, Shift+Tab or an arrow pressed last frame
-    /// while the dock had the keys moved egui's focus to a widget outside
-    /// the dock (egui moves it during and after the frame, so this looks
-    /// one frame on): the focus goes back where it was, so the dock keeps
-    /// its keys. Then notes this frame's such keys.
+    /// The focused widget is in the note tool's popup.
+    pub(crate) fn focus_in_tool(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused())
+            .and_then(|id| ctx.read_response(id))
+            .is_some_and(|r| r.layer_id.id == super::tool_menu::tool_window_id())
+    }
+
+    /// Start of a frame, ahead of every widget. egui moves its focus on
+    /// Tab, Shift+Tab and (from a focused widget) the arrows: Tab while
+    /// nothing has focus would land on the transport's first widget and
+    /// strand the dock's keys.
+    ///
+    /// While the dock has the keys, Tab and Shift+Tab are taken here, in
+    /// the same frame, before any widget sees them: with no tool open the
+    /// focus stays as it was; with a tool open they go into its popup
+    /// (Tab to its first field, Shift+Tab to Cancel), and inside the popup
+    /// they are egui's, moving among its fields.
+    ///
+    /// An arrow from a dock widget that has focus is moved by egui after
+    /// the frame, so that one is put back a frame on, unless it landed in
+    /// the tool's popup.
     pub(crate) fn hold_dock_focus(&mut self, ctx: &egui::Context) {
         if let Some(before) = self.view.dock.focus_held.take()
             && self.view.dock.keyboard
             && self.widget_keyboard(ctx)
+            && !self.focus_in_tool(ctx)
         {
-            ctx.memory_mut(|m| match before {
-                Some(id) => m.request_focus(id),
-                None => {
-                    if let Some(id) = m.focused() {
-                        m.surrender_focus(id);
-                    }
-                }
-            });
+            ctx.memory_mut(|m| m.request_focus(before));
         }
         if !self.view.dock.keyboard || self.widget_keyboard(ctx) {
             return;
         }
-        let moves_focus = ctx.input(|i| {
+        let tab = |e: &egui::Event| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    key: Key::Tab,
+                    pressed: true,
+                    ..
+                }
+            )
+        };
+        // egui acts on the last focus key of the frame.
+        let shift_tab = ctx.input(|i| {
+            i.events.iter().rev().find_map(|e| match e {
+                egui::Event::Key {
+                    key: Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(modifiers.shift),
+                _ => None,
+            })
+        });
+        if let Some(shift) = shift_tab {
+            ctx.input_mut(|i| i.events.retain(|e| !tab(e)));
+            let into_tool = self.view.tool.as_ref().and_then(|t| {
+                if shift {
+                    t.cancel
+                } else {
+                    Some(super::tool_menu::tool_window_handle())
+                }
+            });
+            ctx.memory_mut(|m| match into_tool {
+                // egui's Tab hands the focus on from the popup's move
+                // handle to the next widget that wants it: its first field.
+                Some(id) if !shift => m.request_focus(id),
+                _ => {
+                    // With nothing focused, the first widget to want focus
+                    // takes egui's Tab (or Shift+Tab) and ends it: a
+                    // stand-in here takes it, then lets go.
+                    let before = m.focused();
+                    if let Some(id) = before {
+                        m.surrender_focus(id);
+                    }
+                    m.interested_in_focus(
+                        egui::Id::new("dock_focus_probe"),
+                        egui::LayerId::background(),
+                    );
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                    if let Some(id) = into_tool.or(before) {
+                        m.request_focus(id);
+                    }
+                }
+            });
+        }
+        let arrow = ctx.input(|i| {
             i.events.iter().any(|e| {
                 matches!(
                     e,
                     egui::Event::Key {
-                        key: Key::Tab
-                            | Key::ArrowUp
-                            | Key::ArrowDown
-                            | Key::ArrowLeft
-                            | Key::ArrowRight,
+                        key: Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight,
                         pressed: true,
                         ..
                     }
                 )
             })
         });
-        if moves_focus {
-            self.view.dock.focus_held = Some(ctx.memory(|m| m.focused()));
+        if let Some(id) = ctx.memory(|m| m.focused()).filter(|_| arrow) {
+            self.view.dock.focus_held = Some(id);
         }
     }
 

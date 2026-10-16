@@ -3474,6 +3474,9 @@ mod tests {
             for _ in 0..3 {
                 frame(&mut app, &ctx, time, tap(egui::Key::Tab, mods));
                 time += 0.1;
+                // Taken in the same frame: no widget held the focus (or
+                // drew a focus ring) even for a frame.
+                assert_eq!(ctx.memory(|m| m.focused()), None, "{mods:?}");
             }
             frame(&mut app, &ctx, time, vec![]);
             time += 0.1;
