@@ -215,7 +215,7 @@ impl SidAcidApp {
         // Gestures and scroll positions start over; snap and note length stay.
         for panel in self.view.panels.values_mut() {
             panel.poly_drag = None;
-            panel.poly_scrolled = false;
+            panel.lane_scroll_y = None;
             panel.fm_op = 0;
             panel.sampler_slot = 0;
             panel.fm_browser = Default::default();

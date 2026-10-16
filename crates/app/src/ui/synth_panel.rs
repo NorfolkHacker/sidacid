@@ -128,7 +128,8 @@ impl SidAcidApp {
                     }
                 }
             });
-            app.poly_roll(ui, uid);
+            let width = ui.available_width();
+            app.lane(ui, uid, width);
         });
     }
 }

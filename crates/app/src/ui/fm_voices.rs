@@ -201,9 +201,10 @@ mod tests {
             };
             ctx.run(input, |ctx| app.ui(ctx)).shapes
         };
-        // Scroll the rack (pointer on its right margin, clear of any roll)
+        // Scroll the rack (pointer on its right edge, clear of the lanes,
+        // which take the wheel for themselves)
         // until the FM header is on screen, then let the scroll settle.
-        let pointer = egui::pos2(625.0, 700.0);
+        let pointer = egui::pos2(634.0, 700.0);
         let mut header = None;
         for _ in 0..200 {
             let shapes = frame(

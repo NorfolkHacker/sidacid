@@ -12,7 +12,7 @@ mod fm_voices;
 mod key_entry;
 mod keys;
 pub mod knob;
-#[allow(dead_code)] // used by the dock (phase 2, tasks 4-6)
+mod lane;
 mod lane_geom;
 mod mixer_panel;
 mod mono_panel;
@@ -22,7 +22,6 @@ mod pads;
 mod params_ui;
 mod perf;
 mod poly_edit;
-mod polyroll;
 mod rack_header;
 mod rack_sync;
 mod record;
@@ -56,14 +55,10 @@ pub struct PanelState {
     pub poly_drag: Option<poly_edit::PolyDrag>,
     /// Length in ticks of the last note drawn or resized (0 = one step).
     pub poly_len: u16,
-    /// The roll has been scrolled to its starting pitch once.
-    pub poly_scrolled: bool,
     /// Vertical scroll of this machine's dock lane; None until first placed
     /// at `roll_start_pitch`.
-    #[allow(dead_code)] // used by the dock (phase 2, task 6)
     pub lane_scroll_y: Option<f32>,
     /// Keyboard note-entry cursor in this machine's lane.
-    #[allow(dead_code)] // used by the dock (phase 2, task 6)
     pub cursor: key_entry::Cursor,
     /// Selected sampler slot (0..16; samplers).
     pub sampler_slot: usize,
@@ -80,17 +75,18 @@ pub struct PanelState {
 }
 
 /// The editor dock's view state (not saved).
-#[allow(dead_code)] // fields used by the dock (phase 2, tasks 4-6)
 pub struct DockState {
     /// Index into `lane_geom::ZOOMS`.
     pub zoom: usize,
     pub scroll_x: f32,
     /// The dock scrolls to follow the playhead.
+    #[allow(dead_code)] // used by the dock (phase 2, tasks 5-6)
     pub follow: bool,
     pub snap: poly_edit::Snap,
     /// The dock has keyboard focus.
     pub keyboard: bool,
     /// The divider above the dock is being dragged.
+    #[allow(dead_code)] // used by the dock (phase 2, task 6)
     pub resizing: bool,
 }
 
@@ -1320,7 +1316,7 @@ mod tests {
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 3);
         assert_eq!(
-            panels(&mut app, &[FM, SAMPLER], |p| p.poly_scrolled),
+            panels(&mut app, &[FM, SAMPLER], |p| p.lane_scroll_y.is_some()),
             [true; 2]
         );
     }
@@ -1336,7 +1332,10 @@ mod tests {
         roll.notes.push(Note::new(4, 4, 39, 100));
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 1);
-        assert_eq!(panels(&mut app, &[SYNTH1], |p| p.poly_scrolled), [true]);
+        assert_eq!(
+            panels(&mut app, &[SYNTH1], |p| p.lane_scroll_y.is_some()),
+            [true]
+        );
     }
 
     #[test]
@@ -1344,14 +1343,14 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         for uid in [FM, SAMPLER] {
             app.view.panel(uid).poly_drag = Some(poly_edit::PolyDrag::Velocity);
-            app.view.panel(uid).poly_scrolled = true;
+            app.view.panel(uid).lane_scroll_y = Some(100.0);
         }
         app.view.audition = Some((FM, 60));
         app.load_document(Document::new(Project::default()));
         assert_eq!(panels(&mut app, &[FM, SAMPLER], |p| p.poly_drag), [None; 2]);
         assert_eq!(
-            panels(&mut app, &[FM, SAMPLER], |p| p.poly_scrolled),
-            [false; 2]
+            panels(&mut app, &[FM, SAMPLER], |p| p.lane_scroll_y),
+            [None; 2]
         );
         assert_eq!(app.view.audition, None);
     }
@@ -1725,7 +1724,7 @@ mod tests {
             run_frames(&mut app, 1);
         }
         assert!(
-            app.view.panel(FM).poly_scrolled,
+            app.view.panel(FM).lane_scroll_y.is_some(),
             "the FM roll is still drawn"
         );
     }
@@ -2046,7 +2045,7 @@ mod tests {
                 && app.view.wave_cache.contains_key(&(SAMPLER, 1))
         );
         assert!(
-            app.view.panel(SAMPLER).poly_scrolled,
+            app.view.panel(SAMPLER).lane_scroll_y.is_some(),
             "the sampler roll is drawn"
         );
     }

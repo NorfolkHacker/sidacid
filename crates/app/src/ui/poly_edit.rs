@@ -1,12 +1,8 @@
-//! Pure editing of note patterns for the poly piano roll, plus its
-//! geometry. Notes stay in insertion order (the engine scans them all),
-//! so an index stays valid for the whole of a drag.
+//! Pure editing of note patterns for the lanes' piano rolls. Notes stay
+//! in insertion order (the engine scans them all), so an index stays
+//! valid for the whole of a drag.
 
 use acid_engine::project::{MAX_NOTES, Note, NotePattern, TICKS_PER_STEP};
-
-/// Every MIDI pitch, top row = 127.
-pub const ROWS: usize = 128;
-const EDGE_PX: f32 = 5.0;
 
 #[allow(dead_code)] // variants, ALL and label are used by the dock (phase 2, tasks 5-6)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,61 +182,6 @@ pub fn set_velocity_in(p: &mut NotePattern, from: u16, to: u16, vel: u8) -> bool
     changed
 }
 
-/// Screen layout of the roll grid: one column per tick, one row per
-/// pitch, pitch 127 on top. `left` is the grid's left edge (right of the
-/// key strip).
-#[derive(Clone, Copy, Debug)]
-pub struct PolyGeom {
-    pub left: f32,
-    pub top: f32,
-    pub tick_w: f32,
-    pub row_h: f32,
-    pub ticks: u16,
-}
-
-impl PolyGeom {
-    pub fn pitch_at(&self, y: f32) -> Option<u8> {
-        let r = ((y - self.top) / self.row_h).floor();
-        (r >= 0.0 && (r as usize) < ROWS).then(|| (ROWS - 1 - r as usize) as u8)
-    }
-
-    pub fn cell_at(&self, x: f32, y: f32) -> Option<(u16, u8)> {
-        let col = ((x - self.left) / self.tick_w).floor();
-        if col < 0.0 || col as u16 >= self.ticks {
-            return None;
-        }
-        Some((col as u16, self.pitch_at(y)?))
-    }
-
-    pub fn cell_at_clamped(&self, x: f32, y: f32) -> (u16, u8) {
-        let col = ((x - self.left) / self.tick_w)
-            .floor()
-            .clamp(0.0, (self.ticks.max(1) - 1) as f32) as u16;
-        let r = ((y - self.top) / self.row_h)
-            .floor()
-            .clamp(0.0, (ROWS - 1) as f32) as usize;
-        (col, (ROWS - 1 - r) as u8)
-    }
-
-    pub fn row_top(&self, pitch: u8) -> f32 {
-        self.top + (ROWS - 1 - pitch.min(127) as usize) as f32 * self.row_h
-    }
-
-    /// (x0, y0, x1, y1); notes running past the pattern end are drawn to it.
-    pub fn note_rect(&self, n: &Note) -> (f32, f32, f32, f32) {
-        let x0 = self.left + n.start as f32 * self.tick_w;
-        let stop = end(n).min(self.ticks.max(n.start.saturating_add(1)));
-        let x1 = self.left + stop as f32 * self.tick_w;
-        let y0 = self.row_top(n.pitch);
-        (x0, y0, x1, y0 + self.row_h)
-    }
-
-    pub fn near_right_edge(&self, n: &Note, x: f32) -> bool {
-        let (_, _, x1, _) = self.note_rect(n);
-        x >= x1 - EDGE_PX && x <= x1 + 1.0
-    }
-}
-
 /// Keeps an acid pattern monophonic around note `keep` after an edit:
 /// other notes starting inside it are deleted, a note sounding into its
 /// start is cut there. Returns `keep`'s new index.
@@ -384,19 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn note_rect_of_a_note_at_the_tick_limit_does_not_overflow() {
-        let g = PolyGeom {
-            left: 0.0,
-            top: 0.0,
-            tick_w: 1.0,
-            row_h: 1.0,
-            ticks: 64,
-        };
-        let n = Note::new(u16::MAX, 5, 60, 1);
-        let _ = g.note_rect(&n);
-    }
-
-    #[test]
     fn resolving_overlaps_merges_same_pitch_notes_into_the_dragged_one() {
         let mut p = pat();
         add(&mut p, 0, 4, 60, 100);
@@ -491,31 +419,5 @@ mod tests {
         assert!(!set_velocity_in(&mut p, 4, 8, 30), "no change");
         set_velocity_in(&mut p, 8, 9, 0);
         assert_eq!(p.notes[2].vel, 1);
-    }
-
-    #[test]
-    fn geometry_round_trips() {
-        let g = PolyGeom {
-            left: 30.0,
-            top: 10.0,
-            tick_w: 6.0,
-            row_h: 8.0,
-            ticks: 64,
-        };
-        assert_eq!(g.cell_at(30.0, 10.0), Some((0, 127)));
-        assert_eq!(
-            g.cell_at(30.0 + 6.0 * 5.5, 10.0 + 8.0 * 67.5),
-            Some((5, 60))
-        );
-        assert_eq!(g.cell_at(29.0, 10.0), None, "key strip");
-        assert_eq!(g.cell_at(30.0 + 6.0 * 64.0, 10.0), None, "past the end");
-        assert_eq!(g.cell_at_clamped(0.0, 9999.0), (0, 0));
-        assert_eq!(g.pitch_at(10.0 + 8.0 * 67.5), Some(60));
-        let n = Note::new(4, 70, 60, 1);
-        let (x0, y0, x1, y1) = g.note_rect(&n);
-        assert_eq!((x0, y0, y1), (54.0, g.row_top(60), g.row_top(60) + 8.0));
-        assert_eq!(x1, 30.0 + 64.0 * 6.0, "drawn up to the pattern end");
-        assert!(g.near_right_edge(&n, x1 - 2.0));
-        assert!(!g.near_right_edge(&n, x0 + 2.0));
     }
 }

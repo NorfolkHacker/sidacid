@@ -1,7 +1,7 @@
 //! Pure helpers for the sampler panel and the roll: waveform peaks,
 //! frame/pixel mapping, marker editing, key names and row labels.
 
-use super::polyroll::NOTE_NAMES;
+use super::lane::NOTE_NAMES;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotMode};
 use eframe::egui::Color32;
 

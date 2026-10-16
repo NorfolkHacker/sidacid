@@ -1,6 +1,7 @@
 //! A drum machine panel: per-instrument knobs, kit knobs, pattern pads,
 //! length, and the 8-row step grid (click cycles Off → On → Accent).
 
+use super::lane::INST_NAMES;
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
@@ -9,7 +10,6 @@ use acid_engine::project::{DrumPattern, PatternRef};
 use acid_engine::steps::{DrumHit, drum_hit_at, set_drum_hit};
 use eframe::egui;
 
-pub const INST_NAMES: [&str; 8] = ["BD", "SD", "LT", "HT", "CP", "RS", "CH", "OH"];
 const KNOB_ROWS: [(DrumParam, &str); 4] = [
     (DrumParam::Tune, "Tune"),
     (DrumParam::Decay, "Decay"),

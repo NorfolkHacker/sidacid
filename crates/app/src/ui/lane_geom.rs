@@ -108,6 +108,7 @@ impl LaneGeom {
 /// The horizontal scroll that keeps a playhead at content x `playhead_x`
 /// in a view `view_w` wide: unchanged while it sits left of the last
 /// quarter of the view, else moved so it sits a quarter in.
+#[allow(dead_code)] // used by the dock (phase 2, tasks 5-6)
 pub fn follow_scroll(scroll_x: f32, view_w: f32, playhead_x: f32) -> f32 {
     let margin = view_w / 4.0;
     if playhead_x >= scroll_x && playhead_x <= scroll_x + view_w - margin {
@@ -201,6 +202,45 @@ mod tests {
         assert_eq!((r.top(), r.bottom()), (50.0, 59.0));
         assert!(g.near_right_edge(&n, 163.0));
         assert!(!g.near_right_edge(&n, 140.0));
+    }
+
+    /// Ported from the poly roll's `PolyGeom`.
+    #[test]
+    fn geometry_round_trips() {
+        let g = LaneGeom {
+            left: 30.0,
+            top: 10.0,
+            tick_w: 6.0,
+            row_h: 8.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            ticks: 64,
+            rows: Rows::Pitches,
+        };
+        assert_eq!((g.tick_at(30.0), g.pitch_at(10.0)), (Some(0), Some(127)));
+        assert_eq!(g.tick_at(30.0 + 6.0 * 5.5), Some(5));
+        assert_eq!(g.pitch_at(10.0 + 8.0 * 67.5), Some(60));
+        assert_eq!(g.tick_at(29.0), None, "key strip");
+        assert_eq!(g.tick_at(30.0 + 6.0 * 64.0), None, "past the end");
+        assert_eq!((g.tick_at_clamped(0.0), g.pitch_at_clamped(9999.0)), (0, 0));
+        let n = Note::new(4, 70, 60, 1);
+        let r = g.note_rect(&n);
+        let top = g.row_top(g.row_of(60).unwrap());
+        assert_eq!((r.left(), r.top(), r.bottom()), (54.0, top, top + 8.0));
+        assert_eq!(r.right(), 30.0 + 64.0 * 6.0, "drawn up to the pattern end");
+        assert!(g.near_right_edge(&n, r.right() - 2.0));
+        assert!(!g.near_right_edge(&n, r.left() + 2.0));
+    }
+
+    /// Ported from the poly roll's `PolyGeom`.
+    #[test]
+    fn note_rect_of_a_note_at_the_tick_limit_does_not_overflow() {
+        let g = LaneGeom {
+            tick_w: 1.0,
+            row_h: 1.0,
+            ..melodic()
+        };
+        let _ = g.note_rect(&Note::new(u16::MAX, 5, 60, 1));
     }
 
     #[test]

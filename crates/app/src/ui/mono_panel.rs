@@ -112,7 +112,8 @@ impl SidAcidApp {
             });
             app.mono_patch_browser(ui, uid);
             app.note_pattern_row(ui, uid);
-            app.poly_roll(ui, uid);
+            let width = ui.available_width();
+            app.lane(ui, uid, width);
         });
     }
 

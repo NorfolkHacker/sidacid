@@ -134,7 +134,7 @@ pub fn param_label(project: &acid_engine::project::Project, id: ParamId) -> Stri
         MachineParam::Synth(p) => format!("{machine} {}", p.name()),
         MachineParam::Drum(i, p) => format!(
             "{machine} {} {}",
-            super::drum_panel::INST_NAMES
+            super::lane::INST_NAMES
                 .get(i as usize)
                 .copied()
                 .unwrap_or("?"),

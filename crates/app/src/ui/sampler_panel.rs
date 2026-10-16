@@ -64,7 +64,8 @@ impl SidAcidApp {
                 }
             });
             app.note_pattern_row(ui, uid);
-            app.poly_roll(ui, uid);
+            let width = ui.available_width();
+            app.lane(ui, uid, width);
         });
         self.sampler_drop(ui, uid);
         self.release_pad_note(ui);
