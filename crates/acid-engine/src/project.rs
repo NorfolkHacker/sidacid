@@ -6,6 +6,7 @@
 use crate::drums::KitKind;
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
+pub use crate::steps::{DrumHit, Gate, SynthStep};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,31 +30,6 @@ pub const BASE_MIDI: i32 = 36;
 pub const TICKS_PER_STEP: u16 = 4;
 /// Most notes one note pattern may hold.
 pub const MAX_NOTES: usize = 256;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Gate {
-    #[default]
-    Off,
-    On,
-    /// Continue the previous note without retriggering.
-    Tie,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SynthStep {
-    pub note: u8,
-    pub octave: i8,
-    pub gate: Gate,
-    pub accent: bool,
-    pub slide: bool,
-}
-
-impl SynthStep {
-    pub fn midi(&self, transpose: i8) -> u8 {
-        (BASE_MIDI + 12 * self.octave as i32 + self.note as i32 + transpose as i32).clamp(0, 127)
-            as u8
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParamLane {
@@ -90,14 +66,6 @@ impl Default for SynthPattern {
             param_lane: None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DrumHit {
-    #[default]
-    Off,
-    On,
-    Accent,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

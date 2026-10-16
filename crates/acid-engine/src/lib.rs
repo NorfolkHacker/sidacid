@@ -22,6 +22,7 @@ pub mod render;
 pub mod sampler;
 pub mod sequencer;
 pub mod song;
+pub mod steps;
 pub mod synth;
 pub mod va;
 
