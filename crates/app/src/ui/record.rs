@@ -39,6 +39,12 @@ impl SidAcidApp {
         self.stop_recording();
         self.view.record = false;
         self.view.mode = mode;
+        // A range or selection means ticks in one mode, steps in the other.
+        self.view.dock.range = None;
+        self.view.dock.range_from = None;
+        for panel in self.view.panels.values_mut() {
+            panel.selected.clear();
+        }
         // A Stop while stopped would cut tails and auditions, and use up
         // the engine's "first stop after a song end only releases".
         if self.status.playing {
@@ -70,23 +76,32 @@ impl SidAcidApp {
 
     pub(crate) fn play(&mut self) {
         if self.view.mode == Mode::Song {
-            let last = self.doc.project.song.bars.len().saturating_sub(1);
-            self.view.song_cursor = self.view.song_cursor.min(last);
-            self.send(vec![Command::SetSongStart(self.view.song_cursor as u16)]);
+            self.view.song_cursor = self.view.song_cursor.min(self.last_song_bar_start());
+            self.send(vec![Command::SetSongStart(self.view.song_cursor)]);
         }
         self.send(vec![Command::Play]);
+    }
+
+    /// The first step of the song's last 16-step bar (0 for an empty
+    /// song): the latest step Play starts from, so a cursor left past a
+    /// shortened song still plays its end.
+    pub(crate) fn last_song_bar_start(&self) -> u32 {
+        let lens = song::lens_of(&self.doc.project);
+        let end = song::song_end(&self.doc.project.song, &lens);
+        end.saturating_sub(1) / 16 * 16
+    }
+
+    /// The song has something to play: a block, or a length of its own.
+    pub(crate) fn has_song(&self) -> bool {
+        let lens = song::lens_of(&self.doc.project);
+        song::song_end(&self.doc.project.song, &lens) > 0
     }
 
     /// Stop; pressed while already stopped, returns to the song start.
     pub(crate) fn stop(&mut self) {
         if !self.status.playing {
-            self.view.song_cursor = self
-                .doc
-                .project
-                .song
-                .loop_range
-                .map_or(0, |(a, _)| a as usize);
-            self.send(vec![Command::SetSongStart(self.view.song_cursor as u16)]);
+            self.view.song_cursor = self.doc.project.song.loop_range.map_or(0, |(a, _)| a);
+            self.send(vec![Command::SetSongStart(self.view.song_cursor)]);
         }
         if self.view.record {
             self.stop_recording();
@@ -140,12 +155,14 @@ impl SidAcidApp {
         if !self.recording() || self.doc.project.machine(uid).is_none() {
             return;
         }
-        let bar = self.status.song_bar as usize;
-        if bar >= self.doc.project.song.bars.len() {
+        let mut new_song = self.doc.project.song.clone();
+        {
+            let lens = song::lens_of(&self.doc.project);
+            song::record_pattern(&mut new_song, uid, self.status.song_step, slot, &lens);
+        }
+        if new_song == self.doc.project.song {
             return;
         }
-        let mut new_song = self.doc.project.song.clone();
-        song::write_pattern_ref(&mut new_song, bar, uid, slot);
         let cmds = self.doc.record(Edit::Song {
             song: Box::new(new_song),
         });

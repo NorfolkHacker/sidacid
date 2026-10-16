@@ -191,12 +191,8 @@ pub struct ViewState {
     pub mode: acid_engine::sequencer::Mode,
     /// Record armed (song mode only).
     pub record: bool,
-    /// Song bar playback starts from, and the bar the song editor shows.
-    pub song_cursor: usize,
-    /// Shift-click end of the song bar selection.
-    pub song_sel_end: Option<usize>,
-    /// Bars copied in the song editor.
-    pub song_clip: Option<Vec<acid_engine::project::Bar>>,
+    /// The song step playback starts from.
+    pub song_cursor: u32,
     /// Knob values heard while recording (saved knobs stay unchanged).
     pub live: std::collections::HashMap<acid_engine::params::ParamId, f32>,
     /// Last step recorded for the held knob.
@@ -411,6 +407,11 @@ impl SidAcidApp {
     /// parameter collapse into the latest one, but only within the trailing
     /// run of `SetParam`s so ordering against other commands is kept.
     pub(crate) fn send(&mut self, cmds: Vec<Command>) {
+        // Every edit's commands come through here: an edit the document
+        // refused says why.
+        if let Some(why) = self.doc.take_refusal() {
+            self.view.message = Some(why.into());
+        }
         for cmd in cmds {
             // Every load, clear, undo and redo of a slot's audio comes through
             // here: its cached waveform peaks are stale.
@@ -989,7 +990,9 @@ mod tests {
 
     fn recording_app() -> SidAcidApp {
         let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.song.bars = vec![acid_engine::project::Bar::default(); 4];
+        // Four empty bars: a 64-step song with no blocks.
+        doc.project.song.lanes.clear();
+        doc.project.song.end = Some(64);
         let mut app = SidAcidApp::headless(doc);
         app.view.mode = acid_engine::sequencer::Mode::Song;
         app.view.record = true;
@@ -1112,8 +1115,8 @@ mod tests {
         use acid_engine::params::SynthParam;
         let id = SYNTH1.param(SynthParam::Cutoff);
         let mut app = recording_app();
-        app.doc.project.song.loop_range = Some((1, 2));
-        app.view.song_cursor = 3;
+        app.doc.project.song.loop_range = Some((16, 32));
+        app.view.song_cursor = 48;
         app.stop();
         assert!(
             !app.status.playing,
@@ -1129,7 +1132,7 @@ mod tests {
         );
         app.stop();
         assert_eq!(
-            app.view.song_cursor, 1,
+            app.view.song_cursor, 16,
             "the second stop returns to the start"
         );
     }
@@ -1254,19 +1257,52 @@ mod tests {
     }
 
     #[test]
-    fn recorded_pad_change_fills_following_bars() {
+    fn recorded_pad_change_runs_through_following_blocks() {
+        use acid_engine::project::{Block, PatternRef};
         let mut app = recording_app();
-        app.status.song_bar = 1;
+        let lane: Vec<Block> = (0..4)
+            .map(|i| Block {
+                len: Some(16),
+                ..Block::new(i * 16, PatternRef(0))
+            })
+            .collect();
+        *app.doc.project.song.lane_mut(SYNTH1) = lane;
+        app.status.song_step = 21;
         app.record_pattern_change(SYNTH1, 9);
-        let refs: Vec<_> = app
+        let shape: Vec<_> = app
             .doc
             .project
             .song
-            .bars
+            .lane(SYNTH1)
             .iter()
-            .map(|b| b.cell(MachineUid(1)).pattern.map(|r| r.0))
+            .map(|b| (b.start, b.pattern.0))
             .collect();
-        assert_eq!(refs, vec![None, Some(9), Some(9), Some(9)]);
+        assert_eq!(
+            shape,
+            [(0, 0), (16, 9), (32, 9), (48, 9)],
+            "from its bar on"
+        );
+        app.doc.end_pass();
+        app.doc.undo();
+        assert!(
+            app.doc
+                .project
+                .song
+                .lane(SYNTH1)
+                .iter()
+                .all(|b| b.pattern.0 == 0)
+        );
+    }
+
+    #[test]
+    fn a_recorded_pad_change_in_a_gap_places_a_block() {
+        let mut app = recording_app();
+        app.status.song_step = 21;
+        app.pending.clear();
+        app.record_pattern_change(SYNTH1, 9);
+        let lane = app.doc.project.song.lane(SYNTH1);
+        assert_eq!((lane.len(), lane[0].start, lane[0].pattern.0), (1, 16, 9));
+        assert!(matches!(app.pending.as_slice(), [Command::Song(_)]));
     }
 
     #[test]
@@ -1287,11 +1323,11 @@ mod tests {
     #[test]
     fn stop_twice_returns_to_the_loop_start() {
         let mut app = recording_app();
-        app.doc.project.song.loop_range = Some((1, 2));
+        app.doc.project.song.loop_range = Some((16, 32));
         app.status.playing = false;
-        app.view.song_cursor = 3;
+        app.view.song_cursor = 48;
         app.stop();
-        assert_eq!(app.view.song_cursor, 1);
+        assert_eq!(app.view.song_cursor, 16);
         app.doc.project.song.loop_range = None;
         app.stop();
         assert_eq!(app.view.song_cursor, 0);
@@ -1321,7 +1357,7 @@ mod tests {
     fn transport_reset_closes_an_open_record_pass() {
         let mut app = recording_app();
         let mut song = app.doc.project.song.clone();
-        song.bars.pop();
+        song.end = Some(48);
         app.apply_song(song.clone(), true);
         app.view.live.insert(
             acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
@@ -1330,36 +1366,36 @@ mod tests {
         app.reset_transport_view();
         assert!(app.view.live.is_empty());
         assert_eq!(app.view.mode, acid_engine::sequencer::Mode::Pattern);
-        song.bars.pop();
+        song.end = Some(32);
         app.apply_song(song, true);
         app.doc.undo();
-        assert_eq!(app.doc.project.song.bars.len(), 3, "separate undo steps");
+        assert_eq!(app.doc.project.song.end, Some(48), "separate undo steps");
     }
 
     #[test]
-    fn song_play_clamps_the_start_bar_to_the_song() {
+    fn song_play_clamps_the_start_to_the_songs_last_bar() {
         let mut app = recording_app();
         app.status.playing = false;
-        app.view.song_cursor = 9;
+        app.view.song_cursor = 150;
         app.pending.clear();
         app.play();
-        assert_eq!(app.view.song_cursor, 3);
+        assert_eq!(app.view.song_cursor, 48);
         assert!(matches!(
             app.pending.as_slice(),
-            [Command::SetSongStart(3), Command::Play]
+            [Command::SetSongStart(48), Command::Play]
         ));
     }
 
     #[test]
-    fn song_play_sends_the_start_bar_first() {
+    fn song_play_sends_the_start_step_first() {
         let mut app = recording_app();
         app.status.playing = false;
-        app.view.song_cursor = 2;
+        app.view.song_cursor = 37;
         app.pending.clear();
         app.play();
         assert!(matches!(
             app.pending.as_slice(),
-            [Command::SetSongStart(2), Command::Play]
+            [Command::SetSongStart(37), Command::Play]
         ));
     }
 
@@ -1628,21 +1664,36 @@ mod tests {
     }
 
     #[test]
-    fn song_toolbar_actions_edit_the_song_as_undo_steps() {
-        use song_panel::SongAction;
+    fn fm_block_transpose_is_an_undoable_song_edit() {
+        use acid_engine::machine::MachineUid;
+        use acid_engine::project::{Block, PatternRef};
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.song_action(SongAction::Add, None);
-        app.song_action(SongAction::Add, None);
-        assert_eq!(app.doc.project.song.bars.len(), 2);
-        assert_eq!(app.view.song_cursor, 1);
-        app.song_action(SongAction::Loop(0, 1), Some((0, 1)));
-        assert_eq!(app.doc.project.song.loop_range, Some((0, 1)));
-        app.song_action(SongAction::Duplicate(0, 1), Some((0, 1)));
-        assert_eq!(app.doc.project.song.bars.len(), 4);
-        app.song_action(SongAction::Delete(1, 3), Some((1, 3)));
-        assert_eq!(app.doc.project.song.bars.len(), 1);
-        assert_eq!(app.view.song_cursor, 0);
+        let fm = MachineUid(5);
         let mut song = app.doc.project.song.clone();
+        *song.lane_mut(fm) = vec![Block::new(0, PatternRef(0)), Block::new(16, PatternRef(0))];
+        app.apply_song(song, false);
+        let before = app.doc.project.song.clone();
+        app.pending.clear();
+        let at = app.doc.project.position(fm).unwrap();
+        let mut song = before.clone();
+        song.lane_mut(fm)[1].transpose = 5;
+        app.apply_song(song, false);
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Command::Song(s)] if s.lanes[at][1].transpose == 5
+        ));
+        app.doc.undo();
+        assert_eq!(app.doc.project.song, before);
+    }
+
+    #[test]
+    fn song_panel_draws_its_length_and_automation() {
+        use acid_engine::project::{Block, PatternRef, Song};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        run_frames(&mut app, 2);
+        assert_eq!(app.song_bars(), 0);
+        let mut song = Song::default();
+        song.lane_mut(SYNTH1).push(Block::new(20, PatternRef(0)));
         acid_engine::song::write_automation(
             &mut song,
             acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
@@ -1651,117 +1702,77 @@ mod tests {
             0.5,
         );
         app.apply_song(song, false);
+        assert_eq!(app.song_bars(), 3, "36 steps round up to 3 bars");
         run_frames(&mut app, 2);
-        for _ in 0..6 {
-            app.doc.undo();
-        }
-        assert!(app.doc.project.song.bars.is_empty());
-    }
-
-    #[test]
-    fn song_insert_paste_and_no_loop_actions() {
-        use acid_engine::project::{Bar, PatternRef};
-        use song_panel::SongAction;
-        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let bar = |n: u8| {
-            let mut b = Bar::default();
-            b.cell_mut(MachineUid(1)).pattern = Some(PatternRef(n));
-            b
-        };
-        let mut song = app.doc.project.song.clone();
-        song.bars = vec![bar(1), bar(2), bar(3)];
-        app.apply_song(song, false);
-        let start = app.doc.project.song.clone();
-        app.song_action(SongAction::Insert, Some((1, 1)));
-        assert_eq!(
-            app.doc.project.song.bars,
-            [bar(1), bar(2), bar(2), bar(3)],
-            "Insert copies the selected bar in front of it"
-        );
-        app.view.song_clip = Some(vec![bar(7), bar(8)]);
-        app.song_action(SongAction::Paste, Some((0, 0)));
-        assert_eq!(
-            app.doc.project.song.bars,
-            [bar(1), bar(7), bar(8), bar(2), bar(2), bar(3)],
-            "Paste goes after the selection"
-        );
-        app.song_action(SongAction::Paste, None);
-        assert_eq!(
-            app.doc.project.song.bars.len(),
-            8,
-            "no selection: at the end"
-        );
-        assert_eq!(app.doc.project.song.bars[6..], [bar(7), bar(8)]);
-        app.song_action(SongAction::Insert, None);
-        let bar = &app.doc.project.song.bars[8];
-        for m in &app.doc.project.machines {
-            assert_eq!(bar.cell(m.uid).pattern, Some(PatternRef(m.selected)));
-        }
-        app.song_action(SongAction::Loop(0, 2), Some((0, 2)));
-        app.song_action(SongAction::NoLoop, None);
-        assert_eq!(app.doc.project.song.loop_range, None);
         app.doc.undo();
-        assert_eq!(app.doc.project.song.loop_range, Some((0, 2)));
-        for _ in 0..5 {
-            app.doc.undo();
-        }
-        assert_eq!(app.doc.project.song, start, "each action was one undo step");
+        assert_eq!(app.doc.project.song, Song::default());
     }
 
     #[test]
-    fn fm_bar_transpose_is_an_undoable_song_edit() {
-        use acid_engine::machine::MachineUid;
-        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        let mut song = app.doc.project.song.clone();
-        song.bars = vec![acid_engine::project::Bar::default(); 2];
-        app.apply_song(song, false);
-        let before = app.doc.project.song.clone();
+    fn recorded_song_blocks_carry_fm_and_sampler_patterns() {
+        let mut doc = Document::new(Project::default());
+        doc.project.song.end = Some(32);
+        let mut app = SidAcidApp::headless(doc);
+        app.view.mode = acid_engine::sequencer::Mode::Song;
+        app.view.record = true;
+        app.status.playing = true;
         app.pending.clear();
-        let fm = MachineUid(5);
-        let at = app.doc.project.position(fm).unwrap();
-        let mut song = before.clone();
-        song.bars[1].cell_mut(fm).transpose = 5;
-        app.apply_song(song, false);
-        assert!(matches!(
-            app.pending.as_slice(),
-            [Command::Song(s)] if s.bars[1].transpose[at] == 5
-        ));
-        app.doc.undo();
-        assert_eq!(app.doc.project.song, before);
+        app.select_pad(FM, 3);
+        app.select_pad(SAMPLER, 17);
+        let first = |uid| app.doc.project.song.lane(uid).first().map(|b| b.pattern.0);
+        assert_eq!((first(FM), first(SAMPLER)), (Some(3), Some(17)));
+        let (fm, sampler) = (
+            app.doc.project.position(FM).unwrap(),
+            app.doc.project.position(SAMPLER).unwrap(),
+        );
+        let last_song = app.pending.iter().rev().find_map(|c| match c {
+            Command::Song(s) => Some(s),
+            _ => None,
+        });
+        let heads = last_song.map(|s| (s.lanes[fm][0].pattern.0, s.lanes[sampler][0].pattern.0));
+        assert_eq!(heads, Some((3, 17)), "the engine gets both");
+        run_frames(&mut app, 2);
     }
 
     #[test]
-    fn song_panel_draws_and_bar_ops_are_undoable() {
+    fn switching_mode_clears_the_dock_range_and_lane_selections() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        run_frames(&mut app, 2);
-        let mut song = app.doc.project.song.clone();
-        song.bars = vec![acid_engine::project::Bar::default(); 3];
-        app.apply_song(song, false);
-        app.view.song_cursor = 0;
-        app.view.song_sel_end = Some(1);
-        assert_eq!(app.song_selection(), Some((0, 1)));
-        run_frames(&mut app, 2);
-        app.doc.undo();
-        assert!(app.doc.project.song.bars.is_empty());
+        app.view.dock.range = Some((0, 48));
+        app.view.dock.range_from = Some(0);
+        let note = app.doc.project.roll(SYNTH1, 0).unwrap().notes[0];
+        app.view.panel(SYNTH1).selected = vec![note];
+        app.set_mode(acid_engine::sequencer::Mode::Song);
+        assert_eq!(app.view.dock.range, None);
+        assert_eq!(app.view.dock.range_from, None);
+        assert!(app.view.panel(SYNTH1).selected.is_empty());
     }
 
     #[test]
-    fn song_bars_carry_fm_and_sampler_patterns() {
+    fn a_refused_pattern_edit_says_why() {
+        use acid_engine::project::{Block, PatternRef};
+        use acid_engine::song::MAX_SONG_STEPS;
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        app.doc.select_pattern(FM, 3);
-        app.doc.select_pattern(SAMPLER, 17);
-        app.song_action(song_panel::SongAction::Add, None);
-        let bar = &app.doc.project.song.bars[0];
-        use acid_engine::machine::MachineUid;
-        assert_eq!(
-            bar.cell(MachineUid(5)).pattern,
-            Some(acid_engine::project::PatternRef(3))
+        let max = MAX_SONG_STEPS as u32;
+        let lane = app.doc.project.song.lane_mut(SYNTH1);
+        lane.push(Block::new(max - 32, PatternRef(0)));
+        lane.push(Block::new(max - 16, PatternRef(1)));
+        let before = app.doc.project.clone();
+        let cmds = app.doc.apply(
+            crate::document::Edit::NoteLength {
+                uid: SYNTH1,
+                slot: 0,
+                length: 24,
+            },
+            false,
         );
+        assert!(cmds.is_empty());
+        app.send(cmds);
         assert_eq!(
-            bar.cell(MachineUid(6)).pattern,
-            Some(acid_engine::project::PatternRef(17))
+            app.view.message.as_deref(),
+            Some("That would push the song past its maximum length")
         );
-        run_frames(&mut app, 2);
+        assert_eq!(app.doc.project, before, "nothing changed");
+        assert!(!app.doc.can_undo());
     }
 
     #[test]

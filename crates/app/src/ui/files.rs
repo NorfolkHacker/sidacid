@@ -232,7 +232,6 @@ impl SidAcidApp {
         self.view.pad_note = None;
         self.reset_transport_view();
         self.view.song_cursor = 0;
-        self.view.song_sel_end = None;
         for m in &self.doc.project.machines {
             self.view.panels.entry(m.uid).or_default().bank = m.selected / BANK_SIZE as u8;
         }
@@ -625,7 +624,7 @@ impl SidAcidApp {
                 .resizable(false)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    let has_song = !self.doc.project.song.bars.is_empty();
+                    let has_song = self.has_song();
                     if !has_song {
                         self.view.export_song = false;
                     }
@@ -685,6 +684,27 @@ mod tests {
 
     fn app() -> SidAcidApp {
         SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()))
+    }
+
+    #[test]
+    fn whole_song_export_needs_a_block_or_a_song_length() {
+        use acid_engine::project::{Block, PatternRef, Song};
+        let mut app = app();
+        app.doc.project.song = Song::default();
+        app.view.export_open = true;
+        app.view.export_song = true;
+        assert!(!app.has_song());
+        run_frames(&mut app, 1);
+        assert!(!app.view.export_song, "an empty song can't be picked");
+        app.doc.project.song.end = Some(32);
+        assert!(app.has_song(), "empty bars of its own still play");
+        app.doc.project.song = Song::default();
+        app.doc
+            .project
+            .song
+            .lane_mut(SYNTH1)
+            .push(Block::new(64, PatternRef(0)));
+        assert!(app.has_song());
     }
 
     /// A fresh path in the temp directory, removed when dropped.

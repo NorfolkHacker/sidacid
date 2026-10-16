@@ -12,6 +12,7 @@ use acid_engine::project::{
 };
 use acid_engine::rack::CompiledSong;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
+use acid_engine::song;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -105,7 +106,7 @@ pub enum Edit {
     InsertMachine {
         removed: Box<RemovedMachine>,
     },
-    /// Taking a machine out with its song cells and automation lanes.
+    /// Taking a machine out with its song lane and automation lanes.
     RemoveMachine {
         uid: MachineUid,
     },
@@ -122,6 +123,10 @@ pub enum Edit {
     },
     /// Several edits as one undo step (a record pass), applied in order.
     Group(Vec<Edit>),
+}
+
+fn is_song(edit: &Edit) -> bool {
+    matches!(edit, Edit::Song { .. })
 }
 
 /// Which edits may fold into one undo step during a gesture.
@@ -214,7 +219,12 @@ pub struct Document {
     undo_byte_budget: usize,
     /// The newest undo step is the open record pass's `Edit::Group`.
     pass_open: bool,
+    /// Why the last edit was refused (it changed nothing), until taken.
+    refusal: Option<&'static str>,
 }
+
+/// A pattern edit refused because its ripple would not fit the song.
+pub const SONG_TOO_LONG: &str = "That would push the song past its maximum length";
 
 /// Sample data (PCM in `SlotData`) the undo history may hold: as much
 /// 16-bit PCM as the whole 256 MB (f32) sample pool decodes from, so a
@@ -235,6 +245,7 @@ impl Document {
             unsaved_selection: false,
             undo_byte_budget: UNDO_SAMPLE_BYTES,
             pass_open: false,
+            refusal: None,
         }
     }
 
@@ -247,7 +258,11 @@ impl Document {
     pub fn apply(&mut self, edit: Edit, merge: bool) -> Vec<Command> {
         let key = merge_key(&edit);
         let continuing = merge && self.gesture == Some(key) && !self.undo.is_empty();
+        self.refusal = None;
         let inverse = self.apply_raw(edit);
+        if self.refusal.is_some() {
+            return Vec::new();
+        }
         let cmds = self.commands_for(&inverse);
         // A stray no-op in the middle of a drag must not split its step.
         if self.is_no_op(&inverse) {
@@ -258,6 +273,15 @@ impl Document {
         if continuing {
             if let Some(top) = self.undo.last_mut() {
                 top.generation = generation;
+                // The gesture's first ripple: undo must restore the song
+                // from before it too (earlier merged edits left it alone).
+                if let Edit::Group(mut inv) = inverse
+                    && !matches!(&top.edit, Edit::Group(e) if e.iter().any(is_song))
+                    && let Some(i) = inv.iter().position(is_song)
+                {
+                    let old = std::mem::replace(&mut top.edit, Edit::Group(Vec::new()));
+                    top.edit = Edit::Group(vec![old, inv.swap_remove(i)]);
+                }
             }
         } else {
             self.undo.push(Step {
@@ -278,7 +302,11 @@ impl Document {
     /// step, so the rest of the pass becomes a step of its own: undo never
     /// reorders history. An edit that changes nothing is not recorded.
     pub fn record(&mut self, edit: Edit) -> Vec<Command> {
+        self.refusal = None;
         let inverse = self.apply_raw(edit);
+        if self.refusal.is_some() {
+            return Vec::new();
+        }
         let cmds = self.commands_for(&inverse);
         if self.is_no_op(&inverse) {
             return cmds;
@@ -497,14 +525,14 @@ impl Document {
         let removed = Box::new(RemovedMachine {
             index,
             entry,
-            cells: Vec::new(),
+            song_lane: None,
             lanes: Vec::new(),
             param_lanes: Vec::new(),
         });
         (uid, self.apply(Edit::InsertMachine { removed }, false))
     }
 
-    /// Removes `uid` with its song cells and lanes as one undo step.
+    /// Removes `uid` with its song lane and automation lanes as one undo step.
     /// Returns its name, or None when it is not in the rack.
     pub fn remove_machine(&mut self, uid: MachineUid) -> Option<(String, Vec<Command>)> {
         let name = self.project.machine(uid)?.name.clone();
@@ -535,8 +563,61 @@ impl Document {
         self.apply(Edit::RenameMachine { uid, name }, false)
     }
 
-    /// Applies an edit and returns its inverse.
+    /// Why the last `apply` or `record` changed nothing, once.
+    pub fn take_refusal(&mut self) -> Option<&'static str> {
+        self.refusal.take()
+    }
+
+    /// Applies an edit and returns its inverse. A pattern edit that
+    /// lengthens the pattern ripples its machine's song lane in the same
+    /// step (the inverse then also restores the song); when the ripple
+    /// would not fit, nothing changes, `refusal` is set and the inverse
+    /// is an empty group. Undo and redo along the history always fit:
+    /// growing back after a shrink finds the gaps it left, and a ripple
+    /// already applied is its own fixed point.
     fn apply_raw(&mut self, edit: Edit) -> Edit {
+        let target = match &edit {
+            Edit::SynthPattern { uid, slot, .. }
+            | Edit::DrumPattern { uid, slot, .. }
+            | Edit::NotePattern { uid, slot, .. }
+            | Edit::NoteLength { uid, slot, .. } => Some((*uid, *slot)),
+            _ => None,
+        };
+        let Some((uid, slot)) = target else {
+            return self.apply_one(edit);
+        };
+        let old_len = song::lens_of(&self.project)(uid, slot);
+        let inverse = self.apply_one(edit);
+        let p = &self.project;
+        let mut lane = p.song.lane(uid).to_vec();
+        let fits = {
+            let lens = song::lens_of(p);
+            let new_len = lens(uid, slot);
+            if new_len <= old_len || lane.is_empty() {
+                return inverse;
+            }
+            song::ripple(&mut lane, uid, slot, old_len, new_len, &lens)
+        };
+        if !fits {
+            self.apply_one(inverse);
+            self.refusal = Some(SONG_TOO_LONG);
+            return Edit::Group(Vec::new());
+        }
+        if lane == p.song.lane(uid) {
+            return inverse;
+        }
+        let old = self.project.song.clone();
+        *self.project.song.lane_mut(uid) = lane;
+        Edit::Group(vec![
+            inverse,
+            Edit::Song {
+                song: Box::new(old),
+            },
+        ])
+    }
+
+    /// `apply_raw` without the ripple.
+    fn apply_one(&mut self, edit: Edit) -> Edit {
         let p = &mut self.project;
         match edit {
             Edit::Param { id, value } => {
@@ -1297,29 +1378,155 @@ mod tests {
         assert_eq!(n, UNDO_LIMIT);
     }
 
+    /// SYNTH1's lane: pattern 0 at 0 and 16, pattern 3 at 32 (all 16 long).
+    fn rippling_doc() -> Document {
+        use acid_engine::project::{Block, PatternRef};
+        let mut d = doc();
+        d.project.song.lane_mut(SYNTH1).extend([
+            Block::new(0, PatternRef(0)),
+            Block::new(16, PatternRef(0)),
+            Block::new(32, PatternRef(3)),
+        ]);
+        d
+    }
+
+    fn starts(d: &Document, uid: MachineUid) -> Vec<u32> {
+        d.project.song.lane(uid).iter().map(|b| b.start).collect()
+    }
+
+    fn length(uid: MachineUid, slot: u8, length: u8) -> Edit {
+        Edit::NoteLength { uid, slot, length }
+    }
+
+    #[test]
+    fn a_longer_pattern_ripples_its_lane_in_the_same_undo_step() {
+        let mut d = rippling_doc();
+        let cmds = d.apply(length(SYNTH1, 0, 24), false);
+        assert_eq!(starts(&d, SYNTH1), [0, 24, 48]);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::Pattern { .. }, Command::Song(s)] if s.lanes[0][2].start == 48
+        ));
+        assert_eq!(d.undo_depth(), 1);
+        let cmds = d.undo();
+        assert_eq!(starts(&d, SYNTH1), [0, 16, 32], "undo restores the song");
+        assert_eq!(d.project.roll(SYNTH1, 0).unwrap().length, 16);
+        assert!(cmds.iter().any(|c| matches!(c, Command::Song(_))));
+        d.redo();
+        assert_eq!(starts(&d, SYNTH1), [0, 24, 48]);
+        assert_eq!(d.project.roll(SYNTH1, 0).unwrap().length, 24);
+        d.undo();
+        assert_eq!(starts(&d, SYNTH1), [0, 16, 32]);
+    }
+
+    #[test]
+    fn whole_pattern_edits_ripple_when_their_length_changes() {
+        let mut d = rippling_doc();
+        let mut pattern = d.project.synth(SYNTH1).unwrap().patterns[0].clone();
+        pattern.roll.length = 20;
+        d.apply(
+            Edit::SynthPattern {
+                uid: SYNTH1,
+                slot: 0,
+                pattern: Box::new(pattern.clone()),
+            },
+            false,
+        );
+        assert_eq!(starts(&d, SYNTH1), [0, 20, 40]);
+        pattern.roll.length = 8;
+        let cmds = d.apply(
+            Edit::SynthPattern {
+                uid: SYNTH1,
+                slot: 0,
+                pattern: Box::new(pattern),
+            },
+            false,
+        );
+        assert_eq!(starts(&d, SYNTH1), [0, 20, 40], "shrinking leaves gaps");
+        assert!(!cmds.iter().any(|c| matches!(c, Command::Song(_))));
+        d.undo();
+        d.undo();
+        assert_eq!(starts(&d, SYNTH1), [0, 16, 32]);
+        // Another machine's lane and pattern edits elsewhere are untouched.
+        let mut d = rippling_doc();
+        d.apply(length(SYNTH2, 0, 32), false);
+        assert_eq!(starts(&d, SYNTH1), [0, 16, 32]);
+    }
+
+    #[test]
+    fn a_length_drag_undoes_its_ripple_in_one_step() {
+        use acid_engine::project::{Block, PatternRef};
+        let mut d = doc();
+        // A gap before the block at 24: the drag's first steps fill it and
+        // only later ones move that block (and change the song).
+        d.project
+            .song
+            .lane_mut(SYNTH1)
+            .extend([Block::new(0, PatternRef(0)), Block::new(24, PatternRef(3))]);
+        for n in 17..=28 {
+            d.apply(length(SYNTH1, 0, n), true);
+        }
+        d.end_gesture();
+        assert_eq!(starts(&d, SYNTH1), [0, 28]);
+        assert_eq!(d.undo_depth(), 1);
+        d.undo();
+        assert_eq!(starts(&d, SYNTH1), [0, 24], "the whole drag undoes");
+        assert_eq!(d.project.roll(SYNTH1, 0).unwrap().length, 16);
+    }
+
+    #[test]
+    fn a_ripple_past_the_song_limit_is_refused() {
+        use acid_engine::project::{Block, PatternRef};
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let mut d = doc();
+        d.project.song.lane_mut(SYNTH1).extend([
+            Block::new(max - 32, PatternRef(0)),
+            Block::new(max - 16, PatternRef(3)),
+        ]);
+        let before = d.project.clone();
+        assert!(d.apply(length(SYNTH1, 0, 24), false).is_empty());
+        assert_eq!(d.take_refusal(), Some(SONG_TOO_LONG));
+        assert_eq!(d.take_refusal(), None, "once");
+        assert_eq!(d.project, before);
+        assert_eq!(d.undo_depth(), 0);
+        assert!(!d.is_dirty());
+        d.apply(length(SYNTH1, 0, 8), false);
+        assert_eq!(d.take_refusal(), None, "shrinking always fits");
+        assert_eq!(d.project.roll(SYNTH1, 0).unwrap().length, 8);
+    }
+
+    #[test]
+    fn removing_a_machine_takes_its_song_lane_and_undo_restores_it() {
+        let mut d = rippling_doc();
+        let song = d.project.song.clone();
+        d.remove_machine(SYNTH1).unwrap();
+        assert!(d.project.song.lane(SYNTH1).is_empty());
+        d.undo();
+        assert_eq!(d.project.song, song);
+        d.redo();
+        assert!(d.project.song.lane(SYNTH1).is_empty());
+    }
+
     #[test]
     fn song_edits_merge_into_one_record_pass() {
-        use acid_engine::project::Bar;
         let mut d = doc();
+        d.project.song = Song::default();
         for n in 1..=5 {
             let mut song = d.project.song.clone();
-            song.bars = vec![Bar::default(); n];
+            song.end = Some(n * 16);
             let cmds = d.apply(
                 Edit::Song {
                     song: Box::new(song),
                 },
                 true,
             );
-            assert!(matches!(cmds.as_slice(), [Command::Song(s)] if s.bars.len() == n));
+            assert!(matches!(cmds.as_slice(), [Command::Song(s)] if s.end == Some(n * 16)));
         }
         d.end_gesture();
         d.undo();
-        assert!(
-            d.project.song.bars.is_empty(),
-            "the whole pass undoes at once"
-        );
+        assert_eq!(d.project.song.end, None, "the whole pass undoes at once");
         d.redo();
-        assert_eq!(d.project.song.bars.len(), 5);
+        assert_eq!(d.project.song.end, Some(80));
     }
 
     #[test]

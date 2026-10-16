@@ -46,14 +46,13 @@ impl SidAcidApp {
                 self.set_record(!self.view.record);
             }
             if self.view.mode == Mode::Song {
-                let bar = if self.status.playing {
-                    self.status.song_bar as usize
+                let step = if self.status.playing {
+                    self.status.song_step
                 } else {
-                    // The bar playback will start from (see `play`).
-                    let last = self.doc.project.song.bars.len().saturating_sub(1);
-                    self.view.song_cursor.min(last)
+                    // The step playback will start from (see `play`).
+                    self.view.song_cursor.min(self.last_song_bar_start())
                 };
-                ui.label(format!("Bar {}", bar + 1));
+                ui.label(format!("Bar {}  Step {}", step / 16 + 1, step % 16 + 1));
             }
             ui.separator();
             let shown_bpm = self.doc.project.bpm;

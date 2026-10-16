@@ -491,23 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn pasted_song_bars_drop_cells_of_machines_not_in_the_rack() {
-        use crate::ui::song_panel::SongAction;
-        use acid_engine::project::{Bar, PatternRef};
-        let mut app = demo();
-        let mut bar = Bar::default();
-        bar.cell_mut(SYNTH1).pattern = Some(PatternRef(1));
-        bar.cell_mut(SYNTH2).pattern = Some(PatternRef(2));
-        app.view.song_clip = Some(vec![bar]);
-        app.remove_machine(SYNTH2);
-        app.song_action(SongAction::Paste, None);
-        let pasted = app.doc.project.song.bars.last().unwrap();
-        assert_eq!(pasted.cell(SYNTH1).pattern, Some(PatternRef(1)));
-        assert!(pasted.cells.iter().all(|(u, _)| *u != SYNTH2));
-        assert!(app.doc.project.validate().is_ok());
-    }
-
-    #[test]
     fn a_pasted_synth_pattern_drops_a_lane_for_a_machine_not_in_the_rack() {
         use acid_engine::params::{ParamId, SynthParam};
         use acid_engine::project::{ParamLane, STEPS};

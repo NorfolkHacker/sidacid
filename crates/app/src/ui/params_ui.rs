@@ -289,7 +289,8 @@ mod tests {
         use acid_engine::params::MasterParam;
         let id = ParamId::Master(MasterParam::Level);
         let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.song.bars = vec![acid_engine::project::Bar::default(); 2];
+        doc.project.song.lanes.clear();
+        doc.project.song.end = Some(32);
         let mut app = SidAcidApp::headless(doc);
         app.view.mode = acid_engine::sequencer::Mode::Song;
         app.view.record = true;
