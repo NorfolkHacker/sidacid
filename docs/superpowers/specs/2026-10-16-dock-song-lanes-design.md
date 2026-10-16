@@ -350,6 +350,10 @@ reverts.
 | Arpeggiate | up / down / up-down / random, rate, gate (melodic) |
 | Euclidean | hits, steps, rotation, pitch or drum row |
 
+Details settled in implementation: Legato stops at the next note of any
+pitch in the lane; Euclidean repeats its cycle across the span; Cancel
+(or closing the popup, or Esc) always restores the original pattern.
+
 Each tool is a pure function over notes with unit tests.
 
 ## Testing
