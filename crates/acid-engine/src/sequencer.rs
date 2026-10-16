@@ -381,16 +381,16 @@ fn note_starting(roll: &NotePattern, pos: u16) -> Option<(usize, &Note)> {
         .find(|(_, n)| n.start == pos && pos < roll.ticks())
 }
 
-/// `(key, index)` of the notes of `new` that `key` picks, sorted by key
-/// then index, into `buf`; returns how many.
+/// `(key, index)` of the notes of `new` that `key` (given index and
+/// note) picks, sorted by key then index, into `buf`; returns how many.
 fn sorted_keys(
     new: &[Note],
-    key: impl Fn(&Note) -> Option<u32>,
+    key: impl Fn(usize, &Note) -> Option<u32>,
     buf: &mut [(u32, u16); MAX_NOTES],
 ) -> usize {
     let mut n = 0;
     for (j, m) in new.iter().enumerate().take(MAX_NOTES) {
-        if let Some(k) = key(m) {
+        if let Some(k) = key(j, m) {
             buf[n] = (k, j as u16);
             n += 1;
         }
@@ -944,7 +944,7 @@ impl Sequencer {
             p.get(j / 64).is_some_and(|w| w & (1 << (j % 64)) != 0)
         };
         let mut buf = [(0u32, 0u16); MAX_NOTES];
-        let n = sorted_keys(new, |m| Some(exact_key(m)), &mut buf);
+        let n = sorted_keys(new, |_, m| Some(exact_key(m)), &mut buf);
         let mut played = [0u64; MAX_NOTES / 64];
         // Played notes that ring through the next tick but found no match.
         let (mut lost, mut lost_n) = ([0u16; MAX_NOTES], 0);
@@ -975,18 +975,54 @@ impl Sequencer {
                 rat_n += 1;
             }
         }
-        (t.rat, t.rat_n) = (rat, rat_n as u8);
         if lost_n > 0 {
-            // By pitch among the notes sounding through the next tick.
+            // By pitch among the notes sounding through the next tick,
+            // nearest start first, then nearest index. A note left as it
+            // was that didn't play this pass is never a candidate.
             let p = t.pos;
-            let n = sorted_keys(new, |m| covers(m, p).then_some(m.pitch as u32), &mut buf);
+            let n = sorted_keys(
+                old,
+                |i, o| (!t.has_played(i)).then_some(exact_key(o)),
+                &mut buf,
+            );
+            let mut stale = [0u64; MAX_NOTES / 64];
+            for (j, m) in new.iter().enumerate().take(MAX_NOTES) {
+                if covers(m, p)
+                    && buf[..n]
+                        .binary_search_by_key(&exact_key(m), |e| e.0)
+                        .is_ok()
+                {
+                    stale[j / 64] |= 1 << (j % 64);
+                }
+            }
+            let n = sorted_keys(new, |_, m| covers(m, p).then_some(m.pitch as u32), &mut buf);
             for &i in &lost[..lost_n] {
-                let i = i as usize;
-                if let Some(j) = nearest(&buf[..n], old[i].pitch as u32, i, |j| has(&played, j)) {
-                    played[j / 64] |= 1 << (j % 64);
+                let (i, o) = (i as usize, &old[i as usize]);
+                let lo = buf[..n].partition_point(|e| e.0 < o.pitch as u32);
+                let hi = lo + buf[lo..n].partition_point(|e| e.0 == o.pitch as u32);
+                let Some(j) = buf[lo..hi]
+                    .iter()
+                    .map(|e| e.1 as usize)
+                    .filter(|&j| !has(&played, j) && !has(&stale, j))
+                    .min_by_key(|&j| (new[j].start.abs_diff(o.start), j.abs_diff(i)))
+                else {
+                    continue;
+                };
+                played[j / 64] |= 1 << (j % 64);
+                // Its sub-hits still to come follow it, on its new grid.
+                let m = &new[j];
+                if t.ratcheting(i)
+                    && m.ratchet > 1
+                    && hits_after(m, p - 1, u16::MAX)
+                    && rat_n < RATCHETS
+                    && !rat[..rat_n].contains(&(j as u16))
+                {
+                    rat[rat_n] = j as u16;
+                    rat_n += 1;
                 }
             }
         }
+        (t.rat, t.rat_n) = (rat, rat_n as u8);
         t.played = played;
     }
 
@@ -3677,6 +3713,55 @@ mod tests {
                 (13, false, 67)
             ]
         );
+    }
+
+    #[test]
+    fn a_nudged_note_keeps_its_bit_over_a_skipped_same_pitch_note() {
+        // A 0-12 plays; C 2-10, same pitch, is skipped (chance 0). A is
+        // nudged a tick at tick 5 and lands after C in the list: A keeps
+        // ringing to its new end, C doesn't take its played state.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.extend([
+            note(0, 12, 60),
+            Note {
+                chance: 0,
+                ..note(2, 8, 60)
+            },
+        ]);
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 5);
+        edit_fm(&mut f, &mut s, |n| {
+            let mut a = n.remove(0);
+            a.start = 1;
+            n.push(a);
+        });
+        ev.extend(
+            run_ticks(&f, &mut s, 11)
+                .into_iter()
+                .map(|(t, e)| (t + 5, e)),
+        );
+        assert_eq!(fm(&ev), [(0, true, 60), (13, false, 60)]);
+    }
+
+    #[test]
+    fn a_nudged_ratcheting_note_keeps_its_sub_hits() {
+        // An x4 four-step note (hits at 0, 4, 8, 12) nudged a tick at
+        // tick 2: its later hits come on its new grid (5, 9, 13).
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(ratcheted(0, 16, 60, 4));
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 2);
+        edit_fm(&mut f, &mut s, |n| n[0].start = 1);
+        ev.extend(
+            run_ticks(&f, &mut s, 16)
+                .into_iter()
+                .map(|(t, e)| (t + 2, e)),
+        );
+        let ons: Vec<_> = fm(&ev).into_iter().filter(|e| e.1).map(|e| e.0).collect();
+        assert_eq!(ons, [0, 5, 9, 13]);
+        assert_eq!(fm(&ev).last(), Some(&(17, false, 60)));
     }
 
     #[test]
