@@ -18,6 +18,8 @@ mod lane_geom;
 mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
+#[allow(dead_code)] // used by the lanes (phase 3, tasks 2–4)
+mod note_ops;
 mod note_panel;
 mod pads;
 mod params_ui;

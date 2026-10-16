@@ -1,0 +1,412 @@
+//! Pure operations on a note selection (indices into a `NotePattern`),
+//! shared by every lane of the dock: pick, move, resize, delete, copy,
+//! paste, duplicate, and settling edited notes against their neighbours.
+
+use super::key_entry::LaneKind;
+use super::poly_edit::make_mono;
+use acid_engine::project::{MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
+
+/// Why a paste was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteError {
+    TooMany,
+    WrongKind,
+}
+
+fn end(n: &Note) -> u16 {
+    n.start.saturating_add(n.len)
+}
+
+/// Ticks a pattern can hold (starts at or past this are never played).
+fn limit() -> u16 {
+    STEPS as u16 * TICKS_PER_STEP
+}
+
+fn max_pitch(kind: LaneKind) -> i32 {
+    if kind == LaneKind::Drums { 7 } else { 127 }
+}
+
+/// Indices of the notes equal to the selected values; each selected value
+/// claims the first unclaimed equal note. Sorted, unique.
+pub fn resolve(p: &NotePattern, selected: &[Note]) -> Vec<usize> {
+    let mut used = vec![false; p.notes.len()];
+    for s in selected {
+        if let Some(i) = (0..p.notes.len()).find(|&i| !used[i] && p.notes[i] == *s) {
+            used[i] = true;
+        }
+    }
+    (0..used.len()).filter(|&i| used[i]).collect()
+}
+
+/// The notes at `idx` (out-of-range indices are skipped).
+pub fn values(p: &NotePattern, idx: &[usize]) -> Vec<Note> {
+    idx.iter()
+        .filter_map(|&i| p.notes.get(i).copied())
+        .collect()
+}
+
+/// Notes (starting inside the visible pattern) overlapping the tick span
+/// and pitch span of a box dragged between two corners, in any order.
+pub fn in_box(p: &NotePattern, t0: u16, t1: u16, lo: u8, hi: u8) -> Vec<usize> {
+    let (ta, tb) = (t0.min(t1), t0.max(t1));
+    let (pa, pb) = (lo.min(hi), lo.max(hi));
+    let visible = p.ticks();
+    (0..p.notes.len())
+        .filter(|&i| {
+            let n = &p.notes[i];
+            n.start < visible && n.start <= tb && end(n) > ta && (pa..=pb).contains(&n.pitch)
+        })
+        .collect()
+}
+
+/// Notes starting in `[t0, t1)`.
+pub fn in_range(p: &NotePattern, t0: u16, t1: u16) -> Vec<usize> {
+    (0..p.notes.len())
+        .filter(|&i| (t0..t1).contains(&p.notes[i].start))
+        .collect()
+}
+
+/// Moves the group by `(dt, dp)` ticks and pitches, clamped as a whole so
+/// no note starts before 0 or at/after the pattern limit and no pitch
+/// leaves the lane's range. Positions in the vector don't change.
+pub fn shift(p: &mut NotePattern, idx: &[usize], dt: i32, dp: i32, kind: LaneKind) -> Vec<usize> {
+    let sel = values(p, idx);
+    if sel.is_empty() {
+        return idx.to_vec();
+    }
+    let ext = |f: fn(&Note) -> i32| {
+        let v = sel.iter().map(f);
+        (v.clone().min().unwrap_or(0), v.max().unwrap_or(0))
+    };
+    let (s_lo, s_hi) = ext(|n| n.start as i32);
+    let (p_lo, p_hi) = ext(|n| n.pitch as i32);
+    let dt = dt.max(-s_lo).min((limit() as i32 - 1 - s_hi).max(0));
+    let dp = dp.max(-p_lo).min((max_pitch(kind) - p_hi).max(0));
+    if (dt, dp) != (0, 0) {
+        for &i in idx {
+            if let Some(n) = p.notes.get_mut(i) {
+                n.start = (n.start as i32 + dt) as u16;
+                n.pitch = (n.pitch as i32 + dp) as u8;
+            }
+        }
+    }
+    idx.to_vec()
+}
+
+/// Lengthens (or shortens) each note by `dlen` ticks: at least 1, and never
+/// so long that its end passes `u16::MAX`.
+pub fn resize(p: &mut NotePattern, idx: &[usize], dlen: i32) {
+    for &i in idx {
+        if let Some(n) = p.notes.get_mut(i) {
+            let cap = (u16::MAX - n.start) as i32;
+            n.len = (n.len as i32 + dlen).clamp(1, cap.max(1)) as u16;
+        }
+    }
+}
+
+/// Removes the notes at `idx`.
+pub fn delete(p: &mut NotePattern, idx: &[usize]) {
+    let mut i = 0;
+    p.notes.retain(|_| {
+        let keep = !idx.contains(&i);
+        i += 1;
+        keep
+    });
+}
+
+/// The notes at `idx` with starts relative to `origin` (<= every start).
+pub fn copy(p: &NotePattern, idx: &[usize], origin: u16) -> Vec<Note> {
+    values(p, idx)
+        .into_iter()
+        .map(|n| Note {
+            start: n.start.saturating_sub(origin),
+            ..n
+        })
+        .collect()
+}
+
+/// Appends `notes` shifted to `at` (those starting at/after the pattern
+/// limit are dropped), settles them against their neighbours and returns
+/// their indices. Refuses, changing nothing, when the pattern would exceed
+/// `MAX_NOTES` or a drum lane would get a pitch of 8 or more.
+pub fn paste(
+    p: &mut NotePattern,
+    notes: &[Note],
+    at: u16,
+    kind: LaneKind,
+) -> Result<Vec<usize>, PasteError> {
+    if kind == LaneKind::Drums && notes.iter().any(|n| n.pitch >= 8) {
+        return Err(PasteError::WrongKind);
+    }
+    let placed: Vec<Note> = notes
+        .iter()
+        .filter_map(|n| {
+            let start = n.start as u32 + at as u32;
+            (start < limit() as u32).then_some(Note {
+                start: start as u16,
+                ..*n
+            })
+        })
+        .collect();
+    if p.notes.len() + placed.len() > MAX_NOTES {
+        return Err(PasteError::TooMany);
+    }
+    let first = p.notes.len();
+    p.notes.extend(placed);
+    let touched: Vec<usize> = (first..p.notes.len()).collect();
+    Ok(settle(p, &touched, kind))
+}
+
+/// Pastes a copy of the notes at `idx` right after them: the offset is
+/// their span (max end - min start) rounded up to a multiple of `snap_ticks`.
+pub fn duplicate(
+    p: &mut NotePattern,
+    idx: &[usize],
+    snap_ticks: u16,
+    kind: LaneKind,
+) -> Result<Vec<usize>, PasteError> {
+    let sel = values(p, idx);
+    let (Some(lo), Some(hi)) = (sel.iter().map(|n| n.start).min(), sel.iter().map(end).max())
+    else {
+        return Ok(Vec::new());
+    };
+    let snap = snap_ticks.max(1);
+    let span = (hi - lo).div_ceil(snap).saturating_mul(snap);
+    let clip = copy(p, idx, lo);
+    paste(p, &clip, lo.saturating_add(span), kind)
+}
+
+/// New index of each old note after the ones where `alive` is false were
+/// removed (`None` for the removed).
+fn remap(alive: &[bool]) -> Vec<Option<usize>> {
+    let mut next = 0;
+    alive
+        .iter()
+        .map(|&a| {
+            a.then(|| {
+                next += 1;
+                next - 1
+            })
+        })
+        .collect()
+}
+
+/// Settles edited notes against their neighbours and returns the touched
+/// notes' new indices. Acid: in ascending start order each touched note
+/// runs `make_mono` (cutting or removing what it overlaps). Poly/Drums:
+/// each touched note absorbs the same-pitch notes it overlaps (union span;
+/// it keeps its own other fields).
+pub fn settle(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<usize> {
+    let mut ids: Vec<usize> = touched
+        .iter()
+        .copied()
+        .filter(|&i| i < p.notes.len())
+        .collect();
+    ids.sort_by_key(|&i| (p.notes[i].start, i));
+    ids.dedup();
+    // Current index of each id, `None` once the note was removed.
+    let mut at: Vec<Option<usize>> = ids.iter().map(|&i| Some(i)).collect();
+    for k in 0..ids.len() {
+        let Some(cur) = at[k] else { continue };
+        let alive = if kind == LaneKind::Acid {
+            let keep = p.notes[cur];
+            let alive: Vec<bool> = p
+                .notes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| i == cur || !(n.start >= keep.start && n.start < end(&keep)))
+                .collect();
+            make_mono(p, cur);
+            alive
+        } else {
+            absorb(p, cur)
+        };
+        let map = remap(&alive);
+        for slot in at.iter_mut() {
+            *slot = slot.and_then(|i| map[i]);
+        }
+    }
+    let mut out: Vec<usize> = at.into_iter().flatten().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Merges every visible same-pitch note overlapping note `cur` into it
+/// (repeating while the union reaches more). Returns which old indices
+/// survive.
+fn absorb(p: &mut NotePattern, cur: usize) -> Vec<bool> {
+    let visible = p.ticks();
+    let mut alive = vec![true; p.notes.len()];
+    let (mut lo, mut hi) = (p.notes[cur].start, end(&p.notes[cur]));
+    let pitch = p.notes[cur].pitch;
+    loop {
+        let mut grew = false;
+        for (i, n) in p.notes.iter().enumerate() {
+            if i != cur
+                && alive[i]
+                && n.pitch == pitch
+                && n.start < visible
+                && n.start < hi
+                && lo < end(n)
+            {
+                alive[i] = false;
+                lo = lo.min(n.start);
+                hi = hi.max(end(n));
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    p.notes[cur].start = lo;
+    p.notes[cur].len = hi - lo;
+    let mut i = 0;
+    p.notes.retain(|_| {
+        i += 1;
+        alive[i - 1]
+    });
+    alive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::key_entry::LaneKind;
+    use acid_engine::project::{MAX_NOTES, Note, NotePattern};
+
+    fn pat(notes: &[(u16, u16, u8)]) -> NotePattern {
+        NotePattern {
+            notes: notes
+                .iter()
+                .map(|&(s, l, p)| Note::new(s, l, p, 100))
+                .collect(),
+            length: 16,
+        }
+    }
+
+    fn spans(p: &NotePattern) -> Vec<(u16, u16, u8)> {
+        let mut v: Vec<_> = p.notes.iter().map(|n| (n.start, n.len, n.pitch)).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn selections_resolve_by_value() {
+        let p = pat(&[(0, 4, 60), (4, 4, 62), (0, 4, 60)]);
+        let sel = vec![Note::new(0, 4, 60, 100), Note::new(4, 4, 62, 100)];
+        assert_eq!(resolve(&p, &sel), vec![0, 1]);
+        let twice = vec![Note::new(0, 4, 60, 100); 2];
+        assert_eq!(resolve(&p, &twice), vec![0, 2], "duplicates claim one each");
+        assert_eq!(resolve(&p, &[Note::new(9, 1, 1, 1)]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn box_and_range_selection() {
+        let p = pat(&[(0, 4, 60), (8, 4, 64), (8, 4, 50), (70, 4, 60)]);
+        assert_eq!(in_box(&p, 9, 2, 66, 58), vec![0, 1], "corners in any order");
+        assert_eq!(in_range(&p, 4, 12), vec![1, 2]);
+        assert_eq!(
+            in_box(&p, 0, 63, 0, 127).len(),
+            3,
+            "a note past the end isn't boxed"
+        );
+    }
+
+    #[test]
+    fn a_group_moves_as_far_as_its_edges_allow() {
+        let mut p = pat(&[(4, 4, 60), (12, 4, 126)]);
+        shift(&mut p, &[0, 1], -8, 5, LaneKind::Poly);
+        assert_eq!(
+            spans(&p),
+            vec![(0, 4, 61), (8, 4, 127)],
+            "clamped to tick 0 and pitch 127"
+        );
+        let mut d = pat(&[(0, 4, 6)]);
+        shift(&mut d, &[0], 0, 3, LaneKind::Drums);
+        assert_eq!(d.notes[0].pitch, 7, "drum rows stop at the open hat");
+    }
+
+    #[test]
+    fn resize_delete_copy() {
+        let mut p = pat(&[(0, 4, 60), (8, 2, 62), (20, 4, 64)]);
+        resize(&mut p, &[0, 1], -3);
+        assert_eq!(spans(&p)[..2], [(0, 1, 60), (8, 1, 62)]);
+        let c = copy(&p, &[1, 2], 8);
+        assert_eq!(
+            c.iter().map(|n| (n.start, n.pitch)).collect::<Vec<_>>(),
+            [(0, 62), (12, 64)]
+        );
+        delete(&mut p, &[0, 2]);
+        assert_eq!(spans(&p), vec![(8, 1, 62)]);
+    }
+
+    #[test]
+    fn paste_places_at_the_cursor_and_respects_the_cap() {
+        let mut p = pat(&[]);
+        let clip = vec![Note::new(0, 4, 60, 100), Note::new(4, 4, 62, 100)];
+        let idx = paste(&mut p, &clip, 16, LaneKind::Poly).unwrap();
+        assert_eq!(
+            values(&p, &idx).iter().map(|n| n.start).collect::<Vec<_>>(),
+            [16, 20]
+        );
+        let mut full = pat(&[]);
+        full.notes = vec![Note::new(0, 1, 1, 1); MAX_NOTES - 1];
+        assert_eq!(
+            paste(&mut full, &clip, 0, LaneKind::Poly),
+            Err(PasteError::TooMany)
+        );
+        assert_eq!(full.notes.len(), MAX_NOTES - 1, "nothing changed");
+        let mut kit = pat(&[]);
+        assert_eq!(
+            paste(&mut kit, &clip, 0, LaneKind::Drums),
+            Err(PasteError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn duplicate_goes_right_after_the_selection() {
+        let mut p = pat(&[(0, 4, 60), (4, 3, 62)]);
+        let idx = duplicate(&mut p, &[0, 1], 4, LaneKind::Poly).unwrap();
+        // span 7 rounds up to 8
+        assert_eq!(
+            values(&p, &idx).iter().map(|n| n.start).collect::<Vec<_>>(),
+            [8, 12]
+        );
+    }
+
+    #[test]
+    fn settling_an_acid_edit_keeps_the_touched_notes() {
+        let mut p = pat(&[(0, 16, 40), (8, 4, 48)]);
+        let idx = settle(&mut p, &[1], LaneKind::Acid);
+        assert_eq!(spans(&p), vec![(0, 8, 40), (8, 4, 48)]);
+        assert_eq!(p.notes[idx[0]].pitch, 48);
+    }
+
+    #[test]
+    fn settling_a_poly_edit_merges_same_pitch_overlaps() {
+        let mut p = pat(&[(0, 4, 60), (2, 4, 60), (2, 4, 64)]);
+        let idx = settle(&mut p, &[1], LaneKind::Poly);
+        assert_eq!(spans(&p), vec![(0, 6, 60), (2, 4, 64)]);
+        assert_eq!(p.notes[idx[0]].start, 0);
+    }
+
+    #[test]
+    fn settling_tracks_touched_indices_through_removals() {
+        let mut p = pat(&[(0, 2, 40), (4, 4, 41), (6, 1, 42), (10, 2, 43)]);
+        // touched 3 and 1: note 1 removes note 2 (starts inside it)
+        let idx = settle(&mut p, &[3, 1], LaneKind::Acid);
+        assert_eq!(idx.len(), 2);
+        let ps: Vec<u8> = idx.iter().map(|&i| p.notes[i].pitch).collect();
+        assert_eq!(ps, [41, 43]);
+        assert_eq!(p.notes.len(), 3);
+        let mut q = pat(&[(0, 4, 60), (9, 2, 62), (2, 4, 60), (3, 2, 62), (20, 1, 60)]);
+        let idx = settle(&mut q, &[2, 3], LaneKind::Poly);
+        let got: Vec<_> = idx
+            .iter()
+            .map(|&i| (q.notes[i].start, q.notes[i].len, q.notes[i].pitch))
+            .collect();
+        assert_eq!(got, [(0, 6, 60), (3, 2, 62)]);
+        assert_eq!(q.notes.len(), 4);
+    }
+}
