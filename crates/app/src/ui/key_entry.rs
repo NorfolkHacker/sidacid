@@ -1,6 +1,10 @@
 //! Keyboard note entry in the dock: the cursor, the tracker key layout and
 //! what each key does to the focused lane's pattern. Pure; the dock feeds
 //! it key presses while it has keyboard focus.
+//!
+//! Back deletes the note covering the cursor; failing that it steps the
+//! cursor back one grid cell and deletes the note covering or starting in
+//! that cell, so Back right after typing undoes the last note.
 
 use super::poly_edit::{Snap, add, make_mono, note_at};
 use acid_engine::params::DRUM_INSTRUMENTS;
@@ -74,8 +78,9 @@ pub fn entry_key(key: Key, mods: Modifiers) -> Option<EntryKey> {
     })
 }
 
-fn step(tick: u16, by: i32, ticks: u16) -> u16 {
-    (tick as i32 + by).rem_euclid(ticks.max(1) as i32) as u16
+/// The start tick of grid cell `cell + by`, wrapping over the pattern's cells.
+fn cell_tick(cell: u16, by: i32, cells: u16) -> u16 {
+    (cell as i32 + by).rem_euclid(cells.max(1) as i32) as u16
 }
 
 pub fn apply_entry(
@@ -88,6 +93,9 @@ pub fn apply_entry(
     let ticks = roll.ticks();
     let s = snap.ticks().max(1);
     let here = snap.floor(cursor.tick.min(ticks - 1));
+    // The cursor moves in whole grid cells; the last one may be partial.
+    let cells = ticks.div_ceil(s);
+    let cell = here / s;
     let top = if kind == LaneKind::Drums {
         DRUM_INSTRUMENTS as u8 - 1
     } else {
@@ -95,11 +103,11 @@ pub fn apply_entry(
     };
     match key {
         EntryKey::Left => {
-            cursor.tick = step(here, -(s as i32), ticks);
+            cursor.tick = cell_tick(cell, -1, cells) * s;
             false
         }
         EntryKey::Right => {
-            cursor.tick = step(here, s as i32, ticks);
+            cursor.tick = cell_tick(cell, 1, cells) * s;
             false
         }
         EntryKey::Up => {
@@ -115,27 +123,28 @@ pub fn apply_entry(
                 LaneKind::Drums => cursor.pitch.min(top),
                 _ => (cursor.pitch / 12 * 12).saturating_add(semis).min(127),
             };
-            let Some(i) = add(roll, here, s, pitch, ENTRY_VEL) else {
+            let Some(i) = add(roll, here, s.min(ticks - here).max(1), pitch, ENTRY_VEL) else {
                 return false;
             };
             if kind == LaneKind::Acid {
                 make_mono(roll, i);
             }
             cursor.pitch = pitch;
-            cursor.tick = step(here, s as i32, ticks);
+            cursor.tick = cell_tick(cell, 1, cells) * s;
             true
         }
         EntryKey::Back => {
             let pitch = cursor.pitch.min(top);
-            let tick = cursor.tick.min(ticks - 1);
-            let hit = note_at(roll, tick, pitch).or_else(|| {
-                roll.notes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| n.pitch == pitch && n.start <= tick && tick - n.start < s)
-                    .max_by_key(|(_, n)| n.start)
-                    .map(|(i, _)| i)
-            });
+            let mut hit = note_at(roll, cursor.tick.min(ticks - 1), pitch);
+            if hit.is_none() {
+                let ct = cell_tick(cell, -1, cells) * s;
+                cursor.tick = ct;
+                hit = note_at(roll, ct, pitch).or_else(|| {
+                    roll.notes
+                        .iter()
+                        .rposition(|n| n.pitch == pitch && n.start >= ct && n.start < ct + s)
+                });
+            }
             match hit {
                 Some(i) => {
                     roll.notes.remove(i);
@@ -276,7 +285,7 @@ mod tests {
         ));
         assert!(roll.notes.is_empty());
         roll.notes.push(Note::new(4, 2, 60, 100));
-        c.tick = 7; // after the note ends, within one snap of its start
+        c.tick = 8; // after the note ends, one cell on
         assert!(apply_entry(
             &mut roll,
             &mut c,
@@ -292,5 +301,175 @@ mod tests {
             LaneKind::Poly,
             Snap::Step
         ));
+    }
+
+    #[test]
+    fn back_after_typing_undoes_the_notes() {
+        let mut roll = empty();
+        let mut c = Cursor { tick: 4, pitch: 48 };
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(0),
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(0),
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        assert_eq!(c.tick, 12);
+        assert!(apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Back,
+            LaneKind::Poly,
+            Snap::Step
+        ));
+        assert!(apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Back,
+            LaneKind::Poly,
+            Snap::Step
+        ));
+        assert!(roll.notes.is_empty());
+        assert_eq!(c.tick, 4);
+    }
+
+    #[test]
+    fn back_on_an_empty_row_steps_back() {
+        let mut roll = empty();
+        let mut c = Cursor { tick: 8, pitch: 60 };
+        assert!(!apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Back,
+            LaneKind::Poly,
+            Snap::Step
+        ));
+        assert_eq!(c.tick, 4);
+    }
+
+    #[test]
+    fn delete_is_back() {
+        assert_eq!(
+            entry_key(Key::Delete, Modifiers::NONE),
+            Some(EntryKey::Back)
+        );
+    }
+
+    #[test]
+    fn right_and_down_move_the_cursor() {
+        let mut roll = empty();
+        let mut c = Cursor { tick: 0, pitch: 1 };
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Right,
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        assert_eq!(c.tick, 4);
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Down,
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Down,
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        assert_eq!(c.pitch, 0);
+    }
+
+    #[test]
+    fn a_high_note_clamps_to_127() {
+        let mut roll = empty();
+        let mut c = Cursor {
+            tick: 0,
+            pitch: 126,
+        };
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(24),
+            LaneKind::Poly,
+            Snap::Step,
+        );
+        assert_eq!(c.pitch, 127);
+        assert_eq!(roll.notes[0].pitch, 127);
+    }
+
+    #[test]
+    fn a_partial_last_cell_does_not_trap_the_cursor() {
+        // 12 ticks with eighth snap (8): cells at 0 and 8.
+        let mut roll = NotePattern {
+            length: 3,
+            ..Default::default()
+        };
+        assert_eq!(roll.ticks(), 12);
+        let mut c = Cursor { tick: 0, pitch: 48 };
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Left,
+            LaneKind::Poly,
+            Snap::Eighth,
+        );
+        assert_eq!(c.tick, 8);
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Left,
+            LaneKind::Poly,
+            Snap::Eighth,
+        );
+        assert_eq!(c.tick, 0);
+        c.tick = 8;
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Right,
+            LaneKind::Poly,
+            Snap::Eighth,
+        );
+        assert_eq!(c.tick, 0);
+        c.tick = 8;
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(0),
+            LaneKind::Poly,
+            Snap::Eighth,
+        );
+        assert_eq!(roll.notes, vec![Note::new(8, 4, 48, 100)]);
+        assert_eq!(c.tick, 0);
+    }
+
+    #[test]
+    fn a_snap_longer_than_the_pattern_writes_the_whole_pattern() {
+        let mut roll = NotePattern {
+            length: 1,
+            ..Default::default()
+        };
+        let mut c = Cursor { tick: 0, pitch: 48 };
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(0),
+            LaneKind::Poly,
+            Snap::Quarter,
+        );
+        assert_eq!(roll.notes, vec![Note::new(0, 4, 48, 100)]);
+        assert_eq!(c.tick, 0);
     }
 }
