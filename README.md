@@ -35,7 +35,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Glide (portamento) set to Off, On or Auto (only between overlapping notes), with its own time. Monophonic, last-note priority.
   - **Arpeggiator** over the held notes: Up, Up-Down or Down, over 1 to 3 octaves, at 1/4, 1/8, 1/8T, 1/16, 1/16T or 1/32. It follows the transport and restarts at each song block.
   - Drift (slow pitch and cutoff wander), a stereo chorus (rate, depth, mix) and Volume.
-  - A 14-patch starter bank (basses, leads, zaps, a noise snare, an arp pluck, a sweep and a pad) plus **Randomise**, a new sound that always plays and keeps volume, arp, drift and chorus. Loading a patch is one undo step. Panel shows an envelope sketch.
+  - A 14-patch starter bank (basses, leads, zaps, a noise snare, an arp pluck, a sweep and a pad) plus **Randomise**, a new sound that always plays and keeps volume, drift and chorus. It keeps the arp too, unless it makes a blip sound: that turns the arp on at 1/16 with a random mode and range. Loading a patch is one undo step. Panel shows an envelope sketch.
 - **Sampler** with 16 slots:
   - **Slice mode** for breaks: chop into 4/8/16/32 equal slices or by detected transients, drag the slice markers, and use choke and tempo lock.
   - **Chromatic mode** for voices and stabs: root key, start/end, and a crossfaded loop.

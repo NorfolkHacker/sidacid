@@ -574,7 +574,8 @@ pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
 /// A new Mono sound from `seed`: one of four characters (bass, lead,
 /// blip, sweep) with knob ranges that suit it, then guards so it always
 /// plays. Volume is not returned (left alone); the arp, drift and chorus
-/// are kept from `current`, except that a blip turns the arp on at 1/16.
+/// are kept from `current`, except that a blip turns the arp on at 1/16
+/// with a random mode and range.
 pub fn randomise_mono(current: impl Fn(MonoParam) -> f32, seed: u64) -> Vec<(MonoParam, f32)> {
     use MonoParam as M;
     let mut rng = Pcg32::seed_from_u64(seed);
