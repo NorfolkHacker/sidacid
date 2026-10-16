@@ -76,12 +76,17 @@ impl ToolKind {
         }
     }
 
-    /// Only for melodic lanes (greyed on drums).
-    pub fn melodic_only(self) -> bool {
-        matches!(
-            self,
-            ToolKind::Invert | ToolKind::Strum | ToolKind::Arpeggiate
-        )
+    /// Why the tool is greyed on a lane of `kind`, or None when it works
+    /// there: Invert needs pitches (not drums), Strum and Arpeggiate need
+    /// chords (a lane playing several notes at once).
+    pub fn unavailable(self, kind: LaneKind) -> Option<&'static str> {
+        match self {
+            ToolKind::Invert if kind == LaneKind::Drums => Some("Melodic lanes only"),
+            ToolKind::Strum | ToolKind::Arpeggiate if kind != LaneKind::Poly => {
+                Some("Only on lanes that play chords")
+            }
+            _ => None,
+        }
     }
 }
 
@@ -98,12 +103,16 @@ pub(crate) struct ToolParams {
 
 impl ToolParams {
     /// `tool` with these settings on `p`'s `scope` (indices): the new
-    /// pattern and the scope notes' (or new notes') indices in it.
+    /// pattern and the scope notes' (or new notes') indices in it. With
+    /// `whole` (nothing was selected) the generators fill the whole
+    /// pattern rather than the scope's span.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         tool: ToolKind,
         p: &NotePattern,
         scope: &[usize],
+        whole: bool,
         kind: LaneKind,
         key: Key,
         snap: Snap,
@@ -114,11 +123,11 @@ impl ToolParams {
             ToolKind::Humanize => humanize(p, scope, &self.humanize, kind),
             ToolKind::Legato => legato(p, scope, kind),
             ToolKind::Reverse => reverse(p, scope, kind),
-            ToolKind::Invert => invert(p, scope, kind),
+            ToolKind::Invert => invert(p, scope, kind, key),
             ToolKind::Strum => strum(p, scope, &self.strum, kind),
-            ToolKind::Randomize => randomize(p, scope, &self.randomize, kind, key, snap),
+            ToolKind::Randomize => randomize(p, scope, whole, &self.randomize, kind, key, snap),
             ToolKind::Arpeggiate => arpeggiate(p, scope, &self.arp, kind),
-            ToolKind::Euclid => euclid(p, scope, &self.euclid, kind, snap),
+            ToolKind::Euclid => euclid(p, scope, whole, &self.euclid, kind, snap),
         }
     }
 }
@@ -131,6 +140,9 @@ pub(crate) struct ToolSession {
     pub origin: NotePattern,
     /// The notes the tool acts on (indices into `origin`).
     pub scope: Vec<usize>,
+    /// Nothing was selected: the scope is every visible note and the
+    /// generators fill the whole pattern.
+    pub whole: bool,
     pub tool: ToolKind,
     pub params: ToolParams,
     /// The pattern as the session last left it (`origin` until a preview
@@ -149,6 +161,11 @@ pub(crate) struct ToolSession {
     /// A preview is committed, and the redo history set aside before the
     /// first one.
     committed: Option<RedoStash>,
+}
+
+/// The tool popup's window (and so its layer) id.
+pub(crate) fn tool_window_id() -> egui::Id {
+    egui::Id::new("note_tool")
 }
 
 /// Seeds the popup hands out: short enough to read and type back.
@@ -172,11 +189,11 @@ impl SidAcidApp {
         let mut picked = None;
         let menu = ui.menu_button("Tools", |ui| {
             for t in ToolKind::ALL {
-                let ok = kind != LaneKind::Drums || !t.melodic_only();
+                let off = t.unavailable(kind);
                 let item = ui
-                    .add_enabled(ok, egui::Button::new(t.label()))
+                    .add_enabled(off.is_none(), egui::Button::new(t.label()))
                     .on_hover_text(t.hint())
-                    .on_disabled_hover_text("Melodic lanes only");
+                    .on_disabled_hover_text(off.unwrap_or_default());
                 rects.push((format!("Tool {}", t.label()), item.rect));
                 if item.clicked() {
                     picked = Some(t);
@@ -215,6 +232,7 @@ impl SidAcidApp {
             return;
         }
         let sel = self.selection(uid);
+        let whole = sel.is_empty();
         let scope = if sel.is_empty() {
             note_tools::default_scope(&origin)
         } else {
@@ -241,6 +259,7 @@ impl SidAcidApp {
             result_sel: scope.clone(),
             origin,
             scope,
+            whole,
             tool,
             params,
             sel_before,
@@ -282,10 +301,13 @@ impl SidAcidApp {
         }
     }
 
-    /// Notes an edit made since the session's own latest one.
+    /// Notes an edit made since the session's own latest preview commit.
+    /// One before the first commit is under every preview step, so it
+    /// doesn't count (the first commit takes its serial).
     fn note_foreign(&mut self) {
         let serial = self.doc.edit_serial();
         if let Some(t) = &mut self.view.tool
+            && t.committed.is_some()
             && t.expect != serial
         {
             t.foreign = true;
@@ -308,7 +330,9 @@ impl SidAcidApp {
             return;
         };
         let kind = self.lane_kind(t.uid);
-        let (result, sel) = t.params.run(t.tool, &t.origin, &t.scope, kind, key, snap);
+        let (result, sel) = t
+            .params
+            .run(t.tool, &t.origin, &t.scope, t.whole, kind, key, snap);
         let (uid, slot) = (t.uid, t.slot);
         if result != t.last {
             let redo = match self.view.tool.as_mut().and_then(|t| t.committed.take()) {
@@ -400,7 +424,7 @@ impl SidAcidApp {
         let mut open = true;
         let (mut apply, mut cancel, mut new_seed) = (false, false, false);
         egui::Window::new(tool.label())
-            .id(egui::Id::new("note_tool"))
+            .id(tool_window_id())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -440,14 +464,15 @@ impl SidAcidApp {
     }
 }
 
-/// A labelled number in `range` with `suffix`.
+/// A labelled number in `range` with `suffix`; returns where its value
+/// sits.
 fn number(
     ui: &mut egui::Ui,
     name: &str,
     v: &mut u8,
     range: std::ops::RangeInclusive<u8>,
     suffix: &str,
-) {
+) -> Rect {
     ui.horizontal(|ui| {
         ui.label(name);
         ui.add(
@@ -455,8 +480,10 @@ fn number(
                 .range(range)
                 .speed(0.2)
                 .suffix(suffix),
-        );
-    });
+        )
+        .rect
+    })
+    .inner
 }
 
 /// A labelled pitch, shown by name.
@@ -518,7 +545,8 @@ fn settings(
         }
         ToolKind::Humanize => {
             let h = &mut p.humanize;
-            number(ui, "Timing ±", &mut h.timing, 0..=8, " ticks");
+            let timing = number(ui, "Timing ±", &mut h.timing, 0..=8, " ticks");
+            rects.push(("Timing".into(), timing));
             number(ui, "Velocity ±", &mut h.vel, 0..=40, "");
             seed(ui, &mut h.seed, new_seed, rects);
         }
@@ -550,13 +578,20 @@ fn settings(
         ToolKind::Randomize => {
             let r = &mut p.randomize;
             number(ui, "Density", &mut r.density, 10..=100, "%");
+            // Drum hits are one cell each: no pitch range, no lengths.
             if !drums {
                 pitch(ui, "Lowest", &mut r.pitch_lo);
                 pitch(ui, "Highest", &mut r.pitch_hi);
+                let unit = format!(" × {}", snap.label());
+                rects.push((
+                    "Shortest".into(),
+                    number(ui, "Shortest", &mut r.len_min, 1..=16, &unit),
+                ));
+                rects.push((
+                    "Longest".into(),
+                    number(ui, "Longest", &mut r.len_max, 1..=16, &unit),
+                ));
             }
-            let unit = format!(" × {}", snap.label());
-            number(ui, "Shortest", &mut r.len_min, 1..=16, &unit);
-            number(ui, "Longest", &mut r.len_max, 1..=16, &unit);
             seed(ui, &mut r.seed, new_seed, rects);
         }
         ToolKind::Arpeggiate => {
@@ -826,6 +861,64 @@ mod tests {
         assert_eq!(app.selection(FM), [0], "the selection it had");
     }
 
+    /// One frame pressing and releasing `k`, leaving the dock's keyboard
+    /// focus as it is.
+    fn tap(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, k: egui::Key) {
+        let up = Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        frame(app, ctx, time, vec![key(k, Modifiers::NONE), up]);
+    }
+
+    #[test]
+    fn esc_cancels_after_a_click_in_the_popup() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
+        let before = app.doc.project.clone();
+        open(&mut app, &ctx, ToolKind::Humanize, 0.0);
+        click(&mut app, &ctx, "New seed", 2.0);
+        assert!(
+            !app.view.dock.keyboard,
+            "the popup click took the dock's keyboard"
+        );
+        assert_ne!(app.doc.project, before, "previewing");
+        tap(&mut app, &ctx, 4.0, egui::Key::Escape);
+        assert!(app.view.tool.is_none(), "cancelled");
+        assert_eq!(app.doc.project, before, "restored");
+        assert_eq!(app.doc.undo_depth(), 0);
+    }
+
+    #[test]
+    fn a_focused_popup_widget_keeps_its_keys() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
+        open(&mut app, &ctx, ToolKind::Humanize, 0.0);
+        // Focus Timing's value, then Tab on to the Apply button.
+        click(&mut app, &ctx, "Timing", 2.0);
+        let apply = rect(&app, "Apply").unwrap();
+        let focused_rect = |ctx: &egui::Context| {
+            ctx.memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .map(|r| r.rect)
+        };
+        let mut time = 3.0;
+        while focused_rect(&ctx) != Some(apply) {
+            assert!(time < 20.0, "Tab never reached Apply");
+            tap(&mut app, &ctx, time, egui::Key::Tab);
+            time += 1.0;
+        }
+        // The popup may overlap the dock, whose keyboard focus then stays:
+        // Enter still goes to the focused button, not the dock.
+        app.view.dock.keyboard = true;
+        tap(&mut app, &ctx, time, egui::Key::Enter);
+        assert!(app.view.tool.is_none(), "Enter pressed Apply");
+        assert_eq!(app.doc.undo_depth(), 1, "applied, not cancelled");
+    }
+
     #[test]
     fn cancel_restores_the_origin_after_another_edit_came_in() {
         use acid_engine::params::{MachineParam, ParamId, SynthParam};
@@ -854,7 +947,7 @@ mod tests {
         app.undo();
         assert_eq!(starts(&app, FM), [3, 11], "which undoes like any other");
 
-        // An edit before the first preview commit counts too.
+        // An edit before the first preview commit is under every preview.
         let mut app = app_with(FM, &[(2, 4, 60)], &[]);
         app.view.tool_params.quantize.strength = 0;
         open(&mut app, &ctx, ToolKind::Quantize, 10.0);
@@ -873,6 +966,8 @@ mod tests {
         click(&mut app, &ctx, "Cancel", 13.0);
         assert_eq!(starts(&app, FM), [2]);
         assert_eq!(app.doc.project.param(cutoff), 0.9, "not dropped");
+        // The preview step was on top of it: dropped, no step to put back.
+        assert_eq!(app.doc.undo_depth(), 1, "only the other edit");
     }
 
     #[test]
@@ -991,6 +1086,49 @@ mod tests {
     }
 
     #[test]
+    fn chord_tools_are_greyed_on_an_acid_lane() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(SYNTH1, &[(0, 4, 36), (4, 4, 40)], &[]);
+        assert_eq!(app.lane_kind(SYNTH1), LaneKind::Acid);
+        let mut time = 0.0;
+        for t in [ToolKind::Strum, ToolKind::Arpeggiate] {
+            open(&mut app, &ctx, t, time);
+            assert!(app.view.tool.is_none(), "{t:?} is off on a mono lane");
+            press(&mut app, &ctx, pos2(640.0, 100.0), time + 3.0);
+            time += 4.0;
+        }
+        open(&mut app, &ctx, ToolKind::Invert, time);
+        assert!(app.view.tool.is_some(), "Invert works on a mono lane");
+    }
+
+    #[test]
+    fn drum_randomize_has_no_length_settings() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(KIT808, &[(0, 4, 0)], &[]);
+        open(&mut app, &ctx, ToolKind::Randomize, 0.0);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(rect(&app, "Shortest").is_none() && rect(&app, "Longest").is_none());
+        let mut app = app_with(FM, &[(0, 4, 60)], &[]);
+        open(&mut app, &ctx, ToolKind::Randomize, 3.0);
+        frame(&mut app, &ctx, 5.0, vec![]);
+        assert!(rect(&app, "Shortest").is_some() && rect(&app, "Longest").is_some());
+    }
+
+    #[test]
+    fn removing_the_tools_machine_cancels_it_first() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+        let before = app.doc.project.clone();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        assert_eq!(starts(&app, FM), [4]);
+        app.remove_machine(FM);
+        assert!(app.view.tool.is_none(), "cancelled");
+        assert_eq!(app.doc.undo_depth(), 1, "only the removal");
+        app.undo();
+        assert_eq!(app.doc.project, before, "back as it was before the tool");
+    }
+
+    #[test]
     fn song_mode_has_no_tools_button() {
         let ctx = egui::Context::default();
         let mut app = app_with(FM, &[(0, 4, 60)], &[]);
@@ -1078,6 +1216,47 @@ mod tests {
     }
 
     #[test]
+    fn generators_with_nothing_selected_fill_the_whole_pattern() {
+        let ctx = egui::Context::default();
+        // One note at 0..4 and nothing selected: E(4,16) spreads its hits
+        // over the whole 16-step pattern, not the note's one step.
+        let mut app = app_with(FM, &[(0, 4, 50)], &[]);
+        app.view.tool_params.euclid = Euclid {
+            hits: 4,
+            steps: 16,
+            rotation: 0,
+            pitch: 60,
+        };
+        app.view.panel(FM).cursor.pitch = 60;
+        open(&mut app, &ctx, ToolKind::Euclid, 0.0);
+        let roll = app.doc.project.roll(FM, 0).unwrap();
+        let hits: Vec<u16> = roll
+            .notes
+            .iter()
+            .filter(|n| n.pitch == 60)
+            .map(|n| n.start)
+            .collect();
+        assert_eq!(hits, [0, 16, 32, 48]);
+        // Randomize at 100 % fills every step of the pattern.
+        let mut app = app_with(FM, &[(0, 4, 50)], &[]);
+        app.view.tool_params.randomize = Randomize {
+            density: 100,
+            len_min: 1,
+            len_max: 1,
+            ..Randomize::default()
+        };
+        open(&mut app, &ctx, ToolKind::Randomize, 10.0);
+        let mut got = starts(&app, FM);
+        got.sort_unstable();
+        assert_eq!(got, (0..16).map(|k| k * 4).collect::<Vec<u16>>());
+        // With a selection they keep to its span.
+        let mut app = app_with(FM, &[(0, 4, 50)], &[0]);
+        app.view.tool_params.randomize.density = 100;
+        open(&mut app, &ctx, ToolKind::Randomize, 20.0);
+        assert_eq!(starts(&app, FM), [0]);
+    }
+
+    #[test]
     fn every_tool_opens_and_draws_its_popup() {
         let ctx = egui::Context::default();
         let mut time = 0.0;
@@ -1090,7 +1269,7 @@ mod tests {
                 let mut app = app_with(uid, &notes, &[]);
                 app.view.tool_params = ToolParams::default();
                 app.view.tool_params.arp.style = ArpStyle::Random;
-                if app.lane_kind(uid) == LaneKind::Drums && t.melodic_only() {
+                if t.unavailable(app.lane_kind(uid)).is_some() {
                     continue;
                 }
                 open(&mut app, &ctx, t, time);

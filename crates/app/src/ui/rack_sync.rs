@@ -55,6 +55,11 @@ impl SidAcidApp {
 
     /// Removes `uid` at once (one undo step) and says how to get it back.
     pub(crate) fn remove_machine(&mut self, uid: MachineUid) {
+        // A note tool open on it is cancelled first, so the removal (and
+        // its undo) holds the pattern as it was.
+        if self.tool_lane().is_some_and(|(u, _)| u == uid) {
+            self.cancel_tool();
+        }
         let Some((name, cmds)) = self.doc.remove_machine(uid) else {
             return;
         };

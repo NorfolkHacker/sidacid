@@ -72,7 +72,25 @@ impl SidAcidApp {
     /// auto-repeats are used up doing nothing until it is pressed afresh,
     /// so holding it doesn't go on to erase notes by keyboard entry.
     fn dock_keys(&mut self, ctx: &egui::Context) {
-        if !self.view.dock.keyboard {
+        // Esc cancels an open note tool wherever the keyboard is (a click
+        // in its popup takes it from the dock); nothing is being typed.
+        if self.view.tool.is_some() {
+            let esc = |e: &egui::Event| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            };
+            if ctx.input(|i| i.events.iter().any(esc)) {
+                self.cancel_tool();
+                ctx.input_mut(|i| i.events.retain(|e| !esc(e)));
+            }
+        }
+        if !self.view.dock.keyboard || self.widget_keyboard(ctx) {
             return;
         }
         let erase = |k: Key| matches!(k, Key::Delete | Key::Backspace);
@@ -134,6 +152,24 @@ impl SidAcidApp {
                 }
             })
         });
+    }
+
+    /// An egui widget outside the dock (or in the note tool's popup,
+    /// which may overlap it) has keyboard focus: its arrow keys, Tab and
+    /// Enter are its own, not the dock's.
+    fn widget_keyboard(&self, ctx: &egui::Context) -> bool {
+        let Some(r) = ctx
+            .memory(|m| m.focused())
+            .and_then(|id| ctx.read_response(id))
+        else {
+            return false;
+        };
+        r.layer_id.id == super::tool_menu::tool_window_id()
+            || self
+                .view
+                .dock
+                .rect
+                .is_some_and(|d| !d.contains_rect(r.rect))
     }
 
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
