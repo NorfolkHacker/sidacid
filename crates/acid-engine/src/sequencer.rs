@@ -15,7 +15,9 @@
 
 use crate::machine::MAX_MACHINES;
 use crate::params::{DRUM_INSTRUMENTS, ParamId};
-use crate::project::{Block, DrumPattern, Note, NotePattern, SynthPattern, TICKS_PER_STEP};
+use crate::project::{
+    Block, DrumPattern, MAX_NOTES, Note, NotePattern, SynthPattern, TICKS_PER_STEP,
+};
 use crate::rack::{CompiledSong, RackMap};
 use crate::song::{
     Bank, Banks, compiled_block_at, compiled_block_end, compiled_song_end, value_at,
@@ -123,6 +125,9 @@ struct Track {
     held: u128,
     /// Chance and conditions: the loop count and the last conditional result.
     trig: TrackTrig,
+    /// Note tracks: the notes that played this pass, one bit per index in
+    /// the pattern's notes (cleared at tick 0 and on a reset).
+    played: [u64; MAX_NOTES / 64],
     /// Notes that played with a ratchet and have sub-hits to come, by
     /// index in the pattern's notes (the first `rat_n`).
     rat: [u16; RATCHETS],
@@ -135,6 +140,20 @@ impl Track {
     fn reset_trig(&mut self) {
         self.trig = TrackTrig::default();
         self.rat_n = 0;
+        self.played = [0; MAX_NOTES / 64];
+    }
+
+    /// Records that note `i` played this pass.
+    fn mark_played(&mut self, i: usize) {
+        if let Some(w) = self.played.get_mut(i / 64) {
+            *w |= 1 << (i % 64);
+        }
+    }
+
+    fn has_played(&self, i: usize) -> bool {
+        self.played
+            .get(i / 64)
+            .is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
 
     /// Follows the sub-hits of note `i` (it just played with a ratchet).
@@ -152,11 +171,14 @@ impl Track {
     }
 
     /// Drops the notes with no sub-hit after tick `p`.
-    fn retire_ratchets(&mut self, notes: &[Note], p: u16) {
+    fn retire_ratchets(&mut self, notes: &[Note], p: u16, ticks: u16) {
         let mut k = 0;
         for j in 0..self.rat_n as usize {
             let i = self.rat[j];
-            if notes.get(i as usize).is_some_and(|n| !ratchet_at(n, p).1) {
+            if notes
+                .get(i as usize)
+                .is_some_and(|n| !ratchet_at(n, p, ticks).1)
+            {
                 self.rat[k] = i;
                 k += 1;
             }
@@ -165,12 +187,13 @@ impl Track {
     }
 }
 
-/// Where tick `p` falls among ratcheted note `n`'s sub-hits: whether one
-/// after its first starts at `p` (sub-hits collapsed onto one tick count
-/// once), and whether none starts after `p`.
-fn ratchet_at(n: &Note, p: u16) -> (bool, bool) {
+/// Where tick `p` falls among ratcheted note `n`'s sub-hits in a pattern
+/// of `ticks`: whether one after its first starts at `p` (sub-hits
+/// collapsed onto one tick count once), and whether none starts after `p`
+/// (sub-hits at or past the pattern's end never play, so don't count).
+fn ratchet_at(n: &Note, p: u16, ticks: u16) -> (bool, bool) {
     let (mut fires, mut last) = (false, n.start);
-    for (s, _) in trig::sub_hits(n) {
+    for (s, _) in trig::sub_hits(n).take_while(|&(s, _)| s < ticks) {
         fires |= s == p && s != n.start;
         last = s;
     }
@@ -850,14 +873,14 @@ impl Sequencer {
             if n.ratchet > 1 {
                 t.push_ratchet(i);
             }
-            hit = Some((n, true, ratchet_at(n, p).1));
+            hit = Some((n, true, ratchet_at(n, p, ticks).1));
         } else if t.rat_n > 0
             && let Some(n) = roll.notes.get(t.rat[0] as usize)
-            && let (true, last) = ratchet_at(n, p)
+            && let (true, last) = ratchet_at(n, p, ticks)
         {
             hit = Some((n, false, last));
         }
-        t.retire_ratchets(&roll.notes, p);
+        t.retire_ratchets(&roll.notes, p, ticks);
         if check_hold && hit.is_none() {
             out.push(SeqEvent::NoteOff { slot: pos });
             t.gate_open = false;
@@ -942,7 +965,7 @@ impl Sequencer {
                     }
                     ok
                 } else {
-                    t.ratcheting(i) && ratchet_at(n, p).0
+                    t.ratcheting(i) && ratchet_at(n, p, ticks).0
                 };
                 if now && (n.pitch as usize) < DRUM_INSTRUMENTS {
                     on |= 1 << n.pitch;
@@ -951,7 +974,7 @@ impl Sequencer {
                     }
                 }
             }
-            t.retire_ratchets(&roll.notes, p);
+            t.retire_ratchets(&roll.notes, p, ticks);
             for inst in 0..DRUM_INSTRUMENTS {
                 if on & (1 << inst) != 0 {
                     out.push(SeqEvent::Drum {
@@ -989,16 +1012,22 @@ impl Sequencer {
             let p = t.pos;
             if p == 0 {
                 release_all(t, m, out);
+                t.played = [0; MAX_NOTES / 64];
             } else {
                 // Release every held pitch no note sounds through this tick:
                 // notes that end here, and notes deleted, moved or re-pitched
                 // by an edit while they rang. A note starting here doesn't
                 // count, so back-to-back notes retrigger (off, then on); nor
-                // does one with a ratchet sub-hit here.
+                // does one with a ratchet sub-hit here, nor one that didn't
+                // play this pass.
                 let mut want = 0u128;
                 for (i, n) in pat.notes.iter().enumerate() {
                     let end = n.start.saturating_add(n.len).min(ticks);
-                    if n.start < p && p < end && !(t.ratcheting(i) && ratchet_at(n, p).0) {
+                    if n.start < p
+                        && p < end
+                        && t.has_played(i)
+                        && !(t.ratcheting(i) && ratchet_at(n, p, ticks).0)
+                    {
                         want |= 1u128 << transposed(n.pitch, t.transpose_add);
                     }
                 }
@@ -1013,12 +1042,15 @@ impl Sequencer {
             for (i, n) in pat.notes.iter().enumerate() {
                 let now = if n.start == p {
                     let ok = trig::plays(n, i, m, seed, fill, &mut t.trig);
-                    if ok && n.ratchet > 1 {
-                        t.push_ratchet(i);
+                    if ok {
+                        t.mark_played(i);
+                        if n.ratchet > 1 {
+                            t.push_ratchet(i);
+                        }
                     }
                     ok
                 } else {
-                    t.ratcheting(i) && ratchet_at(n, p).0
+                    t.ratcheting(i) && ratchet_at(n, p, ticks).0
                 };
                 if now {
                     let pitch = transposed(n.pitch, t.transpose_add);
@@ -1030,7 +1062,7 @@ impl Sequencer {
                     });
                 }
             }
-            t.retire_ratchets(&pat.notes, p);
+            t.retire_ratchets(&pat.notes, p, ticks);
             advance(t, ticks);
         }
     }
@@ -2765,6 +2797,45 @@ mod tests {
                 (12, false, 60)
             ]
         );
+    }
+
+    #[test]
+    fn a_skipped_poly_note_does_not_hold_a_played_pitch() {
+        // A plays 0-4; B on the same pitch spans 2-10 but never plays.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 4, 60));
+        f.notes[0][0].notes.push(Note {
+            chance: 0,
+            ..note(2, 8, 60)
+        });
+        let mut s = new_seq();
+        s.play();
+        assert_eq!(
+            fm(&run_ticks(&f, &mut s, 16)),
+            [(0, true, 60), (4, false, 60)]
+        );
+    }
+
+    #[test]
+    fn a_sliding_ratchet_cut_by_the_loop_still_slides() {
+        // Two steps (8 ticks): a sliding x3 note at 4-16 keeps only its
+        // first hit, which slides into the note at tick 0 as an
+        // unratcheted sliding note does.
+        let run = |ratchet: u8| {
+            let mut f = Fixture::new();
+            let roll = &mut f.synths[0][0].roll;
+            roll.length = 2;
+            roll.notes.push(note(0, 4, 50));
+            roll.notes.push(Note {
+                slide: true,
+                ..ratcheted(4, 12, 48, ratchet)
+            });
+            let mut s = new_seq();
+            s.play();
+            acid(&run_ticks(&f, &mut s, 12))
+        };
+        assert_eq!(run(1), [(0, 'N'), (2, 'O'), (4, 'N'), (8, 'L'), (10, 'O')]);
+        assert_eq!(run(3), run(1));
     }
 
     #[test]
