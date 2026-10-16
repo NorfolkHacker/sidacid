@@ -244,7 +244,13 @@ impl SidAcidApp {
             return;
         }
         let mut s = self.doc.project.song.clone();
+        let room =
+            self.with_lens(|lens| (MAX_SONG_STEPS as u32).saturating_sub(song::song_end(&s, lens)));
         self.with_lens(|lens| song::insert_time(&mut s, a as u32, (b - a) as u32, lens));
+        if s != self.doc.project.song && room < (b - a) as u32 {
+            *self.status_line_mut() =
+                Some("Only part of the time fit before the song's limit".into());
+        }
         if s == self.doc.project.song {
             self.view.message = Some("There is no room on the song for more time".into());
             return;
@@ -311,6 +317,10 @@ impl SidAcidApp {
                 lens,
             )
         });
+        if end > limit && b.len.is_none_or(|l| b.start + l as u32 != limit) {
+            *self.status_line_mut() =
+                Some("The block was shortened to fit before the next one".into());
+        }
         self.edit_single_block(|b| {
             b.pattern = PatternRef(slot);
             if end > limit {
@@ -543,8 +553,10 @@ impl SidAcidApp {
             self.clear_block_selections();
             self.select_pasted(pasted);
             let len = (hi - lo) as i64;
-            let start = d.min(u16::MAX as i64) as u16;
-            self.view.dock.range = Some((start, (d + len).min(u16::MAX as i64) as u16));
+            // The copies may sit before the range's start; the new range
+            // stays on the song.
+            let start = d.clamp(0, MAX_SONG_STEPS as i64 - len);
+            self.view.dock.range = Some((start as u16, (start + len) as u16));
         } else {
             let Some(uid) = self.focused() else {
                 return;

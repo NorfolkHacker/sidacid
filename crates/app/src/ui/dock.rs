@@ -2323,6 +2323,62 @@ mod tests {
     }
 
     #[test]
+    fn a_pattern_cut_to_fit_says_so_and_one_that_fits_does_not() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_app();
+        app.doc.project.roll_mut(SYNTH1, 5).unwrap().length = 32;
+        pick(&mut app, SYNTH1, &[16]);
+        app.set_block_pattern(5);
+        assert_eq!(synth1(&app)[1], (16, 5, None), "room for it whole");
+        assert_eq!(app.view.status_line, None);
+        pick(&mut app, SYNTH1, &[0]);
+        app.set_block_pattern(5);
+        assert_eq!(synth1(&app)[0], (0, 5, Some(16)));
+        assert_eq!(
+            app.view.status_line.as_deref(),
+            Some("The block was shortened to fit before the next one")
+        );
+    }
+
+    #[test]
+    fn insert_time_near_the_limit_says_only_part_fit() {
+        use crate::test_rack::SYNTH1;
+        use acid_engine::project::{Block, PatternRef};
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        *app.doc.project.song.lane_mut(SYNTH1) = vec![Block::new(max - 32, PatternRef(0))];
+        app.view.dock.range = Some((0, 100));
+        click_tool(&mut app, &ctx, "Insert time", 0.0);
+        assert_eq!(synth1(&app), [(max - 16, 0, None)], "only the room left");
+        assert!(app.view.status_line.as_deref().unwrap().contains("part"));
+        // A whole insert is silent.
+        let mut app = song_app();
+        app.view.dock.range = Some((16, 32));
+        click_tool(&mut app, &ctx, "Insert time", 10.0);
+        assert_eq!(app.view.status_line, None);
+    }
+
+    #[test]
+    fn a_range_duplicate_that_fits_only_earlier_keeps_the_range_on_the_song() {
+        use crate::test_rack::SYNTH1;
+        use acid_engine::project::{Block, PatternRef};
+        use egui::{Key, Modifiers};
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let mut app = song_keys_app();
+        let mut a = Block::new(16, PatternRef(1));
+        a.len = Some(32);
+        let mut z = Block::new(64, PatternRef(2));
+        z.len = Some((max - 64) as u16);
+        *app.doc.project.song.lane_mut(SYNTH1) = vec![a, Block::new(48, PatternRef(0)), z];
+        // The range holds only the block at 48 (1 bar after its start).
+        app.view.dock.range = Some((32, 64));
+        key_with(&mut app, Key::D, Modifiers::COMMAND);
+        assert_eq!(synth1(&app)[0], (0, 0, None), "the copy fits only at 0");
+        assert_eq!(app.view.dock.range, Some((0, 32)), "no wrap below zero");
+    }
+
+    #[test]
     fn arrows_move_the_block_selection_by_bars_or_alt_steps() {
         use crate::test_rack::SYNTH1;
         use egui::{Key, Modifiers};
