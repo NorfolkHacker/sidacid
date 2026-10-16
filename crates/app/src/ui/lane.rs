@@ -74,6 +74,8 @@ struct Frame {
     changed: bool,
     finished: bool,
     dropped: Option<usize>,
+    /// The pointer went down in an expression strip.
+    pressed: bool,
 }
 
 impl SidAcidApp {
@@ -248,6 +250,10 @@ impl SidAcidApp {
             let pitch = self.roll_start_pitch(uid).min(127);
             let y = ((127 - pitch) as f32 * ROW_H - height / 2.0).clamp(0.0, max_scroll_y);
             self.view.panel(uid).lane_scroll_y = Some(y);
+        }
+        // A lane made taller has a smaller maximum.
+        if let Some(y) = &mut self.view.panel(uid).lane_scroll_y {
+            *y = y.clamp(0.0, max_scroll_y);
         }
         let mut frame = Frame::default();
         let mut key_down: Option<u8> = None;
@@ -590,6 +596,11 @@ impl SidAcidApp {
                 }
             }
         }
+        if frame.pressed {
+            // As on the grid: a press in a strip focuses the lane.
+            self.view.focus = Some(uid);
+            self.view.dock.keyboard = true;
+        }
         self.lane_handle(ui, uid, height, width);
 
         self.audition(uid, key_down);
@@ -647,7 +658,15 @@ impl SidAcidApp {
         frame: &mut Frame,
     ) {
         let snap = self.view.dock.snap;
-        let (lane, lresp) = strip_row(ui, geom, width, VEL_H, Sense::click_and_drag(), "Vel");
+        let (lane, lresp) = strip_row(
+            ui,
+            geom,
+            width,
+            VEL_H,
+            Sense::click_and_drag(),
+            "Vel",
+            frame,
+        );
         let painter = ui.painter_at(lane);
         for note in pattern.notes.iter().filter(|n| n.start < geom.ticks) {
             let x = geom.x_of(note.start);
@@ -808,7 +827,8 @@ impl SidAcidApp {
 
 /// Allocates one expression-strip row `width` wide and `h` tall under
 /// the grid, with its label in the key strip. Returns the row's grid part
-/// (right of the key strip) and its response.
+/// (right of the key strip) and its response. A press on the row is
+/// noted in `frame`.
 fn strip_row(
     ui: &mut egui::Ui,
     geom: &LaneGeom,
@@ -816,8 +836,10 @@ fn strip_row(
     h: f32,
     sense: Sense,
     label: &str,
+    frame: &mut Frame,
 ) -> (Rect, egui::Response) {
     let (row, resp) = ui.allocate_exact_size(vec2(width, h), sense);
+    frame.pressed |= resp.is_pointer_button_down_on() || resp.clicked();
     let grid = Rect::from_min_max(pos2(geom.left, row.top()), row.max);
     let painter = ui.painter_at(row);
     painter.rect_filled(grid, 0.0, theme::GRID_DARK);
@@ -842,7 +864,7 @@ fn flag_strip(
     flag: Flag,
     frame: &mut Frame,
 ) {
-    let (lane, lresp) = strip_row(ui, geom, width, FLAG_H, Sense::click(), label);
+    let (lane, lresp) = strip_row(ui, geom, width, FLAG_H, Sense::click(), label, frame);
     let painter = ui.painter_at(lane);
     for note in pattern.notes.iter().filter(|n| n.start < geom.ticks) {
         let (on, tick, colour) = match flag {
@@ -885,7 +907,7 @@ fn drum_accent_strip(
     pattern: &mut NotePattern,
     frame: &mut Frame,
 ) {
-    let (lane, lresp) = strip_row(ui, geom, width, FLAG_H, Sense::click(), "Acc");
+    let (lane, lresp) = strip_row(ui, geom, width, FLAG_H, Sense::click(), "Acc", frame);
     let painter = ui.painter_at(lane);
     let cell_w = snap.ticks() as f32 * geom.tick_w;
     for note in pattern
@@ -930,6 +952,17 @@ mod tests {
         time: f64,
         events: Vec<egui::Event>,
     ) -> egui::Pos2 {
+        lane_frame(app, ctx, KIT808, time, events)
+    }
+
+    /// Like `kit_frame`, for machine `uid`'s lane.
+    fn lane_frame(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        uid: MachineUid,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::Pos2 {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
             time: Some(time),
@@ -940,10 +973,58 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 origin = ui.cursor().min;
-                app.lane(ui, KIT808, 800.0);
+                app.lane(ui, uid, 800.0);
             });
         });
         origin
+    }
+
+    #[test]
+    fn a_press_in_any_strip_focuses_the_lane() {
+        // Empty patterns, so no strip click edits anything.
+        for (uid, strip_h) in [(KIT808, FLAG_H), (SYNTH1, FLAG_H), (FM, VEL_H)] {
+            let mut doc = Document::new(Project::default());
+            doc.project.roll_mut(uid, 0).unwrap().notes.clear();
+            let mut app = SidAcidApp::headless(doc);
+            let other = if uid == FM { KIT808 } else { FM };
+            app.view.focus = Some(other);
+            let ctx = egui::Context::default();
+            let origin = lane_frame(&mut app, &ctx, uid, 0.0, vec![]);
+            let height = LaneView::default().clamped_height() as f32;
+            let at = pos2(
+                origin.x + app.lane_key_w() + 30.0,
+                origin.y + HEADER_H + height + strip_h / 2.0,
+            );
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            lane_frame(
+                &mut app,
+                &ctx,
+                uid,
+                1.0,
+                vec![egui::Event::PointerMoved(at)],
+            );
+            lane_frame(&mut app, &ctx, uid, 1.05, vec![button(true)]);
+            assert_eq!(app.view.focus, Some(uid), "{uid:?} focused on the press");
+            assert!(app.view.dock.keyboard, "{uid:?} takes the keyboard");
+            lane_frame(&mut app, &ctx, uid, 1.1, vec![button(false)]);
+            assert!(!app.doc.is_dirty(), "{uid:?}: nothing edited");
+        }
+    }
+
+    #[test]
+    fn a_taller_lane_clamps_its_pitch_scroll() {
+        let mut app = fm_app();
+        app.doc.project.machine_mut(FM).unwrap().lane.height = 480;
+        app.view.panel(FM).lane_scroll_y = Some(5000.0);
+        let ctx = egui::Context::default();
+        lane_frame(&mut app, &ctx, FM, 0.0, vec![]);
+        let max = PITCH_ROWS as f32 * ROW_H - 480.0;
+        assert_eq!(app.view.panel(FM).lane_scroll_y, Some(max));
     }
 
     #[test]
