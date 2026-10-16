@@ -577,7 +577,7 @@ impl SidAcidApp {
     /// has a selection), else as keyboard entry. True when the key was
     /// used, even if it only moved the cursor.
     pub(crate) fn dock_key(&mut self, key: egui::Key, mods: egui::Modifiers) -> bool {
-        use super::key_entry::{apply_entry, entry_key};
+        use super::key_entry::{EntryKey, apply_entry, entry_key};
         if !self.view.dock.keyboard {
             return false;
         }
@@ -609,7 +609,25 @@ impl SidAcidApp {
         let snap = self.view.dock.snap;
         let mut cursor = self.view.panel(uid).cursor;
         let scale = self.snap_key(kind);
+        let from = cursor.pitch;
         let changed = apply_entry(&mut pattern, &mut cursor, entry, kind, snap, scale);
+        // On a folded lane up/down go to the next shown row.
+        let up = match entry {
+            EntryKey::Up => Some(true),
+            EntryKey::Down => Some(false),
+            _ => None,
+        };
+        let fold = self
+            .doc
+            .project
+            .machine(uid)
+            .is_some_and(|m| m.lane.fold && !m.lane.collapsed);
+        if let Some(up) = up
+            && fold
+            && let super::lane_geom::Rows::Folded(rows) = self.lane_rows(uid, true)
+        {
+            cursor.pitch = rows.step(from, up);
+        }
         self.view.panel(uid).cursor = cursor;
         if changed {
             self.commit_poly(uid, slot, Some(pattern), false, true);

@@ -1,10 +1,12 @@
 //! Pure lane geometry for the dock: ticks to x with the dock's shared
 //! horizontal scroll, rows to y with the lane's own pitch scroll. Melodic
 //! lanes have one row per MIDI pitch (127 on top); drum lanes one row per
-//! instrument (the kick at the bottom).
+//! instrument (the kick at the bottom). A folded melodic lane has one row
+//! per pitch in its `FoldRows` table, highest on top.
 
 use acid_engine::params::DRUM_INSTRUMENTS;
-use acid_engine::project::{Note, TICKS_PER_STEP};
+use acid_engine::project::{Note, NotePattern, TICKS_PER_STEP};
+use acid_engine::scale::Key;
 use eframe::egui::{Rect, pos2};
 
 /// Width of one 1/16 step at zoom 1.
@@ -20,6 +22,104 @@ pub fn tick_w(zoom: f32) -> f32 {
 pub enum Rows {
     Pitches,
     Drums,
+    /// A folded melodic lane: only the pitches in the table.
+    Folded(FoldRows),
+}
+
+impl Rows {
+    pub fn count(&self) -> usize {
+        match self {
+            Rows::Pitches => 128,
+            Rows::Drums => DRUM_INSTRUMENTS,
+            Rows::Folded(f) => f.len(),
+        }
+    }
+
+    pub fn row_of(&self, pitch: u8) -> Option<usize> {
+        if let Rows::Folded(f) = self {
+            return f.row_of(pitch);
+        }
+        let n = self.count();
+        ((pitch as usize) < n).then(|| n - 1 - pitch as usize)
+    }
+
+    pub fn pitch_of_row(&self, row: usize) -> Option<u8> {
+        if let Rows::Folded(f) = self {
+            return f.pitches().get(row).copied();
+        }
+        let n = self.count();
+        (row < n).then(|| (n - 1 - row) as u8)
+    }
+
+    /// The row `pitch` is on, or for a pitch with no row (folded away) the
+    /// row it would sit on: the first one below it. Clamped to the rows.
+    pub fn row_near(&self, pitch: u8) -> usize {
+        let n = self.count();
+        match self {
+            Rows::Folded(f) => f.pitches().iter().take_while(|&&q| q > pitch).count(),
+            _ => n.saturating_sub(1 + pitch as usize),
+        }
+        .min(n.saturating_sub(1))
+    }
+}
+
+/// The rows of a folded lane: pitches high to low, at most all 128.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldRows {
+    pitches: [u8; 128],
+    count: u8,
+}
+
+impl FoldRows {
+    /// The pitches on `key`'s scale plus every pitch holding a note in
+    /// `pattern`, so every note has a row. Chromatic keeps all 128.
+    pub fn new(key: Key, pattern: &NotePattern) -> Self {
+        let mut held = [false; 128];
+        for n in &pattern.notes {
+            if let Some(h) = held.get_mut(n.pitch as usize) {
+                *h = true;
+            }
+        }
+        let mut rows = FoldRows {
+            pitches: [0; 128],
+            count: 0,
+        };
+        for pitch in (0..128u8).rev() {
+            if key.contains(pitch) || held[pitch as usize] {
+                rows.pitches[rows.count as usize] = pitch;
+                rows.count += 1;
+            }
+        }
+        rows
+    }
+
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// The shown pitches, highest first.
+    pub fn pitches(&self) -> &[u8] {
+        &self.pitches[..self.len()]
+    }
+
+    pub fn row_of(&self, pitch: u8) -> Option<usize> {
+        // High to low: search on the reversed order.
+        self.pitches().binary_search_by(|q| pitch.cmp(q)).ok()
+    }
+
+    /// The next shown pitch above (`up`) or below `pitch`; past the last
+    /// row it stays on that row, and with no rows `pitch` is kept.
+    pub fn step(&self, pitch: u8, up: bool) -> u8 {
+        let p = self.pitches();
+        let (Some(&top), Some(&bottom)) = (p.first(), p.last()) else {
+            return pitch;
+        };
+        if up {
+            p.iter().rev().find(|&&q| q > pitch).copied().unwrap_or(top)
+        } else {
+            p.iter().find(|&&q| q < pitch).copied().unwrap_or(bottom)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,20 +136,15 @@ pub struct LaneGeom {
 
 impl LaneGeom {
     pub fn row_count(&self) -> usize {
-        match self.rows {
-            Rows::Pitches => 128,
-            Rows::Drums => DRUM_INSTRUMENTS,
-        }
+        self.rows.count()
     }
 
     pub fn row_of(&self, pitch: u8) -> Option<usize> {
-        let n = self.row_count();
-        ((pitch as usize) < n).then(|| n - 1 - pitch as usize)
+        self.rows.row_of(pitch)
     }
 
     pub fn pitch_of_row(&self, row: usize) -> Option<u8> {
-        let n = self.row_count();
-        (row < n).then(|| (n - 1 - row) as u8)
+        self.rows.pitch_of_row(row)
     }
 
     pub fn x_of(&self, tick: u16) -> f32 {
@@ -86,7 +181,7 @@ impl LaneGeom {
 
     pub fn pitch_at_clamped(&self, y: f32) -> u8 {
         let r = ((y.max(self.top) - self.top + self.scroll_y) / self.row_h).floor();
-        let r = (r.max(0.0) as usize).min(self.row_count() - 1);
+        let r = (r.max(0.0) as usize).min(self.row_count().saturating_sub(1));
         self.pitch_of_row(r).unwrap_or(0)
     }
 
@@ -168,6 +263,72 @@ mod tests {
         assert_eq!(g.row_of(7), Some(0));
         assert_eq!(g.row_of(8), None, "not an instrument");
         assert_eq!(g.pitch_at(50.0 + 9.0 * 7.5), Some(0));
+    }
+
+    fn c_major_with(notes: &[u8]) -> FoldRows {
+        use acid_engine::scale::Scale;
+        let key = Key {
+            root: 0,
+            scale: Scale::Major,
+            snap: false,
+        };
+        let p = NotePattern {
+            notes: notes.iter().map(|&q| Note::new(0, 4, q, 100)).collect(),
+            ..NotePattern::default()
+        };
+        FoldRows::new(key, &p)
+    }
+
+    #[test]
+    fn fold_rows_keep_the_scale_and_every_held_pitch() {
+        let f = c_major_with(&[61]);
+        // 75 pitches of C major in 0..128, plus the held C#4.
+        assert_eq!(f.len(), 76);
+        assert_eq!(f.pitches()[0], 127, "G9 on top");
+        assert_eq!(*f.pitches().last().unwrap(), 0);
+        assert!(f.pitches().windows(2).all(|w| w[0] > w[1]), "high to low");
+        assert!(f.row_of(61).is_some(), "the off-scale note keeps its row");
+        assert_eq!(f.row_of(63), None, "D# is folded away");
+        let all = FoldRows::new(Key::default(), &NotePattern::default());
+        assert_eq!(all.len(), 128, "Chromatic folds nothing");
+    }
+
+    #[test]
+    fn folded_rows_round_trip_with_pitches() {
+        let g = LaneGeom {
+            rows: Rows::Folded(c_major_with(&[61])),
+            ..melodic()
+        };
+        assert_eq!(g.row_count(), 76);
+        for row in 0..g.row_count() {
+            let p = g.pitch_of_row(row).unwrap();
+            assert_eq!(g.row_of(p), Some(row));
+            let y = g.row_top(row) + 4.0;
+            assert_eq!(g.pitch_at(y), Some(p));
+        }
+        assert_eq!(g.pitch_of_row(76), None);
+        assert_eq!(g.pitch_at_clamped(9999.0), 0);
+        assert_eq!(g.pitch_at_clamped(0.0), 127);
+        let r = g.note_rect(&Note::new(0, 4, 61, 100));
+        assert_eq!(r.top(), g.row_top(g.row_of(61).unwrap()));
+        // C5 (72), B4, A4, G4, F4, E4, D4, C#4, C4: C#4 is row 7 below C5.
+        assert_eq!(g.row_of(61), Some(g.row_of(72).unwrap() + 7));
+    }
+
+    #[test]
+    fn fold_steps_between_shown_rows() {
+        let f = c_major_with(&[61]);
+        assert_eq!(f.step(60, true), 61, "onto the held C#");
+        assert_eq!(f.step(61, true), 62);
+        assert_eq!(f.step(64, true), 65, "E to F");
+        assert_eq!(f.step(63, true), 64, "from a hidden pitch");
+        assert_eq!(f.step(63, false), 62);
+        assert_eq!(f.step(127, true), 127, "stays on the top row");
+        assert_eq!(f.step(0, false), 0);
+        let rows = Rows::Folded(f);
+        assert_eq!(rows.row_near(63), rows.row_near(62), "D#: the row below");
+        assert_eq!(Rows::Pitches.row_near(60), 67);
+        assert_eq!(Rows::Drums.row_near(9), 0, "clamped");
     }
 
     #[test]

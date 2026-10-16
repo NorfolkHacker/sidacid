@@ -16,10 +16,11 @@
 //! key strip of an FM, Mono or sampler lane auditions the pitch.
 //! Melodic lanes show the project key (rows off its scale darker, root
 //! rows marked and named) and, with snap to scale on, put clicked and
-//! dragged notes on it; drum lanes ignore the key.
+//! dragged notes on it; drum lanes ignore the key. A folded melodic lane
+//! shows only the rows on the key's scale plus those holding notes.
 
 use super::key_entry::LaneKind;
-use super::lane_geom::{LaneGeom, Rows, ZOOMS, tick_w};
+use super::lane_geom::{FoldRows, LaneGeom, Rows, ZOOMS, tick_w};
 use super::note_ops;
 use super::poly_edit::Snap;
 use super::poly_edit::{
@@ -58,8 +59,6 @@ pub(crate) const FLAG_H: f32 = 12.0;
 pub(crate) const HEADER_H: f32 = 20.0;
 /// Height of the drag handle under a lane.
 const HANDLE_H: f32 = 4.0;
-/// Every MIDI pitch.
-const PITCH_ROWS: usize = 128;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
 const FM_START_PITCH: u8 = 48;
@@ -123,6 +122,43 @@ impl SidAcidApp {
         }
     }
 
+    /// The rows of `uid`'s lane: one per instrument on drums, else one per
+    /// pitch, or with `fold` only those of `FoldRows` for the selected
+    /// pattern and the project key.
+    pub(crate) fn lane_rows(&self, uid: MachineUid, fold: bool) -> Rows {
+        if self.lane_kind(uid) == LaneKind::Drums {
+            return Rows::Drums;
+        }
+        let pattern = self.doc.project.roll(uid, self.selected(uid));
+        match pattern {
+            Some(p) if fold => Rows::Folded(FoldRows::new(self.doc.project.key, p)),
+            _ => Rows::Pitches,
+        }
+    }
+
+    /// Turns `uid`'s fold over, keeping the pitch in the middle of its view
+    /// in the middle.
+    fn toggle_fold(&mut self, uid: MachineUid, view: LaneView) {
+        let height = view.clamped_height() as f32;
+        let (old, new) = (
+            self.lane_rows(uid, view.fold),
+            self.lane_rows(uid, !view.fold),
+        );
+        if let Some(y) = self.view.panel(uid).lane_scroll_y {
+            let middle = ((y + height / 2.0) / ROW_H).floor().max(0.0) as usize;
+            let pitch = old
+                .pitch_of_row(middle.min(old.count().saturating_sub(1)))
+                .unwrap_or(0);
+            let row = new.row_near(pitch);
+            let max = (new.count() as f32 * ROW_H - height).max(0.0);
+            let y = (row as f32 * ROW_H + ROW_H / 2.0 - height / 2.0).clamp(0.0, max);
+            self.view.panel(uid).lane_scroll_y = Some(y);
+        }
+        if let Some(m) = self.doc.project.machine_mut(uid) {
+            m.lane.fold = !view.fold;
+        }
+    }
+
     /// The key-strip width every lane uses, so the grids line up: wide
     /// enough for sampler row labels while any sampler is in the rack.
     pub(crate) fn lane_key_w(&self) -> f32 {
@@ -178,8 +214,9 @@ impl SidAcidApp {
     }
 
     /// The lane's header row: collapse arrow, name, pattern, and (with
-    /// `strip_toggle`) the strip toggle. The toggles change the machine's
-    /// `LaneView` directly (not undoable).
+    /// `strip_toggle`, in Pattern mode) the strip toggle and on melodic
+    /// lanes the fold toggle. The toggles change the machine's `LaneView`
+    /// directly (not undoable).
     pub(super) fn lane_header(
         &mut self,
         ui: &mut egui::Ui,
@@ -226,14 +263,29 @@ impl SidAcidApp {
             .clicked();
         row.label(RichText::new(self.panel_title(uid)).strong());
         row.label(RichText::new(PatternRef(slot).label()).monospace().weak());
-        let strip = strip_toggle
-            && row
-                .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.selectable_label(view.strip, RichText::new("Strip").small())
-                        .on_hover_text("Show the velocity / accent strip")
-                        .clicked()
-                })
-                .inner;
+        let melodic = self.lane_kind(uid) != LaneKind::Drums;
+        let (strip, fold) = if strip_toggle {
+            row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let strip = ui
+                    .selectable_label(view.strip, RichText::new("Strip").small())
+                    .on_hover_text("Show the velocity / accent strip")
+                    .clicked();
+                let fold = melodic
+                    && ui
+                        .selectable_label(view.fold, RichText::new("Fold").small())
+                        .on_hover_text(
+                            "Show only the rows on the key's scale, and rows holding notes",
+                        )
+                        .clicked();
+                (strip, fold)
+            })
+            .inner
+        } else {
+            (false, false)
+        };
+        if fold {
+            self.toggle_fold(uid, view);
+        }
         if let Some(m) = self.doc.project.machine_mut(uid) {
             m.lane.collapsed ^= collapse;
             m.lane.strip ^= strip;
@@ -260,16 +312,17 @@ impl SidAcidApp {
         let tw = tick_w(ZOOMS[self.view.dock.zoom.min(ZOOMS.len() - 1)]);
         let playhead = self.playhead(uid, slot);
         // Drum rows shrink to fit a short lane, so all 8 always show.
-        let (rows, row_h) = if drums {
-            let fit = height / DRUM_INSTRUMENTS as f32;
-            (Rows::Drums, DRUM_ROW_H.min(fit))
+        let rows = self.lane_rows(uid, view.fold);
+        let row_h = if drums {
+            DRUM_ROW_H.min(height / DRUM_INSTRUMENTS as f32)
         } else {
-            (Rows::Pitches, ROW_H)
+            ROW_H
         };
-        let max_scroll_y = (PITCH_ROWS as f32 * ROW_H - height).max(0.0);
+        let max_scroll_y = (rows.count() as f32 * ROW_H - height).max(0.0);
         if !drums && self.view.panel(uid).lane_scroll_y.is_none() {
             let pitch = self.roll_start_pitch(uid).min(127);
-            let y = ((127 - pitch) as f32 * ROW_H - height / 2.0).clamp(0.0, max_scroll_y);
+            let row = rows.row_near(pitch);
+            let y = (row as f32 * ROW_H - height / 2.0).clamp(0.0, max_scroll_y);
             self.view.panel(uid).lane_scroll_y = Some(y);
         }
         // A lane made taller has a smaller maximum.
@@ -1743,7 +1796,7 @@ mod tests {
         app.view.panel(FM).lane_scroll_y = Some(5000.0);
         let ctx = egui::Context::default();
         lane_frame(&mut app, &ctx, FM, 0.0, vec![]);
-        let max = PITCH_ROWS as f32 * ROW_H - 480.0;
+        let max = Rows::Pitches.count() as f32 * ROW_H - 480.0;
         assert_eq!(app.view.panel(FM).lane_scroll_y, Some(max));
     }
 
@@ -2164,5 +2217,157 @@ mod tests {
             before,
             "one undo"
         );
+    }
+
+    /// `uid` folded to C major (snap off), scrolled so folded row `top`
+    /// is the top row.
+    fn fold_c_major(app: &mut SidAcidApp, uid: MachineUid, top: usize) {
+        app.doc.project.key = acid_engine::scale::Key {
+            root: 0,
+            scale: Scale::Major,
+            snap: false,
+        };
+        app.doc.project.machine_mut(uid).unwrap().lane.fold = true;
+        app.view.panel(uid).lane_scroll_y = Some(top as f32 * ROW_H);
+    }
+
+    /// Screen position of `tick` in `pitch`'s row of FM's folded lane.
+    fn folded_at(app: &mut SidAcidApp, m: &Mouse, tick: f32, pitch: u8) -> egui::Pos2 {
+        let key = app.doc.project.key;
+        let rows = FoldRows::new(key, app.doc.project.roll(FM, 0).unwrap());
+        let row = rows.row_of(pitch).expect("a shown row");
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let scroll = app.view.panel(FM).lane_scroll_y.unwrap_or(0.0);
+        pos2(
+            m.origin.x + app.lane_key_w() + tick * tw - app.view.dock.scroll_x,
+            m.origin.y + HEADER_H + row as f32 * ROW_H - scroll + ROW_H / 2.0,
+        )
+    }
+
+    /// Where `text` was painted in one frame of `uid`'s lane.
+    fn text_at(app: &mut SidAcidApp, uid: MachineUid, text: &str) -> Option<egui::Pos2> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.lane(ui, uid, 800.0));
+        });
+        out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == text => {
+                Some(t.pos + t.galley.rect.center().to_vec2())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn clicking_a_folded_row_adds_its_pitch() {
+        let mut app = app_with(FM, &[(0, 4, 61)]);
+        fold_c_major(&mut app, FM, 30);
+        let mut m = Mouse::new(&mut app, FM, 0);
+        fold_c_major(&mut app, FM, 30);
+        // The row under E4 is D4: D#4 is folded away.
+        let e = folded_at(&mut app, &m, 9.5, 64);
+        m.click(&mut app, e, NONE);
+        let below = e + vec2(4.0 * tick_w(ZOOMS[app.view.dock.zoom]) * 2.0, ROW_H);
+        m.click(&mut app, below, NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 61), (8, 4, 64), (16, 4, 62)]);
+        // The held off-scale note keeps its row and can be selected.
+        let held = folded_at(&mut app, &m, 1.5, 61);
+        m.click(&mut app, held, NONE);
+        assert_eq!(app.selection(FM), [0]);
+    }
+
+    #[test]
+    fn a_folded_lane_draws_only_its_rows_and_clamps_its_scroll() {
+        let mut app = app_with(FM, &[(0, 4, 61)]);
+        fold_c_major(&mut app, FM, 0);
+        app.view.panel(FM).lane_scroll_y = Some(5000.0);
+        let (texts, _) = painted(&mut app, FM);
+        let height = LaneView::DEFAULT_HEIGHT as f32;
+        assert_eq!(
+            app.view.panel(FM).lane_scroll_y,
+            Some(76.0 * ROW_H - height),
+            "75 C major rows plus the held C#"
+        );
+        assert!(texts.iter().any(|t| t == "C0"), "the bottom rows in view");
+        assert!(texts.iter().any(|t| t == "Fold"));
+    }
+
+    #[test]
+    fn fold_is_ignored_for_drums_and_collapsed_lanes() {
+        let mut app = app_with(KIT808, &[]);
+        fold_c_major(&mut app, KIT808, 0);
+        assert_eq!(text_at(&mut app, KIT808, "Fold"), None, "no toggle");
+        // Instrument 1 would be C#, off C major: its row is still there.
+        let mut m = Mouse::new(&mut app, KIT808, 0);
+        let at = m.at(&mut app, 9.5, 1);
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, KIT808), [(8, 4, 1)]);
+        let mut app = fm_app();
+        fold_c_major(&mut app, FM, 0);
+        app.doc.project.machine_mut(FM).unwrap().lane.collapsed = true;
+        let (texts, _) = painted(&mut app, FM);
+        assert!(!texts.iter().any(|t| t == "C4"), "only the header");
+    }
+
+    #[test]
+    fn the_fold_toggle_keeps_the_middle_pitch_in_view_and_edits_nothing() {
+        let mut app = app_with(FM, &[]);
+        app.doc.project.key.scale = Scale::Major;
+        let height = LaneView::DEFAULT_HEIGHT as f32;
+        // E4 (row 63 unfolded) in the middle of the view.
+        let centre = |row: usize| row as f32 * ROW_H + ROW_H / 2.0 - height / 2.0;
+        app.view.panel(FM).lane_scroll_y = Some(centre(127 - 64));
+        let ctx = egui::Context::default();
+        let fold = text_at(&mut app, FM, "Fold").expect("a Fold toggle");
+        let click = |app: &mut SidAcidApp, t: f64| {
+            lane_frame(app, &ctx, FM, t, vec![egui::Event::PointerMoved(fold)]);
+            let b = |pressed| egui::Event::PointerButton {
+                pos: fold,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: NONE,
+            };
+            lane_frame(app, &ctx, FM, t + 0.1, vec![b(true)]);
+            lane_frame(app, &ctx, FM, t + 0.2, vec![b(false)]);
+        };
+        click(&mut app, 0.0);
+        assert!(app.doc.project.machine(FM).unwrap().lane.fold);
+        let rows = FoldRows::new(app.doc.project.key, &NotePattern::default());
+        let row = rows.row_of(64).unwrap();
+        assert_eq!(app.view.panel(FM).lane_scroll_y, Some(centre(row)));
+        assert!(!app.doc.is_dirty(), "a view setting");
+        assert!(!app.doc.can_undo());
+        click(&mut app, 1.0);
+        assert!(!app.doc.project.machine(FM).unwrap().lane.fold);
+        assert_eq!(app.view.panel(FM).lane_scroll_y, Some(centre(127 - 64)));
+    }
+
+    #[test]
+    fn the_cursor_moves_between_folded_rows() {
+        let mut app = app_with(FM, &[(0, 4, 61)]);
+        fold_c_major(&mut app, FM, 0);
+        app.view.focus = Some(FM);
+        app.view.dock.keyboard = true;
+        app.view.panel(FM).cursor.pitch = 60;
+        let up = |app: &mut SidAcidApp, up: bool| {
+            let key = if up {
+                egui::Key::ArrowUp
+            } else {
+                egui::Key::ArrowDown
+            };
+            assert!(app.dock_key(key, NONE));
+            app.view.panel(FM).cursor.pitch
+        };
+        assert_eq!(up(&mut app, true), 61, "onto the held C#");
+        assert_eq!(up(&mut app, true), 62);
+        assert_eq!(up(&mut app, true), 64, "past the folded D#");
+        assert_eq!(up(&mut app, false), 62);
+        // Unfolded, the cursor moves by semitones again.
+        app.doc.project.machine_mut(FM).unwrap().lane.fold = false;
+        assert_eq!(up(&mut app, true), 63);
     }
 }

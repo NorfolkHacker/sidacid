@@ -528,6 +528,10 @@ pub struct LaneView {
     pub collapsed: bool,
     /// The lane shows its velocity/parameter strip.
     pub strip: bool,
+    /// A melodic lane shows only the rows on the project key's scale (and
+    /// rows holding notes). Absent in older files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fold: bool,
 }
 
 impl LaneView {
@@ -552,6 +556,7 @@ impl Default for LaneView {
             height: Self::DEFAULT_HEIGHT,
             collapsed: false,
             strip: true,
+            fold: false,
         }
     }
 }
@@ -1047,6 +1052,27 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_lane_saves_its_fold_and_old_lanes_load_unfolded() {
+        let mut p = Project::default();
+        p.machines[0].lane.fold = true;
+        assert!(!p.machines[0].lane.is_default());
+        let ron = p.to_ron();
+        assert!(ron.contains("fold: true"));
+        let back = Project::from_ron(&ron).unwrap();
+        assert!(back.machines[0].lane.fold);
+        // A lane saved before fold existed loads unfolded.
+        p.machines[0].lane = LaneView {
+            height: 200,
+            ..LaneView::default()
+        };
+        let ron = p.to_ron();
+        assert!(!ron.contains("fold"), "unfolded is not written");
+        let back = Project::from_ron(&ron).unwrap();
+        assert!(!back.machines[0].lane.fold);
+        assert_eq!(back.machines[0].lane.height, 200);
+    }
+
+    #[test]
     fn lane_views_save_only_when_changed() {
         let mut p = Project::default();
         assert!(!p.to_ron().contains(" lane:"), "defaults are skipped");
@@ -1054,6 +1080,7 @@ mod tests {
             height: 200,
             collapsed: true,
             strip: false,
+            fold: true,
         };
         let back = Project::from_ron(&p.to_ron()).unwrap();
         assert_eq!(back.machines[0].lane, p.machines[0].lane);
