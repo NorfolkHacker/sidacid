@@ -336,6 +336,97 @@ mod tests {
         assert!(!app.doc.is_dirty());
     }
 
+    /// Run one frame that calls `handle_shortcuts` on `events`; returns the
+    /// events left in the frame afterwards.
+    fn shortcut_frame(app: &mut SidAcidApp, events: Vec<egui::Event>) -> Vec<egui::Event> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut left = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+            left = ctx.input(|i| i.events.clone());
+        });
+        left
+    }
+
+    fn key_event(key: egui::Key, pressed: bool, repeat: bool, command: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers: if command {
+                egui::Modifiers::COMMAND
+            } else {
+                egui::Modifiers::NONE
+            },
+        }
+    }
+
+    fn typing_app() -> SidAcidApp {
+        use crate::test_rack::FM;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.focus = Some(FM);
+        app.view.dock.keyboard = true;
+        app.view.panel(FM).cursor = crate::ui::key_entry::Cursor { tick: 0, pitch: 60 };
+        app
+    }
+
+    #[test]
+    fn frame_key_presses_and_repeats_write_notes_and_are_stripped() {
+        use crate::test_rack::FM;
+        use egui::Key;
+        let mut app = typing_app();
+        let left = shortcut_frame(
+            &mut app,
+            vec![
+                key_event(Key::Z, true, false, false),
+                key_event(Key::Z, true, true, false),
+                key_event(Key::Z, false, false, false),
+            ],
+        );
+        assert_eq!(
+            app.doc.project.roll(FM, 0).unwrap().notes.len(),
+            2,
+            "repeat counts"
+        );
+        assert_eq!(left.len(), 1, "presses gone: {left:?}");
+        assert!(matches!(left[0], egui::Event::Key { pressed: false, .. }));
+    }
+
+    #[test]
+    fn space_and_ctrl_z_still_work_with_dock_focus() {
+        use crate::test_rack::FM;
+        use acid_engine::host::Command;
+        use egui::Key;
+        let mut app = typing_app();
+        app.status.playing = false;
+        app.pending.clear();
+        shortcut_frame(&mut app, vec![key_event(Key::Space, true, false, false)]);
+        assert!(app.pending.iter().any(|c| matches!(c, Command::Play)));
+        assert!(app.doc.project.roll(FM, 0).unwrap().notes.is_empty());
+        shortcut_frame(&mut app, vec![key_event(Key::Z, true, false, false)]);
+        assert_eq!(app.doc.project.roll(FM, 0).unwrap().notes.len(), 1);
+        shortcut_frame(&mut app, vec![key_event(Key::Z, true, false, true)]);
+        assert!(
+            app.doc.project.roll(FM, 0).unwrap().notes.is_empty(),
+            "undone"
+        );
+    }
+
+    #[test]
+    fn a_message_up_leaves_keys_alone() {
+        use crate::test_rack::FM;
+        let mut app = typing_app();
+        app.view.message = Some("hello".into());
+        let left = shortcut_frame(&mut app, vec![key_event(egui::Key::Z, true, false, false)]);
+        assert!(app.doc.project.roll(FM, 0).unwrap().notes.is_empty());
+        assert_eq!(left.len(), 1, "event left in the frame");
+    }
+
     #[test]
     fn zoom_steps_through_the_zoom_levels() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));

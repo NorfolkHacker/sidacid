@@ -80,6 +80,8 @@ impl SidAcidApp {
                 .collect()
         });
         let used: Vec<bool> = keys.iter().map(|&(k, m)| self.dock_key(k, m)).collect();
+        // Releases stay: egui keys clicks off the press, so a focused widget
+        // seeing a lone release is harmless.
         let mut n = 0;
         ctx.input_mut(|i| {
             i.events.retain(|e| {
