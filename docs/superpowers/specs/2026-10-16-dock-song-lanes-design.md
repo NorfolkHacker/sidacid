@@ -299,7 +299,10 @@ engine act on `chance`, `ratchet` and `cond`.
   playback, re-render and WAV export are repeatable and a note keeps its
   dice when other notes are added, deleted or reordered. A pattern edit
   while playing carries each note's per-pass state (played, pending
-  ratchet hits) to its new index, matched by start and pitch. No
+  ratchet hits) to its new index, matched by start and pitch; a ringing
+  note nudged or resized so it still sounds through the playhead at its
+  pitch keeps ringing, while one transposed or moved away is released
+  once. No
   allocation on the audio thread (covered by `tests/no_alloc.rs`).
 - **Ratchet:** 1–8 re-triggers inside the note's length, evenly
   spaced at exact fractions (`start + k·len/n`), not snapped to the

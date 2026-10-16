@@ -326,6 +326,40 @@ fn edits_that_move_ringing_notes_do_not_allocate() {
 }
 
 #[test]
+fn remapping_a_full_ringing_pattern_does_not_allocate() {
+    // 512 FM notes, all played and ringing, then swapped for a copy
+    // shifted a tick (every note misses its exact match), a reversed
+    // copy (every note matches far away) and back.
+    let mut p = Project::default();
+    let full = |shift: u16| NotePattern {
+        notes: (0..acid_engine::project::MAX_NOTES as u16)
+            .map(|k| Note::new(k % 8 + shift, 48, 30 + (k / 8) as u8, 100))
+            .collect(),
+        ..NotePattern::default()
+    };
+    *p.roll_mut(FM, 0).unwrap() = full(0);
+    let mut e = Engine::from_project(SR, &p);
+    let mut shifted = PatternData::Notes(full(1));
+    let mut reversed = full(0);
+    reversed.notes.reverse();
+    let mut reversed = PatternData::Notes(reversed);
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    e.play();
+    render_seconds(&mut e, &mut l, &mut r, 0.2);
+    let n = count_allocs(|| {
+        for _ in 0..3 {
+            assert!(e.swap_pattern(FM, 0, &mut shifted));
+            render_seconds(&mut e, &mut l, &mut r, 0.02);
+            assert!(e.swap_pattern(FM, 0, &mut shifted));
+            assert!(e.swap_pattern(FM, 0, &mut reversed));
+            render_seconds(&mut e, &mut l, &mut r, 0.02);
+            assert!(e.swap_pattern(FM, 0, &mut reversed));
+        }
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);

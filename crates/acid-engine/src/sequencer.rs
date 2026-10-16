@@ -381,23 +381,50 @@ fn note_starting(roll: &NotePattern, pos: u16) -> Option<(usize, &Note)> {
         .find(|(_, n)| n.start == pos && pos < roll.ticks())
 }
 
-/// The index in `new` of note `i` of `old` after an edit: the nearest note
-/// with its start and pitch (a note moved or re-pitched counts as gone)
-/// that `taken` doesn't already claim. Looks outward from `i`, so an edit
-/// that shifts indices a little costs little.
-fn follow(old: &[Note], new: &[Note], i: usize, taken: impl Fn(usize) -> bool) -> Option<usize> {
-    let n = old.get(i)?;
-    let same = |j: usize| {
-        new.get(j)
-            .is_some_and(|m| m.start == n.start && m.pitch == n.pitch)
-            && !taken(j)
-    };
-    (0..new.len().max(i + 1)).find_map(|d| {
-        [i.checked_sub(d), (d > 0).then_some(i + d)]
-            .into_iter()
-            .flatten()
-            .find(|&j| same(j))
-    })
+/// `(key, index)` of the notes of `new` that `key` picks, sorted by key
+/// then index, into `buf`; returns how many.
+fn sorted_keys(
+    new: &[Note],
+    key: impl Fn(&Note) -> Option<u32>,
+    buf: &mut [(u32, u16); MAX_NOTES],
+) -> usize {
+    let mut n = 0;
+    for (j, m) in new.iter().enumerate().take(MAX_NOTES) {
+        if let Some(k) = key(m) {
+            buf[n] = (k, j as u16);
+            n += 1;
+        }
+    }
+    buf[..n].sort_unstable();
+    n
+}
+
+/// Among the `sorted` notes with key `k`, the index nearest `i` that
+/// `taken` doesn't already claim (a run is only as long as the notes
+/// sharing the key).
+fn nearest(
+    sorted: &[(u32, u16)],
+    k: u32,
+    i: usize,
+    taken: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let lo = sorted.partition_point(|e| e.0 < k);
+    let hi = lo + sorted[lo..].partition_point(|e| e.0 == k);
+    sorted[lo..hi]
+        .iter()
+        .map(|e| e.1 as usize)
+        .filter(|&j| !taken(j))
+        .min_by_key(|&j| j.abs_diff(i))
+}
+
+/// A note's identity across an edit: its start and pitch.
+fn exact_key(n: &Note) -> u32 {
+    (n.start as u32) << 8 | n.pitch as u32
+}
+
+/// Whether note `n` sounds through tick `p` (started before it, ends after).
+fn covers(n: &Note, p: u16) -> bool {
+    n.start < p && p < n.start.saturating_add(n.len)
 }
 
 /// Advances a step-free track one tick; at the pattern's end it wraps,
@@ -892,46 +919,78 @@ impl Sequencer {
         t.step = (last / TICKS_PER_STEP as u64) as usize;
     }
 
-    /// Selects pattern `slot` for the track at rack position `pos`.
     /// Pattern `pattern` of the machine at `pos` was edited from `old` to
     /// `new` notes: if its track plays it, the per-note state (played
-    /// this pass, ratchets to come) follows each note to its new index
-    /// (see `follow`), so an edit elsewhere in the pattern neither cuts
-    /// nor re-triggers a note. Real-time safe.
+    /// this pass, ratchets to come) follows each note to its new index,
+    /// so an edit elsewhere in the pattern neither cuts nor re-triggers a
+    /// note. A note is found by its start and pitch (the nearest index
+    /// among duplicates); a ringing note that no longer matches (nudged,
+    /// resized) keeps ringing if a note of its pitch still sounds through
+    /// the next tick. Real-time safe: stack scratch, O(n log n), O(n)
+    /// when no note moved.
     pub fn follow_notes(&mut self, pos: usize, pattern: u8, old: &[Note], new: &[Note]) {
         let Some(t) = self.tracks.get_mut(pos).filter(|t| t.pattern == pattern) else {
             return;
         };
-        let mut played = [0u64; MAX_NOTES / 64];
+        if old.len() == new.len()
+            && old
+                .iter()
+                .zip(new)
+                .all(|(a, b)| exact_key(a) == exact_key(b))
+        {
+            return;
+        }
         let has = |p: &[u64; MAX_NOTES / 64], j: usize| {
             p.get(j / 64).is_some_and(|w| w & (1 << (j % 64)) != 0)
         };
+        let mut buf = [(0u32, 0u16); MAX_NOTES];
+        let n = sorted_keys(new, |m| Some(exact_key(m)), &mut buf);
+        let mut played = [0u64; MAX_NOTES / 64];
+        // Played notes that ring through the next tick but found no match.
+        let (mut lost, mut lost_n) = ([0u16; MAX_NOTES], 0);
         for (w, &bits) in t.played.iter().enumerate() {
             let mut bits = bits;
             while bits != 0 {
                 let i = w * 64 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                if let Some(j) = follow(old, new, i, |j| has(&played, j))
-                    && let Some(word) = played.get_mut(j / 64)
-                {
-                    *word |= 1 << (j % 64);
+                let Some(o) = old.get(i) else { continue };
+                match nearest(&buf[..n], exact_key(o), i, |j| has(&played, j)) {
+                    Some(j) => played[j / 64] |= 1 << (j % 64),
+                    None if covers(o, t.pos) && lost_n < lost.len() => {
+                        lost[lost_n] = i as u16;
+                        lost_n += 1;
+                    }
+                    None => {}
                 }
             }
         }
-        t.played = played;
         let (mut rat, mut rat_n) = ([0u16; RATCHETS], 0);
         for &i in &t.rat[..t.rat_n as usize] {
-            if let Some(j) = follow(old, new, i as usize, |j| {
-                rat[..rat_n].iter().any(|&r| r as usize == j)
-            }) && let Ok(j) = u16::try_from(j)
+            if let Some(o) = old.get(i as usize)
+                && let Some(j) = nearest(&buf[..n], exact_key(o), i as usize, |j| {
+                    rat[..rat_n].iter().any(|&r| r as usize == j)
+                })
             {
-                rat[rat_n] = j;
+                rat[rat_n] = j as u16;
                 rat_n += 1;
             }
         }
         (t.rat, t.rat_n) = (rat, rat_n as u8);
+        if lost_n > 0 {
+            // By pitch among the notes sounding through the next tick.
+            let p = t.pos;
+            let n = sorted_keys(new, |m| covers(m, p).then_some(m.pitch as u32), &mut buf);
+            for &i in &lost[..lost_n] {
+                let i = i as usize;
+                if let Some(j) = nearest(&buf[..n], old[i].pitch as u32, i, |j| has(&played, j)) {
+                    played[j / 64] |= 1 << (j % 64);
+                }
+            }
+        }
+        t.played = played;
     }
 
+    /// Selects pattern `slot` for the track at rack position `pos`.
     pub fn select(&mut self, pos: usize, slot: u8) {
         self.chosen[pos] = slot;
         if self.mode == Mode::Song && self.playing {
@@ -3584,6 +3643,105 @@ mod tests {
         let plain = run(false);
         assert!((8..=24).contains(&plain.len()), "{}", plain.len());
         assert_eq!(run(true), plain);
+    }
+
+    #[test]
+    fn nudging_a_ringing_chord_keeps_it_ringing() {
+        // A chord 0-12 dragged a tick later at tick 3: it still sounds
+        // through the playhead, so nothing is cut or re-triggered.
+        let mut f = Fixture::new();
+        f.notes[0][0]
+            .notes
+            .extend([note(0, 12, 60), note(0, 12, 64), note(0, 12, 67)]);
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| {
+            for m in n.iter_mut() {
+                m.start += 1;
+            }
+        });
+        ev.extend(
+            run_ticks(&f, &mut s, 12)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(
+            fm(&ev),
+            [
+                (0, true, 60),
+                (0, true, 64),
+                (0, true, 67),
+                (13, false, 60),
+                (13, false, 64),
+                (13, false, 67)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_transposed_or_moved_ringing_note_is_released_once() {
+        // Transposed at tick 3: one release, and the new pitch waits for
+        // the next pass.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 12, 60));
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| n[0].pitch = 62);
+        ev.extend(
+            run_ticks(&f, &mut s, 13)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(fm(&ev), [(0, true, 60), (3, false, 60)]);
+        // Moved past the playhead: one release, then it starts there.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 12, 60));
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| n[0].start = 6);
+        ev.extend(
+            run_ticks(&f, &mut s, 13)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(fm(&ev), [(0, true, 60), (3, false, 60), (6, true, 60)]);
+    }
+
+    #[test]
+    fn song_mode_edits_follow_the_blocks_pattern() {
+        // As `deleting_an_earlier_note_keeps_a_ringing_poly_note`, on a
+        // transposed song block.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.extend([
+            note(0, 2, 60),
+            Note {
+                chance: 0,
+                ..note(0, 1, 50)
+            },
+            note(1, 8, 64),
+        ]);
+        f.song.lane_mut(MachineUid(5)).push(Block {
+            transpose: 2,
+            ..Block::new(0, PatternRef(0))
+        });
+        let mut s = song_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| {
+            n.remove(0);
+        });
+        ev.extend(
+            run_ticks(&f, &mut s, 9)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(
+            fm(&ev),
+            [(0, true, 62), (1, true, 66), (2, false, 62), (9, false, 66)]
+        );
     }
 
     #[test]
