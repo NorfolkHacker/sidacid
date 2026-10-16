@@ -4,7 +4,8 @@
 use crate::drums::{BD, CH, CP, OH, SD};
 use crate::machine::{MachineUid, standard_rack};
 use crate::params::{ChannelParam, FxParam, MasterParam, ParamId, SynthParam};
-use crate::project::{DrumHit, DrumMachine, Gate, Project, SynthMachine, SynthStep};
+use crate::project::{DrumMachine, Project, SynthMachine};
+use crate::steps::{DrumGrid, DrumHit, Gate, SynthGrid, SynthStep};
 
 fn step(note: u8, octave: i8, accent: bool, slide: bool) -> SynthStep {
     SynthStep {
@@ -59,7 +60,10 @@ pub fn demo_project() -> Project {
         REST,
         step(10, -1, false, false),
     ];
-    synth(&mut p, s1).patterns[0].steps[..16].copy_from_slice(&acid);
+    let pattern = &mut synth(&mut p, s1).patterns[0];
+    let mut grid = SynthGrid::from_roll(&pattern.roll);
+    grid.steps[..16].copy_from_slice(&acid);
+    pattern.roll = grid.to_roll();
 
     let counter = [
         step(7, 1, false, false),
@@ -79,17 +83,23 @@ pub fn demo_project() -> Project {
         step(0, 1, true, false),
         REST,
     ];
-    synth(&mut p, s2).patterns[0].steps[..16].copy_from_slice(&counter);
+    let pattern = &mut synth(&mut p, s2).patterns[0];
+    let mut grid = SynthGrid::from_roll(&pattern.roll);
+    grid.steps[..16].copy_from_slice(&counter);
+    pattern.roll = grid.to_roll();
 
-    let kit808 = &mut kit(&mut p, k808).patterns[0];
+    let pattern = &mut kit(&mut p, k808).patterns[0];
+    let mut kit808 = DrumGrid::from_roll(&pattern.roll);
     for s in [0, 4, 8, 12] {
         kit808.steps[s][BD] = DrumHit::On;
     }
     kit808.steps[4][SD] = DrumHit::On;
     kit808.steps[12][CP] = DrumHit::Accent;
     kit808.steps[15][SD] = DrumHit::On;
+    pattern.roll = kit808.to_roll();
 
-    let kit909 = &mut kit(&mut p, k909).patterns[0];
+    let pattern = &mut kit(&mut p, k909).patterns[0];
+    let mut kit909 = DrumGrid::from_roll(&pattern.roll);
     for s in 0..16 {
         kit909.steps[s][CH] = if s % 4 == 2 {
             DrumHit::Accent
@@ -101,6 +111,7 @@ pub fn demo_project() -> Project {
         kit909.steps[s][OH] = DrumHit::On;
         kit909.steps[s][CH] = DrumHit::Off;
     }
+    pattern.roll = kit909.to_roll();
 
     let set = |p: &mut Project, id: ParamId, v: f32| p.set_param(id, v);
     set(&mut p, s1.param(SynthParam::Cutoff), 0.3);
@@ -133,8 +144,8 @@ mod tests {
         let p = demo_project();
         p.validate().unwrap();
         let s = &p.synth(standard_rack()[0].0).unwrap().patterns[0];
-        assert!(s.steps.iter().any(|s| s.slide));
-        assert!(s.steps.iter().any(|s| s.accent));
+        assert!(s.roll.notes.iter().any(|n| n.slide));
+        assert!(s.roll.notes.iter().any(|n| n.accent));
     }
 
     #[test]

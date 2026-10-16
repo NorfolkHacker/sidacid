@@ -38,8 +38,8 @@ impl<'a> Bank<'a> {
     pub fn length(&self, slot: u8) -> Option<usize> {
         let s = slot as usize;
         let length = match self {
-            Bank::Synth(b) => b.get(s)?.length,
-            Bank::Drum(b) => b.get(s)?.length,
+            Bank::Synth(b) => b.get(s)?.roll.length,
+            Bank::Drum(b) => b.get(s)?.roll.length,
             Bank::Notes(b) => b.get(s)?.length,
         };
         Some(steps_of(length))
@@ -366,17 +366,22 @@ pub fn duplicate_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'
 mod tests {
     use super::*;
     use crate::params::{MasterParam, SynthParam};
-    use crate::project::{DrumPattern, Project, SynthPattern};
+    use crate::project::{DrumPattern, NotePattern, Project, SynthPattern};
 
     fn project_with_lengths(synth0: u8, drum0: u8) -> Project {
         let mut p = Project::default();
         p.synth_mut(MachineUid(1)).unwrap().patterns[1] = SynthPattern {
-            length: synth0,
+            roll: NotePattern {
+                length: synth0,
+                ..NotePattern::default()
+            },
             ..SynthPattern::default()
         };
         p.kit_mut(MachineUid(3)).unwrap().patterns[2] = DrumPattern {
-            length: drum0,
-            ..DrumPattern::default()
+            roll: NotePattern {
+                length: drum0,
+                ..NotePattern::default()
+            },
         };
         p
     }
@@ -645,8 +650,8 @@ mod tests {
     #[test]
     fn bar_steps_ignores_bad_slots_and_clamps_lengths() {
         let mut p = Project::default();
-        p.synth_mut(MachineUid(1)).unwrap().patterns[1].length = 0;
-        p.kit_mut(MachineUid(3)).unwrap().patterns[2].length = 255;
+        p.synth_mut(MachineUid(1)).unwrap().patterns[1].roll.length = 0;
+        p.kit_mut(MachineUid(3)).unwrap().patterns[2].roll.length = 255;
         let b = Banks::of(&p);
         assert_eq!(b.length(0, 200), None, "slot past the bank");
         assert_eq!(b.length(0, 1), Some(1), "length 0 counts as 1");

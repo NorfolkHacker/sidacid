@@ -6,7 +6,6 @@
 use crate::drums::KitKind;
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
-pub use crate::steps::{DrumHit, Gate, SynthStep};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,7 +13,7 @@ use std::path::Path;
 
 pub use crate::rack_edit::RemovedMachine;
 
-pub const PROJECT_VERSION: u32 = 4;
+pub const PROJECT_VERSION: u32 = 5;
 pub const STEPS: usize = 64;
 
 /// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
@@ -38,19 +37,19 @@ pub struct ParamLane {
     pub values: Vec<Option<f32>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SynthPattern {
-    pub steps: Vec<SynthStep>,
-    pub length: u8,
+    /// Monophonic notes; the roll editor keeps them from overlapping.
+    pub roll: NotePattern,
     pub transpose: i8,
+    /// One optional value per 1/16 step.
     pub param_lane: Option<ParamLane>,
 }
 
 impl SynthPattern {
-    /// Shape the engine relies on: 64 steps, length 1..=64, a full-size lane.
+    /// Shape the engine relies on: a well-formed roll and a full-size lane.
     pub fn is_well_formed(&self) -> bool {
-        self.steps.len() == STEPS
-            && (1..=STEPS as u8).contains(&self.length)
+        self.roll.is_well_formed()
             && self
                 .param_lane
                 .as_ref()
@@ -58,35 +57,20 @@ impl SynthPattern {
     }
 }
 
-impl Default for SynthPattern {
-    fn default() -> Self {
-        Self {
-            steps: vec![SynthStep::default(); STEPS],
-            length: 16,
-            transpose: 0,
-            param_lane: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A drum pattern: one-step notes whose pitch is the instrument (0..8).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DrumPattern {
-    pub steps: Vec<[DrumHit; DRUM_INSTRUMENTS]>,
-    pub length: u8,
+    pub roll: NotePattern,
 }
 
 impl DrumPattern {
     pub fn is_well_formed(&self) -> bool {
-        self.steps.len() == STEPS && (1..=STEPS as u8).contains(&self.length)
-    }
-}
-
-impl Default for DrumPattern {
-    fn default() -> Self {
-        Self {
-            steps: vec![[DrumHit::Off; DRUM_INSTRUMENTS]; STEPS],
-            length: 16,
-        }
+        self.roll.is_well_formed()
+            && self
+                .roll
+                .notes
+                .iter()
+                .all(|n| (n.pitch as usize) < DRUM_INSTRUMENTS)
     }
 }
 
@@ -365,24 +349,15 @@ impl SamplerMachine {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SeqView {
-    #[default]
-    Step303,
-    PianoRoll,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SynthMachine {
     pub patterns: Vec<SynthPattern>,
-    pub view: SeqView,
 }
 
 impl Default for SynthMachine {
     fn default() -> Self {
         Self {
             patterns: vec![SynthPattern::default(); PATTERNS],
-            view: SeqView::Step303,
         }
     }
 }
@@ -675,6 +650,29 @@ impl Project {
         }
     }
 
+    /// Pattern `slot`'s notes, for any machine.
+    pub fn roll(&self, uid: MachineUid, slot: u8) -> Option<&NotePattern> {
+        let s = slot as usize;
+        match &self.machine(uid)?.body {
+            MachineBody::Synth(m) => Some(&m.patterns.get(s)?.roll),
+            MachineBody::Kit(m) => Some(&m.patterns.get(s)?.roll),
+            MachineBody::Fm(m) => m.patterns.get(s),
+            MachineBody::Mono(m) => m.patterns.get(s),
+            MachineBody::Sampler(m) => m.patterns.get(s),
+        }
+    }
+
+    pub fn roll_mut(&mut self, uid: MachineUid, slot: u8) -> Option<&mut NotePattern> {
+        let s = slot as usize;
+        match &mut self.machine_mut(uid)?.body {
+            MachineBody::Synth(m) => Some(&mut m.patterns.get_mut(s)?.roll),
+            MachineBody::Kit(m) => Some(&mut m.patterns.get_mut(s)?.roll),
+            MachineBody::Fm(m) => m.patterns.get_mut(s),
+            MachineBody::Mono(m) => m.patterns.get_mut(s),
+            MachineBody::Sampler(m) => m.patterns.get_mut(s),
+        }
+    }
+
     /// The stored value, or the param's default when none is stored.
     pub fn param(&self, id: ParamId) -> f32 {
         let stored = match id {
@@ -869,16 +867,17 @@ impl Project {
             0 | 1 => ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
                 .upgrade()
+                .upgrade()
                 .upgrade(),
             2 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
                 .map_err(parse)?
+                .upgrade()
                 .upgrade(),
-            // v4 only added the Mono machine: a v3 file reads as it is.
-            3 | PROJECT_VERSION => {
-                let mut p = with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?;
-                p.version = PROJECT_VERSION;
-                p
-            }
+            // v4 only added the Mono machine: a v3 file reads as v4.
+            3 | 4 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV4>(text))
+                .map_err(parse)?
+                .upgrade(),
+            PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
         p.validate()?;
@@ -951,9 +950,10 @@ mod tests {
     }
 
     #[test]
-    fn v3_round_trips() {
-        let p = crate::demo::demo_project();
-        assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
+    fn v5_round_trips() {
+        for p in [Project::default(), crate::demo::demo_project()] {
+            assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
+        }
     }
 
     #[test]
@@ -1043,8 +1043,8 @@ mod tests {
         assert!(p.synth(MachineUid(3)).is_none());
         assert_eq!(p.kit(MachineUid(4)).unwrap().kind, KitKind::K909);
         assert!(p.fm(FM).is_some() && p.sampler(SAMPLER).is_some());
-        p.kit_mut(MachineUid(3)).unwrap().patterns[1].length = 9;
-        assert_eq!(p.kit(MachineUid(3)).unwrap().patterns[1].length, 9);
+        p.kit_mut(MachineUid(3)).unwrap().patterns[1].roll.length = 9;
+        assert_eq!(p.kit(MachineUid(3)).unwrap().patterns[1].roll.length, 9);
         assert_eq!(
             p.machine(MachineUid(5)).unwrap().machine_type(),
             MachineType::Fm
@@ -1280,9 +1280,12 @@ mod tests {
     fn a_plan_4_project_still_loads() {
         let p = Project::from_ron(&plan4_project_text()).unwrap();
         assert_eq!((p.name.as_str(), p.bpm), ("Plan 4", 130.0));
-        assert_eq!(
-            p.synth(MachineUid(1)).unwrap().patterns[0].steps[0].gate,
-            Gate::On
+        assert!(
+            p.synth(MachineUid(1)).unwrap().patterns[0]
+                .roll
+                .notes
+                .iter()
+                .any(|n| n.start == 0)
         );
         assert_eq!(p.fm(FM).unwrap().patterns[0].notes.len(), 1);
         assert_eq!(sampler(&p).patterns[1].notes[0].pitch, 36);
@@ -1326,9 +1329,9 @@ mod tests {
         assert_eq!(p.version, PROJECT_VERSION);
         assert_eq!(synth_mut(&mut p, 0).patterns.len(), PATTERNS);
         assert_eq!(kit_mut(&mut p, 1).patterns.len(), PATTERNS);
-        assert_eq!(synth_mut(&mut p, 0).patterns[0].steps.len(), STEPS);
-        assert_eq!(kit_mut(&mut p, 0).patterns[0].steps.len(), STEPS);
-        assert_eq!(synth_mut(&mut p, 0).patterns[0].length, 16);
+        assert!(synth_mut(&mut p, 0).patterns[0].roll.notes.is_empty());
+        assert!(kit_mut(&mut p, 0).patterns[0].roll.notes.is_empty());
+        assert_eq!(synth_mut(&mut p, 0).patterns[0].roll.length, 16);
         let params: usize = p.machines.iter().map(|m| m.params.len()).sum();
         assert_eq!(params + p.globals.len(), 589);
         p.validate().unwrap();
@@ -1336,6 +1339,7 @@ mod tests {
 
     #[test]
     fn step_midi_uses_octave_note_and_transpose() {
+        use crate::steps::{Gate, SynthStep};
         let s = SynthStep {
             note: 3,
             octave: 1,
@@ -1377,14 +1381,15 @@ mod tests {
         let mut p = Project::default();
         p.name = "Test".into();
         p.bpm = 133.0;
-        synth_mut(&mut p, 1).patterns[5].steps[3] = SynthStep {
-            note: 7,
-            octave: -1,
-            gate: Gate::On,
+        synth_mut(&mut p, 1).patterns[5].roll.notes.push(Note {
             accent: true,
             slide: true,
-        };
-        kit_mut(&mut p, 0).patterns[2].steps[4][0] = DrumHit::Accent;
+            ..Note::new(12, 4, 31, 100)
+        });
+        kit_mut(&mut p, 0).patterns[2].roll.notes.push(Note {
+            accent: true,
+            ..Note::new(16, 4, 0, 100)
+        });
         p.set_param(MachineUid(1).param(SynthParam::Resonance), 0.95);
         let mut bar = Bar::default();
         bar.cell_mut(MachineUid(1)).pattern = Some(PatternRef(5));
@@ -1417,8 +1422,19 @@ mod tests {
     #[test]
     fn invalid_shapes_are_rejected() {
         let mut p = Project::default();
-        synth_mut(&mut p, 0).patterns[0].length = 0;
+        synth_mut(&mut p, 0).patterns[0].roll.length = 0;
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let mut p = Project::default();
+        kit_mut(&mut p, 0).patterns[0].roll.notes.push(Note::new(
+            0,
+            4,
+            DRUM_INSTRUMENTS as u8,
+            100,
+        ));
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Invalid(_))),
+            "a drum note past the last instrument"
+        );
         let mut p = Project::default();
         kit_mut(&mut p, 1).patterns.pop();
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
@@ -1609,7 +1625,7 @@ mod tests {
         let p = Project::from_ron(&text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
         assert_eq!((p.name.as_str(), p.bpm, p.swing), ("Old", 131.0, 0.2));
-        assert_eq!(p.synth(MachineUid(2)).unwrap().patterns[2].length, 7);
+        assert_eq!(p.synth(MachineUid(2)).unwrap().patterns[2].roll.length, 7);
         let selected: Vec<_> = p.machines.iter().map(|m| m.selected).collect();
         assert_eq!(selected, [1, 2, 3, 4, 0, 0]);
         assert_eq!(p.param(MachineUid(1).param(SynthParam::Cutoff)), 0.9);
@@ -1653,11 +1669,15 @@ mod tests {
 
     #[test]
     fn version_3_files_still_load() {
-        let text = Project::default()
-            .to_ron()
-            .replace("version: 4", "version: 3");
-        let p = Project::from_ron(&text).unwrap();
-        assert_eq!(p.version, PROJECT_VERSION);
+        for version in [3, 4] {
+            let v4 = crate::migrate::ProjectV4 {
+                version,
+                ..crate::migrate::ProjectV4::standard()
+            };
+            let p = Project::from_ron(&ron::ser::to_string(&v4).unwrap()).unwrap();
+            assert_eq!(p.version, PROJECT_VERSION);
+            assert_eq!(p, Project::default(), "v{version}");
+        }
     }
 
     #[test]

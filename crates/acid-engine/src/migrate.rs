@@ -1,17 +1,20 @@
 //! Older project files. v1 had four machines: no FM or sampler, 4-wide
 //! bars and two synth transposes. v1 and v2 named params by machine
-//! position (`LegacyParamId`); v3 names them by machine uid.
+//! position (`LegacyParamId`); v3 names them by machine uid. v3 and v4
+//! stored acid and drum patterns as 1/16 steps; v5 stores them as notes.
 
 use crate::drums::KitKind;
-use crate::machine::{MachineUid, standard_rack};
+use crate::machine::{MachineType, MachineUid, standard_rack};
 use crate::params::{
-    ChannelParam, DrumParam, FmParam, FxParam, KitParam, MachineParam, MasterParam, OpParam,
-    ParamId, SamplerParam, SlotParam, SynthParam,
+    ChannelParam, DRUM_INSTRUMENTS, DrumParam, FmParam, FxParam, GlobalParam, KitParam,
+    MachineParam, MasterParam, OpParam, ParamId, SamplerParam, SlotParam, SynthParam,
 };
 use crate::project::{
-    AutoLane, Bar, Cell, DrumMachine, DrumPattern, FmMachine, MachineBody, ParamLane, PatternRef,
-    Project, SamplerMachine, SeqView, Song, SynthMachine, SynthPattern, SynthStep,
+    AutoLane, Bar, Cell, DrumMachine, DrumPattern, FmMachine, MachineBody, MachineEntry,
+    MonoMachine, PATTERNS, PROJECT_VERSION, ParamLane, PatternRef, Project, STEPS, SamplerMachine,
+    Song, SynthMachine, SynthPattern,
 };
+use crate::steps::{DrumGrid, DrumHit, SynthGrid, SynthStep};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -73,6 +76,217 @@ impl LegacyAutoLane {
     }
 }
 
+/// The v3/v4 synth sequencer view, frozen (v5 dropped it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SeqView {
+    #[default]
+    Step303,
+    PianoRoll,
+}
+
+/// The v3/v4 acid pattern: 1/16 steps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SynthPatternV4 {
+    pub steps: Vec<SynthStep>,
+    pub length: u8,
+    pub transpose: i8,
+    pub param_lane: Option<ParamLane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SynthMachineV4 {
+    pub patterns: Vec<SynthPatternV4>,
+    pub view: SeqView,
+}
+
+/// The v3/v4 drum pattern: one hit per instrument per 1/16 step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DrumPatternV4 {
+    pub steps: Vec<[DrumHit; DRUM_INSTRUMENTS]>,
+    pub length: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DrumMachineV4 {
+    pub kind: KitKind,
+    pub patterns: Vec<DrumPatternV4>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum MachineBodyV4 {
+    Synth(SynthMachineV4),
+    Kit(DrumMachineV4),
+    Fm(FmMachine),
+    Sampler(SamplerMachine),
+    Mono(MonoMachine),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MachineEntryV4 {
+    pub uid: MachineUid,
+    pub name: String,
+    pub selected: u8,
+    pub params: BTreeMap<MachineParam, f32>,
+    pub body: MachineBodyV4,
+}
+
+/// The v3/v4 project: the rack, with step-based acid and drum patterns.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProjectV4 {
+    pub version: u32,
+    pub name: String,
+    pub bpm: f32,
+    pub swing: f32,
+    pub machines: Vec<MachineEntryV4>,
+    pub next_uid: u16,
+    pub globals: BTreeMap<GlobalParam, f32>,
+    pub song: Song,
+}
+
+impl Default for SynthPatternV4 {
+    fn default() -> Self {
+        Self {
+            steps: vec![SynthStep::default(); STEPS],
+            length: 16,
+            transpose: 0,
+            param_lane: None,
+        }
+    }
+}
+
+impl Default for DrumPatternV4 {
+    fn default() -> Self {
+        Self {
+            steps: vec![[DrumHit::Off; DRUM_INSTRUMENTS]; STEPS],
+            length: 16,
+        }
+    }
+}
+
+impl SynthPatternV4 {
+    fn upgrade(self) -> SynthPattern {
+        SynthPattern {
+            roll: SynthGrid {
+                steps: self.steps,
+                length: self.length,
+            }
+            .to_roll(),
+            transpose: self.transpose,
+            param_lane: self.param_lane,
+        }
+    }
+}
+
+impl DrumPatternV4 {
+    fn upgrade(self) -> DrumPattern {
+        DrumPattern {
+            roll: DrumGrid {
+                steps: self.steps,
+                length: self.length,
+            }
+            .to_roll(),
+        }
+    }
+}
+
+impl MachineBodyV4 {
+    /// An empty v4 machine of `ty`.
+    fn new(ty: MachineType) -> Self {
+        let kit = |kind| {
+            MachineBodyV4::Kit(DrumMachineV4 {
+                kind,
+                patterns: vec![DrumPatternV4::default(); PATTERNS],
+            })
+        };
+        match ty {
+            MachineType::Synth => MachineBodyV4::Synth(SynthMachineV4 {
+                patterns: vec![SynthPatternV4::default(); PATTERNS],
+                view: SeqView::Step303,
+            }),
+            MachineType::Kit808 => kit(KitKind::K808),
+            MachineType::Kit909 => kit(KitKind::K909),
+            MachineType::Fm => MachineBodyV4::Fm(FmMachine::default()),
+            MachineType::Sampler => MachineBodyV4::Sampler(SamplerMachine::default()),
+            MachineType::Mono => MachineBodyV4::Mono(MonoMachine::default()),
+        }
+    }
+
+    fn upgrade(self) -> MachineBody {
+        match self {
+            MachineBodyV4::Synth(s) => MachineBody::Synth(SynthMachine {
+                patterns: s
+                    .patterns
+                    .into_iter()
+                    .map(SynthPatternV4::upgrade)
+                    .collect(),
+            }),
+            MachineBodyV4::Kit(k) => MachineBody::Kit(DrumMachine {
+                kind: k.kind,
+                patterns: k.patterns.into_iter().map(DrumPatternV4::upgrade).collect(),
+            }),
+            MachineBodyV4::Fm(f) => MachineBody::Fm(f),
+            MachineBodyV4::Sampler(s) => MachineBody::Sampler(s),
+            MachineBodyV4::Mono(m) => MachineBody::Mono(m),
+        }
+    }
+}
+
+impl ProjectV4 {
+    /// The v4 default project (as `Project::default()` was): the
+    /// standard six machines, every param at its default.
+    pub(crate) fn standard() -> Self {
+        Self {
+            version: 4,
+            name: "Untitled".into(),
+            bpm: 125.0,
+            swing: 0.0,
+            machines: standard_rack()
+                .into_iter()
+                .map(|(uid, ty, name)| MachineEntryV4 {
+                    uid,
+                    name: name.into(),
+                    selected: 0,
+                    params: MachineParam::all_for(ty)
+                        .into_iter()
+                        .map(|p| (p, p.info().default))
+                        .collect(),
+                    body: MachineBodyV4::new(ty),
+                })
+                .collect(),
+            next_uid: 7,
+            globals: GlobalParam::all()
+                .into_iter()
+                .map(|g| (g, g.info().default))
+                .collect(),
+            song: Song::default(),
+        }
+    }
+
+    /// A v5 project: acid and drum steps become notes.
+    pub(crate) fn upgrade(self) -> Project {
+        Project {
+            version: PROJECT_VERSION,
+            name: self.name,
+            bpm: self.bpm,
+            swing: self.swing,
+            machines: self
+                .machines
+                .into_iter()
+                .map(|m| MachineEntry {
+                    uid: m.uid,
+                    name: m.name,
+                    selected: m.selected,
+                    params: m.params,
+                    body: m.body.upgrade(),
+                })
+                .collect(),
+            next_uid: self.next_uid,
+            globals: self.globals,
+            song: self.song,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SynthPatternV2 {
     pub steps: Vec<SynthStep>,
@@ -88,12 +302,12 @@ pub(crate) struct SynthMachineV2 {
 }
 
 impl SynthMachineV2 {
-    fn upgrade(self) -> SynthMachine {
-        SynthMachine {
+    fn upgrade(self) -> SynthMachineV4 {
+        SynthMachineV4 {
             patterns: self
                 .patterns
                 .into_iter()
-                .map(|p| SynthPattern {
+                .map(|p| SynthPatternV4 {
                     steps: p.steps,
                     length: p.length,
                     transpose: p.transpose,
@@ -112,13 +326,13 @@ impl SynthMachineV2 {
 impl Default for SynthMachineV2 {
     fn default() -> Self {
         let pattern = SynthPatternV2 {
-            steps: vec![SynthStep::default(); crate::project::STEPS],
+            steps: vec![SynthStep::default(); STEPS],
             length: 16,
             transpose: 0,
             param_lane: None,
         };
         Self {
-            patterns: vec![pattern; crate::project::PATTERNS],
+            patterns: vec![pattern; PATTERNS],
             view: SeqView::Step303,
         }
     }
@@ -127,14 +341,14 @@ impl Default for SynthMachineV2 {
 /// The v1/v2 drum machine: no kit kind (the position chose the kit).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DrumMachineV2 {
-    pub patterns: Vec<DrumPattern>,
+    pub patterns: Vec<DrumPatternV4>,
 }
 
 #[cfg(test)]
 impl Default for DrumMachineV2 {
     fn default() -> Self {
         Self {
-            patterns: vec![DrumPattern::default(); crate::project::PATTERNS],
+            patterns: vec![DrumPatternV4::default(); PATTERNS],
         }
     }
 }
@@ -198,31 +412,31 @@ pub(crate) struct ProjectV2 {
 }
 
 impl ProjectV2 {
-    /// A v3 project: the six machines as rack entries on uids 1..=6,
+    /// A v4 project: the six machines as rack entries on uids 1..=6,
     /// params keyed by uid, bars as per-uid cells.
-    pub(crate) fn upgrade(self) -> Project {
+    pub(crate) fn upgrade(self) -> ProjectV4 {
         let [s0, s1] = self.synths;
         let [d0, d1] = self.drums;
         let kit = |kind, d: DrumMachineV2| {
-            MachineBody::Kit(DrumMachine {
+            MachineBodyV4::Kit(DrumMachineV4 {
                 kind,
                 patterns: d.patterns,
             })
         };
         let mut bodies = [
-            MachineBody::Synth(s0.upgrade()),
-            MachineBody::Synth(s1.upgrade()),
+            MachineBodyV4::Synth(s0.upgrade()),
+            MachineBodyV4::Synth(s1.upgrade()),
             kit(KitKind::K808, d0),
             kit(KitKind::K909, d1),
-            MachineBody::Fm(self.fm),
-            MachineBody::Sampler(self.sampler),
+            MachineBodyV4::Fm(self.fm),
+            MachineBodyV4::Sampler(self.sampler),
         ]
         .into_iter();
-        let mut p = Project {
+        let mut p = ProjectV4 {
             name: self.name,
             bpm: self.bpm,
             swing: self.swing,
-            ..Project::default()
+            ..ProjectV4::standard()
         };
         for (m, entry) in p.machines.iter_mut().enumerate() {
             entry.selected = self.selected[m];
@@ -236,11 +450,15 @@ impl ProjectV2 {
                 // the damaged file. A position past the six has no entry
                 // and is dropped.
                 ParamId::Machine(uid, mp) => {
-                    if let Some(m) = p.machine_mut(uid) {
+                    if let Some(m) = p.machines.iter_mut().find(|m| m.uid == uid) {
                         m.params.insert(mp, v);
                     }
                 }
-                global => p.set_param(global, v),
+                global => {
+                    if let Some(g) = global.global() {
+                        p.globals.insert(g, v);
+                    }
+                }
             }
         }
         p.song = Song {
@@ -324,6 +542,52 @@ impl ProjectV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v4_steps_upgrade_to_notes() {
+        use crate::project::{Note, PROJECT_VERSION, Project};
+        use crate::steps::{ACID_VEL, DrumHit, Gate, SynthStep};
+        let mut v4 = ProjectV4::standard();
+        let MachineBodyV4::Synth(s) = &mut v4.machines[0].body else {
+            panic!("position 0 is Synth 1")
+        };
+        let first = SynthStep {
+            note: 0,
+            octave: 0,
+            gate: Gate::On,
+            accent: true,
+            slide: false,
+        };
+        s.patterns[0].steps[0] = first;
+        s.patterns[0].steps[1] = SynthStep {
+            gate: Gate::Tie,
+            slide: true,
+            ..first
+        };
+        let MachineBodyV4::Kit(k) = &mut v4.machines[2].body else {
+            panic!("position 2 is the 808")
+        };
+        k.patterns[0].steps[4][1] = DrumHit::Accent;
+        let up = Project::from_ron(&ron::ser::to_string(&v4).unwrap()).unwrap();
+        assert_eq!(up.version, PROJECT_VERSION);
+        let synth = up.synth(MachineUid(1)).unwrap();
+        assert_eq!(
+            synth.patterns[0].roll.notes,
+            vec![Note {
+                accent: true,
+                slide: true,
+                ..Note::new(0, 8, 36, ACID_VEL)
+            }]
+        );
+        let kit = up.kit(MachineUid(3)).unwrap();
+        assert_eq!(
+            kit.patterns[0].roll.notes,
+            vec![Note {
+                accent: true,
+                ..Note::new(16, 4, 1, ACID_VEL)
+            }]
+        );
+    }
 
     #[test]
     fn legacy_params_map_to_the_standard_uids() {

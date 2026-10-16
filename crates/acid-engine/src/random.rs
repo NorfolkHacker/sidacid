@@ -1,11 +1,14 @@
 //! Seeded pattern randomisers (spec §11). Pure functions: the same seed
-//! always gives the same pattern, so tests are deterministic.
+//! always gives the same pattern, so tests are deterministic. Synth and
+//! drum dice work on the 1/16 grid: a roll snaps off-grid notes to it.
 
 use crate::drums::{BD, CH, CP, OH, SD};
 use crate::fm::algorithms::ALGORITHMS;
 use crate::fm::sysex::{Dx7Op, Dx7Voice};
+use crate::params::DRUM_INSTRUMENTS;
 use crate::params::MonoParam;
-use crate::project::{DrumHit, DrumPattern, Gate, SynthPattern, steps_of};
+use crate::project::{DrumPattern, STEPS, SynthPattern, steps_of};
+use crate::steps::{DrumGrid, DrumHit, Gate, SynthGrid};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 
@@ -58,7 +61,7 @@ fn degree_to_semitone(scale: &[i32], degree: i32) -> i32 {
 }
 
 /// Steps where the paired drum pattern has a kick or snare.
-fn groove_hits(groove: &DrumPattern, len: usize) -> Vec<bool> {
+fn groove_hits(groove: &DrumGrid, len: usize) -> Vec<bool> {
     let glen = steps_of(groove.length);
     (0..len)
         .map(|i| {
@@ -75,13 +78,14 @@ pub fn randomise_synth(
     seed: u64,
 ) -> SynthPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
-    let mut out = p.clone();
-    let len = steps_of(p.length);
-    let hits = groove_hits(groove, len);
+    let mut grid = SynthGrid::from_roll(&p.roll);
+    let groove = DrumGrid::from_roll(&groove.roll);
+    let len = steps_of(p.roll.length);
+    let hits = groove_hits(&groove, len);
     if dice.rest {
         for i in 0..len {
             let prob = if hits[i] { 0.85 } else { 0.5 };
-            out.steps[i].gate = if rng.gen_bool(prob) {
+            grid.steps[i].gate = if rng.gen_bool(prob) {
                 Gate::On
             } else {
                 Gate::Off
@@ -92,7 +96,7 @@ pub fn randomise_synth(
         let scale = pick_scale(&mut rng);
         let mut degree = 0i32;
         let mut prev: Option<i32> = None;
-        for step in out.steps.iter_mut().take(len) {
+        for step in grid.steps.iter_mut().take(len) {
             let r: f32 = rng.r#gen();
             degree = if r < 0.35 {
                 0
@@ -133,7 +137,7 @@ pub fn randomise_synth(
         }
     }
     if dice.octave {
-        for step in out.steps.iter_mut().take(len) {
+        for step in grid.steps.iter_mut().take(len) {
             let r: f32 = rng.r#gen();
             if r < 0.08 {
                 step.octave = (step.octave + 1).min(1);
@@ -144,7 +148,7 @@ pub fn randomise_synth(
     }
     if dice.slide {
         let mut prev = false;
-        for step in out.steps.iter_mut().take(len) {
+        for step in grid.steps.iter_mut().take(len) {
             let on = rng.gen_bool(if prev { 0.5 } else { 0.15 });
             step.slide = on;
             prev = on;
@@ -152,16 +156,18 @@ pub fn randomise_synth(
     }
     if dice.accent {
         for i in 0..len {
-            out.steps[i].accent = rng.gen_bool(if hits[i] { 0.35 } else { 0.2 });
+            grid.steps[i].accent = rng.gen_bool(if hits[i] { 0.35 } else { 0.2 });
         }
     }
     if dice.accent || dice.slide {
         for i in 1..len {
-            if out.steps[i - 1].slide {
-                out.steps[i].accent = false;
+            if grid.steps[i - 1].slide {
+                grid.steps[i].accent = false;
             }
         }
     }
+    let mut out = p.clone();
+    out.roll = grid.to_roll();
     out
 }
 
@@ -370,7 +376,7 @@ const MAX_EVOLVE_ATTEMPTS: u32 = 16;
 /// Downbeats over offbeats over the rest.
 const STEP_WEIGHTS: [f32; 4] = [3.0, 1.0, 2.0, 1.0];
 
-fn open_mutes_closed(p: &mut DrumPattern, len: usize) {
+fn open_mutes_closed(p: &mut DrumGrid, len: usize) {
     for step in &mut p.steps[..len] {
         if step[OH] != DrumHit::Off {
             step[CH] = DrumHit::Off;
@@ -390,7 +396,7 @@ fn weighted(rng: &mut Pcg32, weights: &[f32]) -> usize {
     weights.len() - 1
 }
 
-fn random_hit(rng: &mut Pcg32, p: &DrumPattern, len: usize) -> Option<(usize, usize)> {
+fn random_hit(rng: &mut Pcg32, p: &DrumGrid, len: usize) -> Option<(usize, usize)> {
     let count = p.steps[..len]
         .iter()
         .flatten()
@@ -416,9 +422,9 @@ fn random_hit(rng: &mut Pcg32, p: &DrumPattern, len: usize) -> Option<(usize, us
 pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
     let len = steps_of(length);
-    let mut p = DrumPattern {
+    let mut p = DrumGrid {
+        steps: vec![[DrumHit::Off; DRUM_INSTRUMENTS]; STEPS],
         length: len as u8,
-        ..DrumPattern::default()
     };
     let kick = if rng.gen_bool(0.5) {
         KICKS[0]
@@ -447,13 +453,13 @@ pub fn drum_template(seed: u64, length: u8) -> DrumPattern {
         }
     }
     open_mutes_closed(&mut p, len);
-    p
+    DrumPattern { roll: p.to_roll() }
 }
 
 pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
     let mut rng = Pcg32::seed_from_u64(seed);
-    let mut out = p.clone();
-    let len = steps_of(p.length);
+    let mut out = DrumGrid::from_roll(&p.roll);
+    let len = steps_of(p.roll.length);
     let step_weights: Vec<f32> = (0..len)
         .map(|i| STEP_WEIGHTS[i % STEP_WEIGHTS.len()])
         .collect();
@@ -498,7 +504,9 @@ pub fn evolve_drums(p: &DrumPattern, seed: u64) -> DrumPattern {
         }
     }
     open_mutes_closed(&mut out, len);
-    out
+    DrumPattern {
+        roll: out.to_roll(),
+    }
 }
 
 /// A new Mono sound from `seed`: one of four characters (bass, lead,
@@ -639,10 +647,41 @@ mod tests {
     use crate::drums::BD;
     use crate::drums::{CH, CP, OH};
     use crate::machine::MachineUid;
-    use crate::project::SynthStep;
+    use crate::steps::SynthStep;
+
+    fn grid(p: &DrumPattern) -> DrumGrid {
+        DrumGrid::from_roll(&p.roll)
+    }
+
+    fn sgrid(p: &SynthPattern) -> SynthGrid {
+        SynthGrid::from_roll(&p.roll)
+    }
+
+    /// An empty drum pattern of `length`, with `set` hits on it.
+    fn drums(length: u8, set: impl FnOnce(&mut DrumGrid)) -> DrumPattern {
+        let mut g = grid(&DrumPattern::default());
+        g.length = length;
+        set(&mut g);
+        DrumPattern { roll: g.to_roll() }
+    }
+
+    /// A synth pattern of `length` with every step played, `set` on it.
+    fn played(length: u8, set: impl Fn(usize, &mut SynthStep)) -> SynthPattern {
+        let mut g = sgrid(&SynthPattern::default());
+        g.length = length;
+        for (i, s) in g.steps.iter_mut().enumerate() {
+            s.gate = Gate::On;
+            set(i, s);
+        }
+        SynthPattern {
+            roll: g.to_roll(),
+            ..SynthPattern::default()
+        }
+    }
 
     fn hits(p: &DrumPattern) -> usize {
-        p.steps
+        grid(p)
+            .steps
             .iter()
             .flatten()
             .filter(|h| **h != DrumHit::Off)
@@ -652,8 +691,9 @@ mod tests {
     #[test]
     fn template_has_a_kick_on_one_and_a_backbeat() {
         for seed in 0..50 {
-            let p = drum_template(seed, 16);
-            assert_eq!(p.length, 16);
+            let t = drum_template(seed, 16);
+            assert_eq!(t.roll.length, 16);
+            let p = grid(&t);
             assert_eq!(p.steps[0][BD], DrumHit::Accent, "seed {seed}");
             for s in [4, 12] {
                 assert!(
@@ -671,8 +711,9 @@ mod tests {
 
     #[test]
     fn template_repeats_over_longer_patterns() {
-        let p = drum_template(3, 32);
-        assert_eq!(p.length, 32);
+        let t = drum_template(3, 32);
+        assert_eq!(t.roll.length, 32);
+        let p = grid(&t);
         assert_eq!(p.steps[16][BD], DrumHit::Accent);
         assert_eq!(&p.steps[..16], &p.steps[16..32]);
         assert!(p.steps[32..].iter().flatten().all(|h| *h == DrumHit::Off));
@@ -688,9 +729,10 @@ mod tests {
         let base = drum_template(1, 16);
         let mut changed = 0;
         for seed in 0..50 {
-            let e = evolve_drums(&base, seed);
-            assert_eq!(e, evolve_drums(&base, seed));
-            let diff = base
+            let evolved = evolve_drums(&base, seed);
+            assert_eq!(evolved, evolve_drums(&base, seed));
+            let e = grid(&evolved);
+            let diff = grid(&base)
                 .steps
                 .iter()
                 .flatten()
@@ -731,20 +773,21 @@ mod tests {
         }
     }
 
-    fn open_hat_base() -> DrumPattern {
-        let mut p = DrumPattern::default();
-        for s in [0, 4, 8, 12] {
-            p.steps[s][CH] = DrumHit::On;
-        }
-        for s in [2, 6, 10, 14] {
-            p.steps[s][OH] = DrumHit::On;
-        }
-        p
+    fn open_hat_base(length: u8, set: impl FnOnce(&mut DrumGrid)) -> DrumPattern {
+        drums(length, |p| {
+            for s in [0, 4, 8, 12] {
+                p.steps[s][CH] = DrumHit::On;
+            }
+            for s in [2, 6, 10, 14] {
+                p.steps[s][OH] = DrumHit::On;
+            }
+            set(p);
+        })
     }
 
     #[test]
     fn evolve_always_changes_a_pattern_with_open_hats() {
-        let base = open_hat_base();
+        let base = open_hat_base(16, |_| {});
         for seed in 0..200 {
             assert_ne!(evolve_drums(&base, seed), base, "seed {seed}");
         }
@@ -752,13 +795,13 @@ mod tests {
 
     #[test]
     fn evolve_leaves_steps_beyond_the_length_alone() {
-        let mut base = open_hat_base();
-        base.length = 8;
-        base.steps[20][OH] = DrumHit::On;
-        base.steps[20][CH] = DrumHit::On;
+        let base = open_hat_base(8, |p| {
+            p.steps[20][OH] = DrumHit::On;
+            p.steps[20][CH] = DrumHit::On;
+        });
         for seed in 0..100 {
             let e = evolve_drums(&base, seed);
-            assert_eq!(e.steps[20], base.steps[20], "seed {seed}");
+            assert_eq!(grid(&e).steps[20], grid(&base).steps[20], "seed {seed}");
         }
     }
 
@@ -767,23 +810,24 @@ mod tests {
         let ts: Vec<DrumPattern> = (0..50).map(|s| drum_template(s, 16)).collect();
         let unique = (0..ts.len()).filter(|&i| !ts[..i].contains(&ts[i])).count();
         assert!(unique >= 3, "only {unique} distinct templates");
-        assert!(ts.iter().any(|p| p.steps[4][SD] != DrumHit::Off));
-        assert!(ts.iter().any(|p| p.steps[4][CP] != DrumHit::Off));
+        assert!(ts.iter().any(|p| grid(p).steps[4][SD] != DrumHit::Off));
+        assert!(ts.iter().any(|p| grid(p).steps[4][CP] != DrumHit::Off));
     }
 
     #[test]
     fn short_lengths_stay_inside_the_length() {
         for seed in 0..50 {
             let t = drum_template(seed, 3);
-            assert_eq!(t.length, 3);
-            assert!(t.steps[3..].iter().flatten().all(|h| *h == DrumHit::Off));
+            assert_eq!(t.roll.length, 3);
+            assert!(
+                grid(&t).steps[3..]
+                    .iter()
+                    .flatten()
+                    .all(|h| *h == DrumHit::Off)
+            );
             for len in [1u8, 3] {
-                let mut base = DrumPattern {
-                    length: len,
-                    ..DrumPattern::default()
-                };
-                base.steps[0][BD] = DrumHit::On;
-                let e = evolve_drums(&base, seed);
+                let base = drums(len, |p| p.steps[0][BD] = DrumHit::On);
+                let e = grid(&evolve_drums(&base, seed));
                 assert!(
                     e.steps[len as usize..]
                         .iter()
@@ -797,14 +841,11 @@ mod tests {
 
     #[test]
     fn slide_only_dice_clear_accents_after_slides() {
-        let mut base = SynthPattern::default();
-        for s in base.steps.iter_mut() {
-            s.accent = true;
-        }
+        let base = played(16, |_, s| s.accent = true);
         let g = groove_four_on_floor();
         let mut any_slide = false;
         for seed in 0..100 {
-            let r = randomise_synth(
+            let r = sgrid(&randomise_synth(
                 &base,
                 Dice {
                     slide: true,
@@ -812,7 +853,7 @@ mod tests {
                 },
                 &g,
                 seed,
-            );
+            ));
             for i in 0..16 {
                 let after_slide = i > 0 && r.steps[i - 1].slide;
                 any_slide |= r.steps[i].slide;
@@ -826,10 +867,7 @@ mod tests {
     fn octave_die_stays_within_one_octave_and_changes_something() {
         let mut changed = false;
         for seed in 0..100 {
-            let mut base = SynthPattern::default();
-            for (i, s) in base.steps.iter_mut().enumerate() {
-                s.octave = [-1, 0, 1][i % 3];
-            }
+            let base = played(16, |i, s| s.octave = [-1, 0, 1][i % 3]);
             let r = randomise_synth(
                 &base,
                 Dice {
@@ -839,7 +877,7 @@ mod tests {
                 &groove_four_on_floor(),
                 seed,
             );
-            for (a, b) in base.steps.iter().zip(&r.steps).take(16) {
+            for (a, b) in sgrid(&base).steps.iter().zip(&sgrid(&r).steps).take(16) {
                 assert!((-1..=1).contains(&b.octave), "seed {seed}");
                 changed |= a.octave != b.octave;
             }
@@ -849,14 +887,10 @@ mod tests {
 
     #[test]
     fn a_short_groove_wraps_over_a_longer_synth_pattern() {
-        let mut g = DrumPattern {
-            length: 4,
-            ..DrumPattern::default()
-        };
-        g.steps[0][BD] = DrumHit::On;
+        let g = drums(4, |p| p.steps[0][BD] = DrumHit::On);
         let mut on = [0u32; 16];
         for seed in 0..300 {
-            let r = randomise_synth(
+            let r = sgrid(&randomise_synth(
                 &SynthPattern::default(),
                 Dice {
                     rest: true,
@@ -864,7 +898,7 @@ mod tests {
                 },
                 &g,
                 seed,
-            );
+            ));
             for (i, c) in on.iter_mut().enumerate() {
                 if r.steps[i].gate != Gate::Off {
                     *c += 1;
@@ -879,11 +913,11 @@ mod tests {
     }
 
     fn groove_four_on_floor() -> DrumPattern {
-        let mut g = DrumPattern::default();
-        for s in [0, 4, 8, 12] {
-            g.steps[s][BD] = DrumHit::On;
-        }
-        g
+        drums(16, |g| {
+            for s in [0, 4, 8, 12] {
+                g.steps[s][BD] = DrumHit::On;
+            }
+        })
     }
 
     fn semis(s: &SynthStep) -> i32 {
@@ -929,7 +963,13 @@ mod tests {
             &g,
             3,
         );
-        for (a, b) in base.steps.iter().zip(&r.steps) {
+        // A rest has no note: only steps that play in both compare.
+        for (a, b) in sgrid(&base)
+            .steps
+            .iter()
+            .zip(&sgrid(&r).steps)
+            .filter(|(a, b)| a.gate != Gate::Off && b.gate != Gate::Off)
+        {
             assert_eq!(
                 (a.note, a.octave, a.accent, a.slide),
                 (b.note, b.octave, b.accent, b.slide)
@@ -944,7 +984,7 @@ mod tests {
             &g,
             3,
         );
-        for (a, b) in base.steps.iter().zip(&r.steps) {
+        for (a, b) in sgrid(&base).steps.iter().zip(&sgrid(&r).steps) {
             assert_eq!((a.gate, a.accent, a.slide), (b.gate, b.accent, b.slide));
         }
     }
@@ -952,23 +992,29 @@ mod tests {
     #[test]
     fn notes_stay_in_range_and_leaps_are_folded() {
         let g = groove_four_on_floor();
+        let all_on = played(16, |_, _| {});
         for seed in 0..500 {
-            let r = randomise_synth(&SynthPattern::default(), Dice::ALL, &g, seed);
+            let r = sgrid(&randomise_synth(
+                &SynthPattern::default(),
+                Dice::ALL,
+                &g,
+                seed,
+            ));
             for s in r.steps.iter().take(16) {
                 assert!(
                     s.note < 12 && (-1..=1).contains(&s.octave),
                     "seed {seed}: {s:?}"
                 );
             }
-            let n = randomise_synth(
-                &SynthPattern::default(),
+            let n = sgrid(&randomise_synth(
+                &all_on,
                 Dice {
                     notes: true,
                     ..Dice::default()
                 },
                 &g,
                 seed,
-            );
+            ));
             for w in n.steps[..16].windows(2) {
                 assert!(
                     (semis(&w[1]) - semis(&w[0])).abs() <= MAX_LEAP,
@@ -982,7 +1028,12 @@ mod tests {
     fn never_an_accent_directly_after_a_slide() {
         let g = groove_four_on_floor();
         for seed in 0..300 {
-            let r = randomise_synth(&SynthPattern::default(), Dice::ALL, &g, seed);
+            let r = sgrid(&randomise_synth(
+                &SynthPattern::default(),
+                Dice::ALL,
+                &g,
+                seed,
+            ));
             for i in 1..16 {
                 assert!(
                     !(r.steps[i - 1].slide && r.steps[i].accent),
@@ -997,7 +1048,7 @@ mod tests {
         let g = groove_four_on_floor();
         let (mut on_hit, mut on_off) = (0, 0);
         for seed in 0..300 {
-            let r = randomise_synth(
+            let r = sgrid(&randomise_synth(
                 &SynthPattern::default(),
                 Dice {
                     rest: true,
@@ -1005,7 +1056,7 @@ mod tests {
                 },
                 &g,
                 seed,
-            );
+            ));
             for i in 0..16 {
                 if r.steps[i].gate != Gate::Off {
                     if i % 4 == 0 { on_hit += 1 } else { on_off += 1 }
@@ -1019,12 +1070,9 @@ mod tests {
 
     #[test]
     fn steps_beyond_the_length_are_untouched() {
-        let base = SynthPattern {
-            length: 8,
-            ..SynthPattern::default()
-        };
+        let base = played(8, |i, s| s.note = (i % 12) as u8);
         let r = randomise_synth(&base, Dice::ALL, &groove_four_on_floor(), 5);
-        assert_eq!(&r.steps[8..], &base.steps[8..]);
+        assert_eq!(&sgrid(&r).steps[8..], &sgrid(&base).steps[8..]);
     }
 
     fn load_voice(s: &mut crate::fm::FmSynth, v: &Dx7Voice) {

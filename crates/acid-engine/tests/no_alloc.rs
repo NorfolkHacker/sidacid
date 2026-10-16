@@ -64,6 +64,16 @@ const SAMPLER: MachineUid = MachineUid(6);
 /// 4-bar looped song using every machine, and master-level automation.
 fn busy_project() -> Project {
     let mut p = acid_engine::demo::demo_project();
+    // Every drum instrument, on and off the 1/16 grid, on both kits (the
+    // demo's acid lines already slide).
+    for uid in [MachineUid(3), MachineUid(4)] {
+        for inst in 0..8u8 {
+            p.kit_mut(uid).unwrap().patterns[0].roll.notes.push(Note {
+                accent: inst % 2 == 0,
+                ..Note::new(inst as u16 * 8 + 1, 4, inst, 100)
+            });
+        }
+    }
     for (i, root) in [48u8, 53, 55, 50].into_iter().enumerate() {
         for third in [0, 4, 7] {
             p.fm_mut(MachineUid(5)).unwrap().patterns[0]

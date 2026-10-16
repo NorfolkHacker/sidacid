@@ -677,8 +677,8 @@ impl Engine {
     pub fn pattern_len(&self, uid: MachineUid, index: u8) -> Option<u8> {
         let i = index as usize;
         match &self.slots[self.position(uid)?].patterns {
-            SlotPatterns::Synth(bank) => bank.get(i).map(|p| p.length),
-            SlotPatterns::Drum(bank) => bank.get(i).map(|p| p.length),
+            SlotPatterns::Synth(bank) => bank.get(i).map(|p| p.roll.length),
+            SlotPatterns::Drum(bank) => bank.get(i).map(|p| p.roll.length),
             SlotPatterns::Notes(bank) => bank.get(i).map(|p| p.length),
         }
     }
@@ -965,7 +965,9 @@ mod tests {
     /// all end and restart on each wrap; synth lanes) and a song lane on
     /// every param.
     fn dense_rack(types: &[MachineType]) -> Project {
-        use crate::project::{DrumHit, MachineBody, Note, ParamLane};
+        use crate::params::DRUM_INSTRUMENTS;
+        use crate::project::{MachineBody, Note, ParamLane};
+        use crate::steps::{ACID_VEL, DrumGrid, DrumHit};
         let mut p = Project::default();
         p.machines = (1..=MAX_MACHINES as u16)
             .zip(types.iter().cycle())
@@ -977,17 +979,19 @@ mod tests {
             match &mut m.body {
                 MachineBody::Synth(s) => {
                     let pat = &mut s.patterns[0];
-                    pat.length = 1;
-                    pat.steps[0].gate = crate::project::Gate::On;
+                    pat.roll.length = 1;
+                    pat.roll.notes.push(Note::new(0, 4, 36, ACID_VEL));
                     pat.param_lane = Some(ParamLane {
                         param: ParamId::Machine(uid, MachineParam::Synth(SynthParam::Cutoff)),
                         values: vec![Some(0.5); crate::project::STEPS],
                     });
                 }
                 MachineBody::Kit(k) => {
-                    for step in &mut k.patterns[0].steps {
-                        step.fill(DrumHit::Accent);
+                    k.patterns[0].roll = DrumGrid {
+                        steps: vec![[DrumHit::Accent; DRUM_INSTRUMENTS]; crate::project::STEPS],
+                        length: 16,
                     }
+                    .to_roll();
                 }
                 MachineBody::Fm(crate::project::FmMachine { patterns, .. })
                 | MachineBody::Sampler(crate::project::SamplerMachine { patterns, .. })
@@ -1084,7 +1088,9 @@ mod tests {
         p.next_uid = 8;
         let mut eng = Engine::from_project(48000.0, &p);
         eng.play();
-        let (mut l, mut r) = (vec![0.0; 4096], vec![0.0; 4096]);
+        // Past the first step (5760 samples): the playhead is the step
+        // of the last tick run.
+        let (mut l, mut r) = (vec![0.0; 8192], vec![0.0; 8192]);
         eng.process(&mut l, &mut r);
         assert!(eng.playhead()[6] > 0, "slot 7 advanced");
     }
@@ -1758,11 +1764,7 @@ mod tests {
         ) else {
             panic!("a synth pattern comes back")
         };
-        assert!(
-            old.steps
-                .iter()
-                .any(|s| s.gate != crate::project::Gate::Off)
-        );
+        assert!(!old.roll.notes.is_empty());
         let PatternData::Drum(old_drums) = set_pattern(
             &mut e,
             pos_uid(2),
@@ -1771,13 +1773,7 @@ mod tests {
         ) else {
             panic!("a drum pattern comes back")
         };
-        assert!(
-            old_drums
-                .steps
-                .iter()
-                .flatten()
-                .any(|h| *h != crate::project::DrumHit::Off)
-        );
+        assert!(!old_drums.roll.notes.is_empty());
     }
 
     #[test]
@@ -1823,13 +1819,24 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         let mut short = SynthPattern::default();
-        short.steps.truncate(3);
+        short.roll.length = 0;
         let short = PatternData::Synth(short);
         assert_eq!(set_pattern(&mut e, pos_uid(0), 0, short.clone()), short);
         let mut zero = DrumPattern::default();
-        zero.length = 0;
+        zero.roll.length = 0;
         let zero = PatternData::Drum(zero);
         assert_eq!(set_pattern(&mut e, pos_uid(2), 0, zero.clone()), zero);
+        let mut ninth = DrumPattern::default();
+        ninth
+            .roll
+            .notes
+            .push(crate::project::Note::new(0, 4, 8, 100));
+        let ninth = PatternData::Drum(ninth);
+        assert_eq!(
+            set_pattern(&mut e, pos_uid(2), 0, ninth.clone()),
+            ninth,
+            "no ninth drum"
+        );
         let mut lane = SynthPattern::default();
         lane.param_lane = Some(crate::project::ParamLane {
             param: ParamId::Fx(crate::params::FxParam::DelayMs),
@@ -1927,16 +1934,13 @@ mod tests {
         let PatternData::Synth(p) = p else {
             panic!("a synth pattern comes back")
         };
-        assert!(
-            p.steps.iter().any(|s| s.gate != crate::project::Gate::Off),
-            "got the old pattern back"
-        );
+        assert!(!p.roll.notes.is_empty(), "got the old pattern back");
         let mut bad = SynthPattern::default();
-        bad.steps.pop();
+        bad.roll.length = 0;
         let mut bad = PatternData::Synth(bad);
         assert!(!e.swap_pattern(pos_uid(0), 1, &mut bad));
         assert!(
-            matches!(&bad, PatternData::Synth(b) if b.steps.len() == 63),
+            matches!(&bad, PatternData::Synth(b) if b.roll.length == 0),
             "rejected pattern is untouched"
         );
         let mut d = PatternData::Drum(DrumPattern::default());
@@ -2161,7 +2165,7 @@ mod tests {
             .unwrap()
             .patterns[0]
             .clone();
-        long.length = 32;
+        long.roll.length = 32;
         set_pattern(&mut e, pos_uid(0), 7, PatternData::Synth(long));
         e.set_mode(crate::sequencer::Mode::Song);
         e.play();

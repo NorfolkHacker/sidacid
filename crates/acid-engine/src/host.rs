@@ -561,11 +561,7 @@ mod tests {
                 let PatternData::Synth(old) = *old else {
                     panic!("the synth pattern comes back")
                 };
-                assert!(
-                    old.steps
-                        .iter()
-                        .any(|s| s.gate != crate::project::Gate::Off)
-                );
+                assert!(!old.roll.notes.is_empty());
                 found = true;
             }
         }
