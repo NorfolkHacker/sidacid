@@ -43,6 +43,7 @@ impl SidAcidApp {
         self.view.dock.range_from = None;
         for panel in self.view.panels.values_mut() {
             panel.selected.clear();
+            panel.song_sel.clear();
         }
     }
 

@@ -7,10 +7,12 @@ use super::key_entry::LaneKind;
 use super::lane_geom::{ZOOMS, follow_scroll, tick_w};
 use super::note_ops::PasteError;
 use super::poly_edit::Snap;
-use super::{NoteClip, SidAcidApp, theme};
+use super::{NoteClip, SidAcidApp, song_lane, song_ops, theme};
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::project::{Note, NotePattern, TICKS_PER_STEP};
+use acid_engine::sequencer::Mode;
+use acid_engine::song;
 use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 /// Height of the ruler above the lanes.
@@ -164,22 +166,41 @@ impl SidAcidApp {
             .unwrap_or(0)
     }
 
-    /// The ruler, then the lanes.
+    /// The ruler, then the lanes (in Song mode, the song lanes).
     fn dock_body(&mut self, ui: &mut egui::Ui) {
+        let song = self.view.mode == Mode::Song;
         let tw = tick_w(ZOOMS[self.view.dock.zoom.min(ZOOMS.len() - 1)]);
+        let sw = song_lane::step_w(self.view.dock.zoom);
         let key_w = self.lane_key_w();
         let view_w = (ui.available_width() - key_w).max(0.0);
-        let content_w = self.longest_ticks() as f32 * tw;
-        if self.view.dock.follow
-            && let Some(uid) = self.focused()
-            && let Some(step) = self.playhead(uid, self.selected(uid))
-        {
-            let x = step as f32 * TICKS_PER_STEP as f32 * tw;
-            self.view.dock.scroll_x = follow_scroll(self.view.dock.scroll_x, view_w, x);
+        let content_w = if song {
+            // Room after the song's end to place more.
+            let end = self.with_lens(|lens| song::song_end(&self.doc.project.song, lens));
+            (end + SONG_TAIL) as f32 * sw
+        } else {
+            self.longest_ticks() as f32 * tw
+        };
+        if self.view.dock.follow {
+            let playhead = if song {
+                self.status
+                    .playing
+                    .then_some(self.status.song_step as f32 * sw)
+            } else {
+                self.focused()
+                    .and_then(|uid| self.playhead(uid, self.selected(uid)))
+                    .map(|step| step as f32 * TICKS_PER_STEP as f32 * tw)
+            };
+            if let Some(x) = playhead {
+                self.view.dock.scroll_x = follow_scroll(self.view.dock.scroll_x, view_w, x);
+            }
         }
         let max_scroll = (content_w - view_w).max(0.0);
         self.view.dock.scroll_x = self.view.dock.scroll_x.clamp(0.0, max_scroll);
-        self.ruler(ui, key_w, tw, view_w, content_w);
+        if song {
+            self.song_ruler(ui, key_w, sw, view_w, content_w);
+        } else {
+            self.ruler(ui, key_w, tw, view_w, content_w);
+        }
         // A solid, always-shown bar, so a scrolled stack is plain to see.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         let out = egui::ScrollArea::vertical()
@@ -191,7 +212,12 @@ impl SidAcidApp {
             .show(ui, |ui| {
                 for uid in self.doc.project.rack_uids() {
                     let width = ui.available_width();
-                    self.lane(ui, uid, width);
+                    // A double-click on a block switches mode mid-stack.
+                    if self.view.mode == Mode::Song {
+                        self.song_lane(ui, uid, width);
+                    } else {
+                        self.lane(ui, uid, width);
+                    }
                     ui.add_space(LANE_GAP);
                 }
             });
@@ -210,12 +236,7 @@ impl SidAcidApp {
         let left = rect.left() + key_w;
         let strip = Rect::from_min_max(pos2(left, rect.top()), rect.max);
         let bar = Rect::from_min_max(pos2(left, rect.bottom() - THUMB_H), rect.max);
-        let resp = ui.interact(bar, ui.id().with("dock_ruler_thumb"), Sense::drag());
-        if resp.dragged() {
-            let max_scroll = (content_w - view_w).max(0.0);
-            let x = self.view.dock.scroll_x + resp.drag_delta().x;
-            self.view.dock.scroll_x = x.clamp(0.0, max_scroll);
-        }
+        let resp = self.ruler_thumb_drag(ui, bar, view_w, content_w);
         // Above the thumb strip: a drag picks a time range, a click clears it.
         let numbers = Rect::from_min_max(strip.min, pos2(strip.right(), bar.top()));
         let picker = ui.interact(
@@ -258,15 +279,7 @@ impl SidAcidApp {
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, theme::GRID_DARK);
         let scroll_x = self.view.dock.scroll_x;
-        if content_w > 0.0 && view_w > 0.0 {
-            let shown = (view_w / content_w).min(1.0);
-            let x0 = left + (scroll_x / content_w).min(1.0) * view_w;
-            let thumb = Rect::from_min_max(
-                pos2(x0, bar.top()),
-                pos2((x0 + shown * view_w).min(strip.right()), rect.bottom()),
-            );
-            painter.rect_filled(thumb, 2.0, theme::KNOB_TRACK);
-        }
+        draw_thumb(&painter, bar, scroll_x, view_w, content_w);
         let step_w = TICKS_PER_STEP as f32 * tw;
         let steps = (content_w / step_w).round() as usize;
         for step in (0..steps).step_by(4) {
@@ -296,6 +309,135 @@ impl SidAcidApp {
             );
             painter.rect_filled(band, 0.0, theme::ACID.gamma_multiply(0.35));
         }
+        resp.on_hover_text("Drag to scroll the lanes");
+    }
+
+    /// The thumb strip `bar` along the ruler's bottom: dragging it scrolls
+    /// every lane.
+    fn ruler_thumb_drag(
+        &mut self,
+        ui: &egui::Ui,
+        bar: Rect,
+        view_w: f32,
+        content_w: f32,
+    ) -> egui::Response {
+        let resp = ui.interact(bar, ui.id().with("dock_ruler_thumb"), Sense::drag());
+        if resp.dragged() {
+            let max_scroll = (content_w - view_w).max(0.0);
+            let x = self.view.dock.scroll_x + resp.drag_delta().x;
+            self.view.dock.scroll_x = x.clamp(0.0, max_scroll);
+        }
+        resp
+    }
+
+    /// The Song-mode ruler: bar numbers every 16 steps, the loop along the
+    /// top, the song cursor and the playhead, over the same thumb strip as
+    /// in Pattern mode. A click sets the song cursor (on a bar; Alt: on a
+    /// step) and clears the range; a drag picks a range of whole bars and
+    /// selects the blocks starting in it on every lane.
+    fn song_ruler(&mut self, ui: &mut egui::Ui, key_w: f32, sw: f32, view_w: f32, content_w: f32) {
+        use song_lane::{SongGeom, snap_bar};
+        use song_ops::BAR;
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(vec2(width, RULER_H), Sense::hover());
+        self.view.dock.ruler = Some(rect);
+        let left = rect.left() + key_w;
+        let strip = Rect::from_min_max(pos2(left, rect.top()), rect.max);
+        let bar = Rect::from_min_max(pos2(left, rect.bottom() - THUMB_H), rect.max);
+        let resp = self.ruler_thumb_drag(ui, bar, view_w, content_w);
+        let numbers = Rect::from_min_max(strip.min, pos2(strip.right(), bar.top()));
+        let picker = ui.interact(
+            numbers,
+            ui.id().with("dock_ruler_range"),
+            Sense::click_and_drag(),
+        );
+        let geom = |scroll_x| SongGeom {
+            left,
+            step_w: sw,
+            scroll_x,
+        };
+        let pressed_on = ui.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.press_origin())
+                .flatten()
+                .filter(|o| numbers.contains(*o))
+        });
+        if let Some(o) = pressed_on {
+            let step = geom(self.view.dock.scroll_x).step_at(o.x);
+            self.view.dock.range_from = Some(step.min(u16::MAX as u32) as u16);
+        }
+        let alt = ui.input(|i| i.modifiers.alt);
+        if picker.clicked()
+            && let Some(p) = picker.interact_pointer_pos()
+        {
+            self.view.dock.range = None;
+            let step = geom(self.view.dock.scroll_x).step_at(p.x);
+            self.set_song_cursor(snap_bar(step, alt));
+        } else if picker.dragged()
+            && let (Some(from), Some(p)) =
+                (self.view.dock.range_from, picker.interact_pointer_pos())
+        {
+            let a = snap_bar(from as u32, false);
+            let b = snap_bar(geom(self.view.dock.scroll_x).step_at(p.x), false);
+            let lo = a.min(b);
+            let hi = (a.max(b) + BAR).min(u16::MAX as u32);
+            self.view.dock.range = Some((lo as u16, hi as u16));
+            self.select_song_range(lo, hi);
+        }
+        let painter = ui.painter_at(strip);
+        painter.rect_filled(strip, 0.0, theme::GRID_DARK);
+        let g = geom(self.view.dock.scroll_x);
+        draw_thumb(&painter, bar, g.scroll_x, view_w, content_w);
+        let first = g.step_at(left) / BAR * BAR;
+        let last = g.step_at(strip.right());
+        for step in (first..=last).step_by(BAR as usize) {
+            let x = g.x_of(step);
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(1.0_f32, theme::GRID_LINE),
+            );
+            painter.text(
+                pos2(x + 2.0, rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("{}", step / BAR + 1),
+                FontId::monospace(10.0),
+                ui.visuals().text_color(),
+            );
+        }
+        if let Some((a, b)) = self.doc.project.song.loop_range {
+            let r = Rect::from_min_max(
+                pos2(g.x_of(a), rect.top()),
+                pos2(g.x_of(b), rect.top() + 2.0),
+            );
+            painter.rect_filled(r, 0.0, theme::VIOLET);
+        }
+        if let Some((lo, hi)) = self.view.dock.range {
+            let band = Rect::from_min_max(
+                pos2(g.x_of(lo as u32), rect.top()),
+                pos2(g.x_of(hi as u32), bar.top()),
+            );
+            painter.rect_filled(band, 0.0, theme::ACID.gamma_multiply(0.35));
+        }
+        let cx = g.x_of(self.view.song_cursor);
+        let top = rect.top() + 2.0;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(cx - 4.0, top),
+                pos2(cx + 4.0, top),
+                pos2(cx, top + 6.0),
+            ],
+            theme::QUEUED,
+            Stroke::NONE,
+        ));
+        if self.status.playing {
+            let x = g.x_of(self.status.song_step);
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, bar.top())],
+                Stroke::new(2.0_f32, theme::ACID),
+            );
+        }
+        picker.on_hover_text("Click to set the song start; drag to pick bars");
         resp.on_hover_text("Drag to scroll the lanes");
     }
 
@@ -331,6 +473,22 @@ impl SidAcidApp {
         if outside {
             self.view.dock.keyboard = false;
         }
+    }
+}
+
+/// Steps shown after the song's end in Song mode, to place more.
+const SONG_TAIL: u32 = 64;
+
+/// The visible part of the content, as a thumb on the ruler's strip `bar`.
+fn draw_thumb(painter: &egui::Painter, bar: Rect, scroll_x: f32, view_w: f32, content_w: f32) {
+    if content_w > 0.0 && view_w > 0.0 {
+        let shown = (view_w / content_w).min(1.0);
+        let x0 = bar.left() + (scroll_x / content_w).min(1.0) * view_w;
+        let thumb = Rect::from_min_max(
+            pos2(x0, bar.top()),
+            pos2((x0 + shown * view_w).min(bar.right()), bar.bottom()),
+        );
+        painter.rect_filled(thumb, 2.0, theme::KNOB_TRACK);
     }
 }
 
@@ -379,10 +537,14 @@ impl SidAcidApp {
     /// clipboard edits wait until it is dropped.
     pub(crate) fn mouse_editing(&self) -> bool {
         use super::poly_edit::LaneDrag;
+        use super::song_lane::SongDrag;
         self.view.panels.values().any(|p| {
             matches!(
                 p.drag,
                 Some(LaneDrag::Move { .. } | LaneDrag::Resize { .. })
+            ) || matches!(
+                p.song_drag,
+                Some(SongDrag::Move { .. } | SongDrag::Resize { .. })
             )
         })
     }
@@ -397,6 +559,7 @@ impl SidAcidApp {
         for (uid, panel) in self.view.panels.iter_mut() {
             if Some(*uid) != focus {
                 panel.selected.clear();
+                panel.song_sel.clear();
             }
         }
     }
@@ -1164,6 +1327,84 @@ mod tests {
         let x = app.view.dock.scroll_x;
         assert!((x - 60.0).abs() < 1.0, "scrolled: {x}");
         assert_eq!(app.view.dock.range, None, "no range from the strip");
+    }
+
+    fn song_app() -> SidAcidApp {
+        use crate::test_rack::SYNTH1;
+        use acid_engine::project::{Block, PatternRef};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.doc.project.song.lane_mut(SYNTH1).extend([
+            Block::new(0, PatternRef(0)),
+            Block::new(16, PatternRef(1)),
+            Block::new(48, PatternRef(2)),
+        ]);
+        app.view.mode = Mode::Song;
+        app.view.dock.zoom = 0;
+        app.view.dock.follow = false;
+        app
+    }
+
+    #[test]
+    fn a_song_ruler_click_sets_the_song_cursor_on_a_bar() {
+        use acid_engine::host::Command;
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let sw = song_lane::step_w(app.view.dock.zoom);
+        app.view.dock.range = Some((0, 16));
+        app.flushed.clear();
+        press(
+            &mut app,
+            &ctx,
+            pos2(left + 20.5 * sw, ruler.top() + 4.0),
+            1.0,
+        );
+        assert_eq!(app.view.song_cursor, 16);
+        assert_eq!(app.view.dock.range, None, "the range goes");
+        assert!(
+            app.flushed
+                .iter()
+                .any(|c| matches!(c, Command::SetSongStart(16))),
+            "the engine starts there"
+        );
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn a_song_ruler_drag_picks_bars_and_selects_their_blocks() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let before = app.doc.project.clone();
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let sw = song_lane::step_w(app.view.dock.zoom);
+        let from = pos2(left + 20.5 * sw, ruler.top() + 4.0);
+        drag_by(&mut app, &ctx, from, vec2(16.0 * sw, 0.0), 4, 1.0);
+        assert_eq!(app.view.dock.range, Some((16, 48)), "whole bars, in steps");
+        let lane = app.doc.project.song.lane(SYNTH1);
+        let starts: Vec<u32> = app
+            .block_selection(SYNTH1)
+            .iter()
+            .map(|&i| lane[i].start)
+            .collect();
+        assert_eq!(starts, [16], "the block starting in the range");
+        assert_eq!(app.doc.project, before, "no edit");
+    }
+
+    #[test]
+    fn the_whole_app_draws_in_song_mode_while_playing() {
+        let mut app = song_app();
+        app.status.playing = true;
+        app.status.song_step = 20;
+        app.doc.project.song.loop_range = Some((16, 32));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        assert!(app.view.dock.lanes.is_some());
     }
 
     fn press(app: &mut SidAcidApp, ctx: &egui::Context, at: egui::Pos2, time: f64) {

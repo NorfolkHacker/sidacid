@@ -31,6 +31,8 @@ mod sampler_load;
 mod sampler_panel;
 mod sampler_ui;
 mod scroll;
+mod song_lane;
+mod song_ops;
 mod song_panel;
 mod synth_panel;
 pub mod theme;
@@ -60,6 +62,11 @@ pub struct PanelState {
     /// The pattern `selected` belongs to; another selected pattern means
     /// no selection.
     pub sel_slot: u8,
+    /// The machine's selected song blocks (Song mode), by value (see
+    /// `song_ops::resolve`).
+    pub song_sel: Vec<acid_engine::project::Block>,
+    /// The song lane's mouse drag in progress.
+    pub song_drag: Option<song_lane::SongDrag>,
     /// Vertical scroll of this machine's dock lane; None until first placed
     /// at `roll_start_pitch`.
     pub lane_scroll_y: Option<f32>,
@@ -100,13 +107,14 @@ pub struct DockState {
     /// The lane stack's view this frame, and how far it is scrolled down.
     pub lanes: Option<egui::Rect>,
     pub lanes_offset: f32,
-    /// A time range picked on the ruler (ticks, end exclusive).
+    /// A time range picked on the ruler (end exclusive): ticks in Pattern
+    /// mode, steps in Song mode.
     pub range: Option<(u16, u16)>,
     /// Delete/Backspace is held after its press removed the selection:
     /// its auto-repeats are swallowed, not passed on to keyboard entry.
     pub delete_held: bool,
-    /// The tick a ruler range drag was pressed on, fixed at the press so
-    /// the start holds while the lanes scroll under it.
+    /// The tick (Song mode: step) a ruler range drag was pressed on, fixed
+    /// at the press so the start holds while the lanes scroll under it.
     pub range_from: Option<u16>,
 }
 

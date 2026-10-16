@@ -143,10 +143,23 @@ impl SidAcidApp {
         let spacing = ui.spacing().item_spacing.y;
         ui.spacing_mut().item_spacing.y = 0.0;
         let origin = ui.cursor().min;
-        self.lane_header(ui, uid, slot, view, width);
+        self.lane_header(ui, uid, slot, view, width, true);
         if !view.collapsed {
             self.lane_body(ui, uid, slot, pattern, view, width);
         }
+        self.lane_outline(ui, uid, origin, width);
+        ui.spacing_mut().item_spacing.y = spacing;
+    }
+
+    /// Outlines the focused machine's lane, drawn from `origin` down to
+    /// the `ui` cursor.
+    pub(super) fn lane_outline(
+        &self,
+        ui: &egui::Ui,
+        uid: MachineUid,
+        origin: egui::Pos2,
+        width: f32,
+    ) {
         if self.focused() == Some(uid) {
             let outline = Rect::from_min_max(origin, pos2(origin.x + width, ui.cursor().top()));
             ui.painter().rect_stroke(
@@ -156,18 +169,19 @@ impl SidAcidApp {
                 StrokeKind::Inside,
             );
         }
-        ui.spacing_mut().item_spacing.y = spacing;
     }
 
-    /// The lane's header row: collapse arrow, name, pattern, strip toggle.
-    /// The toggles change the machine's `LaneView` directly (not undoable).
-    fn lane_header(
+    /// The lane's header row: collapse arrow, name, pattern, and (with
+    /// `strip_toggle`) the strip toggle. The toggles change the machine's
+    /// `LaneView` directly (not undoable).
+    pub(super) fn lane_header(
         &mut self,
         ui: &mut egui::Ui,
         uid: MachineUid,
         slot: u8,
         view: LaneView,
         width: f32,
+        strip_toggle: bool,
     ) {
         let (rect, _) = ui.allocate_exact_size(vec2(width, HEADER_H), Sense::hover());
         let mut row = ui.new_child(
@@ -206,13 +220,14 @@ impl SidAcidApp {
             .clicked();
         row.label(RichText::new(self.panel_title(uid)).strong());
         row.label(RichText::new(PatternRef(slot).label()).monospace().weak());
-        let strip = row
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.selectable_label(view.strip, RichText::new("Strip").small())
-                    .on_hover_text("Show the velocity / accent strip")
-                    .clicked()
-            })
-            .inner;
+        let strip = strip_toggle
+            && row
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.selectable_label(view.strip, RichText::new("Strip").small())
+                        .on_hover_text("Show the velocity / accent strip")
+                        .clicked()
+                })
+                .inner;
         if let Some(m) = self.doc.project.machine_mut(uid) {
             m.lane.collapsed ^= collapse;
             m.lane.strip ^= strip;
@@ -789,7 +804,7 @@ impl SidAcidApp {
     /// The mouse wheel over a lane's grid: vertical scrolls the pitches of
     /// a melodic lane, horizontal (or Shift+vertical) the dock. The wheel
     /// is consumed so the area the lane sits in does not scroll too.
-    fn lane_wheel(&mut self, ui: &egui::Ui, uid: MachineUid, melodic: bool, max_y: f32) {
+    pub(super) fn lane_wheel(&mut self, ui: &egui::Ui, uid: MachineUid, melodic: bool, max_y: f32) {
         let (delta, shift) = ui.input(|i| (i.raw_scroll_delta, i.modifiers.shift));
         let (mut dx, mut dy) = (delta.x, delta.y);
         // Shift turns a vertical wheel horizontal (egui mostly does this
@@ -875,7 +890,13 @@ impl SidAcidApp {
     }
 
     /// The strip under a lane that drags its height.
-    fn lane_handle(&mut self, ui: &mut egui::Ui, uid: MachineUid, height: f32, width: f32) {
+    pub(super) fn lane_handle(
+        &mut self,
+        ui: &mut egui::Ui,
+        uid: MachineUid,
+        height: f32,
+        width: f32,
+    ) {
         let (handle, resp) = ui.allocate_exact_size(vec2(width, HANDLE_H), Sense::drag());
         let resp = resp.on_hover_cursor(CursorIcon::ResizeVertical);
         let active = resp.hovered() || resp.dragged();
@@ -966,6 +987,7 @@ impl SidAcidApp {
         let mut open = false;
         for panel in self.view.panels.values_mut() {
             open |= panel.drag.take().is_some();
+            open |= panel.song_drag.take().is_some();
         }
         if open {
             self.doc.end_gesture();
