@@ -124,6 +124,10 @@ pub struct DockState {
     /// The inspector number being dragged or typed into, whose edits
     /// merge into one undo step.
     pub inspector_open: Option<egui::Id>,
+    /// A key that moves egui's focus (Tab, an arrow) came while the dock
+    /// had the keys: the focus before it, put back next frame if the key
+    /// moved it off the dock (see `SidAcidApp::hold_dock_focus`).
+    pub focus_held: Option<Option<egui::Id>>,
     /// Tests only: where each Song-mode header tool was drawn this frame.
     #[cfg(test)]
     pub tool_rects: Vec<(String, egui::Rect)>,
@@ -147,6 +151,7 @@ impl Default for DockState {
             delete_held: false,
             range_from: None,
             inspector_open: None,
+            focus_held: None,
             #[cfg(test)]
             tool_rects: Vec::new(),
         }
@@ -596,6 +601,7 @@ impl SidAcidApp {
         if self.take_audio_retry() {
             self.start_audio();
         }
+        self.hold_dock_focus(ctx);
         self.handle_shortcuts(ctx);
         self.record_automation();
         if self.view.was_playing && !self.status.playing && self.view.record {

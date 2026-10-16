@@ -187,8 +187,15 @@ fn merge_key(edit: &Edit) -> MergeKey {
     }
 }
 
-/// A redo history set aside by `Document::take_redo`.
-pub(crate) struct RedoStash(Vec<Step>);
+/// A change applied outside the undo history (an open note tool's live
+/// preview), until `commit_preview`, `settle_preview` or `discard_preview`.
+struct Preview {
+    /// Puts back what the preview changed: the first preview edit's
+    /// inverse, plus the song from before the first ripple.
+    restore: Edit,
+    /// Undo steps under the preview; edits made since it began are above.
+    depth: usize,
+}
 
 /// One undo or redo step: the edit that reverses it, and the generation
 /// of the document state the step leads to when redone.
@@ -236,6 +243,8 @@ pub struct Document {
     pass_open: bool,
     /// Why the last edit was refused (it changed nothing), until taken.
     refusal: Option<&'static str>,
+    /// The open preview, if any.
+    preview: Option<Preview>,
 }
 
 /// A pattern edit refused because its ripple would not fit the song.
@@ -261,6 +270,7 @@ impl Document {
             undo_byte_budget: UNDO_SAMPLE_BYTES,
             pass_open: false,
             refusal: None,
+            preview: None,
         }
     }
 
@@ -373,6 +383,9 @@ impl Document {
         if drop > 0 {
             self.base_generation = self.undo[drop - 1].generation;
             self.undo.drain(..drop);
+            if let Some(p) = &mut self.preview {
+                p.depth = p.depth.saturating_sub(drop);
+            }
         }
     }
 
@@ -433,14 +446,22 @@ impl Document {
     }
 
     /// Unsaved changes: the state differs from the one last saved (undoing
-    /// or redoing back to it counts as clean), or a pattern was selected.
+    /// or redoing back to it counts as clean), a pattern was selected, or
+    /// a preview is open.
     pub fn is_dirty(&self) -> bool {
-        self.unsaved_selection || self.generation() != self.saved_generation
+        self.unsaved_selection
+            || self.preview.is_some()
+            || self.generation() != self.saved_generation
     }
 
-    /// The current state is now the saved one.
+    /// The current state is now the saved one. Saved with a preview open,
+    /// the file holds a state no step of the history leads to.
     pub fn mark_saved(&mut self) {
-        self.saved_generation = self.generation();
+        self.saved_generation = if self.preview.is_some() {
+            u64::MAX
+        } else {
+            self.generation()
+        };
         self.unsaved_selection = false;
     }
 
@@ -454,29 +475,97 @@ impl Document {
         self.gesture = None;
     }
 
-    /// Sets the redo history aside, ahead of a preview's first edit (which
-    /// would clear it), so `discard_step` can give it back.
-    pub(crate) fn take_redo(&mut self) -> RedoStash {
-        RedoStash(std::mem::take(&mut self.redo))
+    /// Applies `edit` as a live preview, outside the undo history: no
+    /// step is pushed (so none is evicted at the limit) and the redo
+    /// history stays. Consecutive previews must target the same pattern;
+    /// the preview stays open until `commit_preview` keeps it as one undo
+    /// step, `settle_preview` keeps it under the edits made since, or
+    /// `discard_preview` puts everything back. A refused edit changes
+    /// nothing (see `take_refusal`). Returns the engine commands to send.
+    pub(crate) fn preview(&mut self, edit: Edit) -> Vec<Command> {
+        self.refusal = None;
+        let inverse = self.apply_raw(edit);
+        if self.refusal.is_some() {
+            return Vec::new();
+        }
+        let cmds = self.commands_for(&inverse);
+        self.gesture = None;
+        self.last_generation += 1;
+        match &mut self.preview {
+            None => {
+                self.preview = Some(Preview {
+                    restore: inverse,
+                    depth: self.undo.len(),
+                })
+            }
+            // The preview's first ripple: the restore must put back the
+            // song from before it too (earlier previews left it alone).
+            Some(p) => {
+                if let Edit::Group(mut inv) = inverse
+                    && !matches!(&p.restore, Edit::Group(e) if e.iter().any(is_song))
+                    && let Some(i) = inv.iter().position(is_song)
+                {
+                    let old = std::mem::replace(&mut p.restore, Edit::Group(Vec::new()));
+                    p.restore = Edit::Group(vec![old, inv.swap_remove(i)]);
+                }
+            }
+        }
+        cmds
     }
 
-    /// Takes back the newest undo step as if it never happened (a
-    /// cancelled preview): what it changed is restored, no redo step is
-    /// made, and `redo` (from `take_redo`) is the redo history again. The
-    /// dirty state is what it was before the step. Returns the engine
-    /// commands to send.
-    pub(crate) fn discard_step(&mut self, redo: RedoStash) -> Vec<Command> {
+    /// Closes the open preview, keeping its change as one new undo step
+    /// on top (from the state before the first preview to the current
+    /// one, whatever was edited in between). Clears the redo history.
+    pub(crate) fn commit_preview(&mut self) {
+        let Some(p) = self.preview.take() else {
+            return;
+        };
+        self.push_preview(p.restore, self.undo.len());
+    }
+
+    /// Closes the open preview, keeping its change as one undo step under
+    /// the edits made since it began (one of them changed what it
+    /// previewed, and undoing that goes back to the preview's state).
+    pub(crate) fn settle_preview(&mut self) {
+        let Some(p) = self.preview.take() else {
+            return;
+        };
+        self.push_preview(p.restore, p.depth.min(self.undo.len()));
+    }
+
+    fn push_preview(&mut self, restore: Edit, at: usize) {
+        self.last_generation += 1;
+        let step = Step {
+            edit: restore,
+            generation: self.last_generation,
+        };
+        self.undo.insert(at, step);
         self.gesture = None;
         self.pass_open = false;
-        let Some(step) = self.undo.pop() else {
+        self.redo.clear();
+        self.trim_undo();
+    }
+
+    /// Closes the open preview and puts back everything it changed, as if
+    /// it never happened: the history is untouched. Returns the engine
+    /// commands to send.
+    pub(crate) fn discard_preview(&mut self) -> Vec<Command> {
+        let Some(p) = self.preview.take() else {
             return Vec::new();
         };
+        self.gesture = None;
         let untaken = self.refusal.take();
-        let inverse = self.apply_raw(step.edit);
-        debug_assert!(self.refusal.is_none(), "history steps always fit");
+        let inverse = self.apply_raw(p.restore);
+        debug_assert!(self.refusal.is_none(), "a restore always fits");
         self.refusal = untaken;
-        self.redo = redo.0;
+        self.last_generation += 1;
         self.commands_for(&inverse)
+    }
+
+    /// A preview is open.
+    #[cfg(test)]
+    pub(crate) fn previewing(&self) -> bool {
+        self.preview.is_some()
     }
 
     /// Changes with each edit that changes the project (not undo/redo):
@@ -503,7 +592,10 @@ impl Document {
         self.redo.last().map(|step| &step.edit)
     }
 
+    /// Undoes the newest step. An open preview is settled first (callers
+    /// close it themselves; this keeps the history whole if one doesn't).
     pub fn undo(&mut self) -> Vec<Command> {
+        self.settle_preview();
         self.gesture = None;
         self.pass_open = false;
         let Some(step) = self.undo.pop() else {
@@ -522,6 +614,7 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> Vec<Command> {
+        self.settle_preview();
         self.gesture = None;
         self.pass_open = false;
         let Some(step) = self.redo.pop() else {
@@ -1054,30 +1147,78 @@ mod tests {
     }
 
     #[test]
-    fn a_discarded_step_leaves_the_history_as_it_was() {
+    fn a_discarded_preview_leaves_the_history_as_it_was() {
         let mut d = doc();
         d.apply(add_note(&d, SYNTH2, 5, Note::new(8, 4, 51, 100)), false);
         d.mark_saved();
         d.apply(add_note(&d, SYNTH2, 5, Note::new(16, 4, 53, 100)), false);
         d.undo();
         let before = d.project.clone();
-        // A preview: the redo history set aside, then merged edits.
-        let redo = d.take_redo();
-        d.apply(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)), true);
-        d.apply(add_note(&d, SYNTH2, 5, Note::new(4, 4, 41, 100)), true);
-        assert_eq!(d.undo_depth(), 2);
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(4, 4, 41, 100)));
+        assert_eq!(d.undo_depth(), 1, "no step while previewing");
+        assert!(d.can_redo(), "nor is the redo history cleared");
         assert!(d.is_dirty());
-        let cmds = d.discard_step(redo);
+        let cmds = d.discard_preview();
         assert!(!cmds.is_empty(), "the engine is told");
         assert_eq!(d.project, before);
         assert_eq!(d.undo_depth(), 1);
         assert!(!d.is_dirty(), "clean again");
-        assert!(d.can_redo(), "the redo history is back");
         d.redo();
         assert_eq!(
             d.project.roll(SYNTH2, 5).unwrap().notes.len(),
             before.roll(SYNTH2, 5).unwrap().notes.len() + 1
         );
+    }
+
+    #[test]
+    fn a_committed_preview_is_one_step_from_where_it_began() {
+        let mut d = doc();
+        let before = d.project.clone();
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        d.apply(
+            Edit::Param {
+                id: CUTOFF,
+                value: 0.9,
+            },
+            false,
+        );
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(4, 4, 41, 100)));
+        let result = d.project.roll(SYNTH2, 5).unwrap().clone();
+        d.commit_preview();
+        assert!(!d.previewing());
+        assert_eq!(d.undo_depth(), 2);
+        d.undo();
+        assert_eq!(d.project.roll(SYNTH2, 5), before.roll(SYNTH2, 5));
+        assert_eq!(d.project.param(CUTOFF), 0.9);
+        d.redo();
+        assert_eq!(d.project.roll(SYNTH2, 5), Some(&result));
+    }
+
+    #[test]
+    fn a_settled_preview_goes_under_the_edits_since() {
+        let mut d = doc();
+        let before = d.project.clone();
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        let previewed = d.project.clone();
+        // Another edit to the same pattern, on top of the preview.
+        d.apply(add_note(&d, SYNTH2, 5, Note::new(8, 4, 42, 100)), false);
+        d.settle_preview();
+        assert_eq!(d.undo_depth(), 2);
+        d.undo();
+        assert_eq!(d.project, previewed);
+        d.undo();
+        assert_eq!(d.project, before);
+    }
+
+    #[test]
+    fn saving_with_a_preview_open_stays_dirty_after_it_closes() {
+        let mut d = doc();
+        d.preview(add_note(&d, SYNTH2, 5, Note::new(0, 4, 40, 100)));
+        d.mark_saved();
+        assert!(d.is_dirty(), "still previewing");
+        d.discard_preview();
+        assert!(d.is_dirty(), "the file holds the preview");
     }
 
     #[test]

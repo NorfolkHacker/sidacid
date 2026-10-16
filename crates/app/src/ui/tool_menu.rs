@@ -2,11 +2,12 @@
 //! lane's selection, or on its whole visible pattern when nothing is
 //! selected. Opening a tool snapshots the pattern and the scope; its popup
 //! holds the tool's settings, and every frame the tool runs on that
-//! snapshot (never on the last result) and the result is committed into
-//! one merged undo step, so the lane previews it live. Apply closes the
-//! step and selects the result; Cancel (or closing the popup) takes the
-//! step back as if it never happened. While a tool is open nothing else
-//! edits that lane (see `SidAcidApp::mouse_editing`).
+//! snapshot (never on the last result) and the result is applied as a
+//! preview outside the undo history (`Document::preview`), so the lane
+//! shows it live. Apply keeps it as one undo step and selects the result;
+//! Cancel (or closing the popup) puts the pattern back as if nothing
+//! happened. While a tool is open nothing else edits that lane (see
+//! `SidAcidApp::mouse_editing`).
 
 use super::SidAcidApp;
 use super::key_entry::LaneKind;
@@ -14,7 +15,7 @@ use super::lane::INST_NAMES;
 use super::note_ops;
 use super::note_tools::{self, Arp, ArpStyle, Euclid, Humanize, Quantize, Randomize, Strum};
 use super::poly_edit::Snap;
-use crate::document::{Edit, RedoStash};
+use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::project::{Note, NotePattern};
 use acid_engine::scale::{Key, ROOT_NAMES};
@@ -146,21 +147,12 @@ pub(crate) struct ToolSession {
     pub tool: ToolKind,
     pub params: ToolParams,
     /// The pattern as the session last left it (`origin` until a preview
-    /// is committed): anything else there means another edit changed it.
+    /// is applied): anything else there means another edit changed it.
     last: NotePattern,
     /// The result's selection (indices into `last`).
     result_sel: Vec<usize>,
     /// The lane's selection when the tool opened, given back by Cancel.
     sel_before: (Vec<Note>, u8),
-    /// The edit serial the document is at when nothing but this session
-    /// has edited it since it opened (after its latest preview commit).
-    expect: u64,
-    /// Some other edit landed while the session was open: its preview
-    /// steps may lie under that edit's, so Cancel can't drop them.
-    foreign: bool,
-    /// A preview is committed, and the redo history set aside before the
-    /// first one.
-    committed: Option<RedoStash>,
 }
 
 /// The tool popup's window (and so its layer) id.
@@ -263,17 +255,15 @@ impl SidAcidApp {
             tool,
             params,
             sel_before,
-            expect: self.doc.edit_serial(),
-            foreign: false,
-            committed: None,
         });
         self.preview_tool();
     }
 
     /// Once a frame, ahead of the dock: a tool whose pattern was changed
     /// by something that didn't cancel it first (rack edits do, see
-    /// `tool_yield`) is closed, leaving the pattern as it now is; one whose lane, pattern slot or mode is no
-    /// longer the one it opened on is cancelled.
+    /// `tool_yield`) is closed, leaving the pattern as it now is (its
+    /// preview becomes an undo step under that edit); one whose lane,
+    /// pattern slot or mode is no longer the one it opened on is cancelled.
     pub(crate) fn check_tool(&mut self) {
         let Some(t) = &self.view.tool else {
             return;
@@ -281,6 +271,7 @@ impl SidAcidApp {
         let (uid, slot) = (t.uid, t.slot);
         if self.doc.project.roll(uid, slot) != Some(&t.last) {
             self.view.tool = None;
+            self.doc.settle_preview();
             self.doc.end_gesture();
             return;
         }
@@ -301,29 +292,15 @@ impl SidAcidApp {
         }
     }
 
-    /// Notes an edit made since the session's own latest preview commit.
-    /// One before the first commit is under every preview step, so it
-    /// doesn't count (the first commit takes its serial).
-    fn note_foreign(&mut self) {
-        let serial = self.doc.edit_serial();
-        if let Some(t) = &mut self.view.tool
-            && t.committed.is_some()
-            && t.expect != serial
-        {
-            t.foreign = true;
-        }
-    }
-
     /// The open tool's lane: edits to it are held off.
     pub(crate) fn tool_lane(&self) -> Option<(MachineUid, u8)> {
         self.view.tool.as_ref().map(|t| (t.uid, t.slot))
     }
 
     /// Runs the open tool on its snapshot with its current settings and
-    /// commits the result (merged into the session's undo step) when it
-    /// differs from what the lane holds; the result is selected.
+    /// previews the result (outside the undo history) when it differs
+    /// from what the lane holds; the result is selected.
     fn preview_tool(&mut self) {
-        self.note_foreign();
         let key = self.doc.project.key;
         let snap = self.view.dock.snap;
         let Some(t) = &self.view.tool else {
@@ -335,15 +312,14 @@ impl SidAcidApp {
             .run(t.tool, &t.origin, &t.scope, t.whole, kind, key, snap);
         let (uid, slot) = (t.uid, t.slot);
         if result != t.last {
-            let redo = match self.view.tool.as_mut().and_then(|t| t.committed.take()) {
-                Some(redo) => redo,
-                None => self.doc.take_redo(),
-            };
-            self.commit_poly(uid, slot, Some(result.clone()), true, false);
-            let serial = self.doc.edit_serial();
+            let cmds = self.doc.preview(Edit::NotePattern {
+                uid,
+                slot,
+                pattern: Box::new(result.clone()),
+            });
+            self.send(cmds);
+            self.view.focus = Some(uid);
             if let Some(t) = &mut self.view.tool {
-                t.committed = Some(redo);
-                t.expect = serial;
                 t.last = result.clone();
             }
         }
@@ -353,24 +329,21 @@ impl SidAcidApp {
         self.set_selection(uid, note_ops::values(&result, &sel));
     }
 
-    /// Apply: the result stays as one undo step (none when it is the
-    /// pattern as it was) and is selected. After another edit came in
-    /// between previews, the previews before it stay steps of their own
-    /// under it (even when the result is the pattern as it was: they
-    /// can't be taken out from under that edit).
+    /// Apply: the result stays as exactly one undo step, from the
+    /// pattern as the tool found it to the result, on top of any other
+    /// edit made while it was open (none when the result is the pattern
+    /// as it was), and is selected.
     pub(crate) fn apply_tool(&mut self) {
-        self.note_foreign();
         let Some(t) = self.view.tool.take() else {
             return;
         };
         self.view.tool_params = t.params;
-        if let Some(redo) = t.committed
-            && t.last == t.origin
-            && !t.foreign
-        {
+        if t.last == t.origin {
             // Previews that came back to where they started.
-            let cmds = self.doc.discard_step(redo);
+            let cmds = self.doc.discard_preview();
             self.send(cmds);
+        } else {
+            self.doc.commit_preview();
         }
         self.doc.end_gesture();
         if self.view.mode == Mode::Pattern && self.selected(t.uid) == t.slot {
@@ -378,33 +351,16 @@ impl SidAcidApp {
         }
     }
 
-    /// Cancel: the pattern as it was, with no undo step, and the old
-    /// selection. When another edit came in while the tool was open, the
-    /// previews' steps can't be dropped from under it: the pattern is put
-    /// back by an undo step of its own instead.
+    /// Cancel: the pattern as it was and the old selection, with the undo
+    /// history exactly as before the tool opened (plus any other edit made
+    /// meanwhile).
     pub(crate) fn cancel_tool(&mut self) {
-        self.note_foreign();
         let Some(t) = self.view.tool.take() else {
             return;
         };
         self.view.tool_params = t.params;
-        if let Some(redo) = t.committed {
-            if !t.foreign {
-                // The one preview step is on top.
-                let cmds = self.doc.discard_step(redo);
-                self.send(cmds);
-            } else if self.doc.project.roll(t.uid, t.slot) != Some(&t.origin) {
-                let cmds = self.doc.apply(
-                    Edit::NotePattern {
-                        uid: t.uid,
-                        slot: t.slot,
-                        pattern: Box::new(t.origin.clone()),
-                    },
-                    false,
-                );
-                self.send(cmds);
-            }
-        }
+        let cmds = self.doc.discard_preview();
+        self.send(cmds);
         self.doc.end_gesture();
         if self.view.mode == Mode::Pattern {
             let panel = self.view.panel(t.uid);
@@ -625,7 +581,7 @@ fn settings(
                 ui.horizontal(|ui| {
                     ui.label("Row");
                     let row = (e.pitch as usize).min(INST_NAMES.len() - 1);
-                    egui::ComboBox::from_id_salt("euclid_row")
+                    let combo = egui::ComboBox::from_id_salt("euclid_row")
                         .width(50.0)
                         .selected_text(INST_NAMES[row])
                         .show_ui(ui, |ui| {
@@ -633,6 +589,7 @@ fn settings(
                                 ui.selectable_value(&mut e.pitch, i as u8, *name);
                             }
                         });
+                    rects.push(("Row".into(), combo.response.rect));
                 });
             } else {
                 pitch(ui, "Pitch", &mut e.pitch);
@@ -742,7 +699,7 @@ mod tests {
         set_params(&mut app, |p| p.quantize.strength = 50);
         frame(&mut app, &ctx, 3.0, vec![]);
         assert_eq!(starts(&app, FM), [3, 11], "half way, from the snapshot");
-        assert_eq!(app.doc.undo_depth(), 1, "one merged preview step");
+        assert_eq!(app.doc.undo_depth(), 0, "the preview is no undo step");
         assert_eq!(app.selection(FM), [0, 1], "the result is selected");
         click(&mut app, &ctx, "Cancel", 4.0);
         assert!(app.view.tool.is_none());
@@ -838,7 +795,7 @@ mod tests {
         ];
         keys(&mut app, &ctx, 3.0, &pressed);
         assert_eq!(app.doc.project, preview, "nothing but the preview");
-        assert_eq!(app.doc.undo_depth(), 1);
+        assert_eq!(app.doc.undo_depth(), 0);
         app.undo();
         assert_eq!(app.doc.project, preview, "the menu's undo waits too");
         assert!(app.view.tool.is_some(), "still open");
@@ -859,6 +816,27 @@ mod tests {
         assert_eq!(starts(&app, FM), [2, 10]);
         assert_eq!(app.doc.undo_depth(), 0);
         assert_eq!(app.selection(FM), [0], "the selection it had");
+    }
+
+    #[test]
+    fn esc_closes_an_open_combo_before_it_cancels_the_tool() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(KIT808, &[(0, 4, 0)], &[]);
+        open(&mut app, &ctx, ToolKind::Euclid, 0.0);
+        let popup = |ctx: &egui::Context| ctx.memory(|m| m.any_popup_open());
+        for (time, keyboard) in [(2.0, false), (6.0, true)] {
+            click(&mut app, &ctx, "Row", time);
+            frame(&mut app, &ctx, time + 1.0, vec![]);
+            assert!(popup(&ctx), "the row list is open");
+            app.view.dock.keyboard = keyboard;
+            tap(&mut app, &ctx, time + 2.0, egui::Key::Escape);
+            frame(&mut app, &ctx, time + 2.5, vec![]);
+            assert!(app.view.tool.is_some(), "only the list closes");
+            assert!(!popup(&ctx), "the list is shut");
+        }
+        tap(&mut app, &ctx, 10.0, egui::Key::Escape);
+        assert!(app.view.tool.is_none(), "a second Esc cancels the tool");
+        assert_eq!(app.doc.undo_depth(), 0);
     }
 
     /// One frame pressing and releasing `k`, leaving the dock's keyboard
@@ -926,7 +904,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
         open(&mut app, &ctx, ToolKind::Quantize, 0.0);
-        assert_eq!((starts(&app, FM), app.doc.undo_depth()), (vec![4, 12], 1));
+        assert_eq!((starts(&app, FM), app.doc.undo_depth()), (vec![4, 12], 0));
         let cmds = app.doc.apply(
             Edit::Param {
                 id: cutoff,
@@ -935,23 +913,24 @@ mod tests {
             false,
         );
         app.send(cmds);
-        assert_eq!(app.doc.undo_depth(), 2);
+        assert_eq!(app.doc.undo_depth(), 1);
         set_params(&mut app, |p| p.quantize.strength = 50);
         frame(&mut app, &ctx, 3.0, vec![]);
-        assert_eq!((starts(&app, FM), app.doc.undo_depth()), (vec![3, 11], 3));
+        assert_eq!((starts(&app, FM), app.doc.undo_depth()), (vec![3, 11], 1));
         click(&mut app, &ctx, "Cancel", 4.0);
         assert!(app.view.tool.is_none());
         assert_eq!(starts(&app, FM), [2, 10], "the origin, always");
         assert_eq!(app.doc.project.param(cutoff), 0.9, "the other edit stays");
-        assert_eq!(app.doc.undo_depth(), 4, "put back as a step of its own");
+        assert_eq!(app.doc.undo_depth(), 1, "only the other edit");
         app.undo();
-        assert_eq!(starts(&app, FM), [3, 11], "which undoes like any other");
+        assert_eq!(starts(&app, FM), [2, 10], "which undoes alone");
+        assert_ne!(app.doc.project.param(cutoff), 0.9);
 
-        // An edit before the first preview commit is under every preview.
+        // An edit before the first preview.
         let mut app = app_with(FM, &[(2, 4, 60)], &[]);
         app.view.tool_params.quantize.strength = 0;
         open(&mut app, &ctx, ToolKind::Quantize, 10.0);
-        assert_eq!(app.doc.undo_depth(), 0, "at 0 %: nothing to commit");
+        assert_eq!(app.doc.undo_depth(), 0, "at 0 %: nothing to preview");
         let cmds = app.doc.apply(
             Edit::Param {
                 id: cutoff,
@@ -966,7 +945,6 @@ mod tests {
         click(&mut app, &ctx, "Cancel", 13.0);
         assert_eq!(starts(&app, FM), [2]);
         assert_eq!(app.doc.project.param(cutoff), 0.9, "not dropped");
-        // The preview step was on top of it: dropped, no step to put back.
         assert_eq!(app.doc.undo_depth(), 1, "only the other edit");
     }
 
@@ -1006,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn an_apply_back_at_the_origin_after_another_edit_keeps_the_steps_under_it() {
+    fn an_apply_back_at_the_origin_after_another_edit_adds_no_step() {
         use acid_engine::params::{MachineParam, ParamId, SynthParam};
         let cutoff = ParamId::Machine(SYNTH1, MachineParam::Synth(SynthParam::Cutoff));
         let ctx = egui::Context::default();
@@ -1025,8 +1003,107 @@ mod tests {
         click(&mut app, &ctx, "Apply", 4.0);
         assert_eq!(starts(&app, FM), [2]);
         assert_eq!(app.doc.project.param(cutoff), 0.9);
-        // The preview, the knob, the way back: none can go from under another.
-        assert_eq!(app.doc.undo_depth(), 3);
+        assert_eq!(app.doc.undo_depth(), 1, "only the knob");
+    }
+
+    #[test]
+    fn apply_after_another_edit_is_one_step_from_the_origin() {
+        use acid_engine::params::{MachineParam, ParamId, SynthParam};
+        let cutoff = ParamId::Machine(SYNTH1, MachineParam::Synth(SynthParam::Cutoff));
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60), (10, 4, 62)], &[]);
+        let (before, knob) = (app.doc.project.clone(), app.doc.project.param(cutoff));
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        set_params(&mut app, |p| p.quantize.strength = 50);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        let cmds = app.doc.apply(
+            Edit::Param {
+                id: cutoff,
+                value: 0.9,
+            },
+            false,
+        );
+        app.send(cmds);
+        set_params(&mut app, |p| p.quantize.strength = 100);
+        frame(&mut app, &ctx, 3.0, vec![]);
+        click(&mut app, &ctx, "Apply", 4.0);
+        assert_eq!(starts(&app, FM), [4, 12]);
+        assert_eq!(
+            app.doc.undo_depth(),
+            2,
+            "the knob and the tool, nothing else"
+        );
+        app.undo();
+        assert_eq!(
+            starts(&app, FM),
+            [2, 10],
+            "one undo goes back to the origin"
+        );
+        assert_eq!(app.doc.project.param(cutoff), 0.9, "under the other edit");
+        app.undo();
+        assert_eq!(app.doc.project.param(cutoff), knob);
+        assert_eq!(app.doc.project, before);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn cancel_at_the_undo_limit_keeps_the_whole_history() {
+        use crate::document::UNDO_LIMIT;
+        use acid_engine::params::{MachineParam, ParamId, SynthParam};
+        let cutoff = ParamId::Machine(SYNTH1, MachineParam::Synth(SynthParam::Cutoff));
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+        let before = app.doc.project.clone();
+        for i in 0..UNDO_LIMIT {
+            let cmds = app.doc.apply(
+                Edit::Param {
+                    id: cutoff,
+                    value: (i + 1) as f32 / 1000.0,
+                },
+                false,
+            );
+            app.send(cmds);
+        }
+        assert_eq!(app.doc.undo_depth(), UNDO_LIMIT);
+        let full = app.doc.project.clone();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        assert_eq!(starts(&app, FM), [4], "previewing");
+        assert_eq!(app.doc.undo_depth(), UNDO_LIMIT);
+        click(&mut app, &ctx, "Cancel", 2.0);
+        assert_eq!(app.doc.project, full);
+        assert_eq!(app.doc.undo_depth(), UNDO_LIMIT, "no step evicted");
+        while app.doc.can_undo() {
+            app.undo();
+        }
+        assert_eq!(app.doc.project, before, "the oldest step is still there");
+    }
+
+    #[test]
+    fn an_edit_under_the_tool_closes_it_with_the_preview_as_a_step() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(FM, &[(2, 4, 60)], &[]);
+        let before = app.doc.project.clone();
+        open(&mut app, &ctx, ToolKind::Quantize, 0.0);
+        let previewed = app.doc.project.clone();
+        // Something that doesn't yield to the tool edits its pattern.
+        let mut p = app.doc.project.roll(FM, 0).unwrap().clone();
+        p.notes[0].pitch = 61;
+        let cmds = app.doc.apply(
+            Edit::NotePattern {
+                uid: FM,
+                slot: 0,
+                pattern: Box::new(p),
+            },
+            false,
+        );
+        app.send(cmds);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(app.view.tool.is_none(), "closed");
+        assert_eq!(app.doc.undo_depth(), 2, "the preview, then that edit");
+        app.undo();
+        assert_eq!(app.doc.project, previewed);
+        app.undo();
+        assert_eq!(app.doc.project, before);
     }
 
     #[test]
@@ -1212,7 +1289,7 @@ mod tests {
         set_params(&mut app, |p| p.randomize.seed = seed);
         frame(&mut app, &ctx, 4.0, vec![]);
         assert_eq!(app.doc.project.roll(FM, 0).unwrap(), &first, "same seed");
-        assert_eq!(app.doc.undo_depth(), 1, "still one step");
+        assert_eq!(app.doc.undo_depth(), 0, "still no step");
     }
 
     #[test]

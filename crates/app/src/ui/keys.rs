@@ -74,7 +74,10 @@ impl SidAcidApp {
     fn dock_keys(&mut self, ctx: &egui::Context) {
         // Esc cancels an open note tool wherever the keyboard is (a click
         // in its popup takes it from the dock); nothing is being typed.
-        if self.view.tool.is_some() {
+        // An open egui popup (a combo's list in the tool's popup) takes Esc
+        // first: it closes just that, and the next Esc cancels.
+        let popup = ctx.memory(|m| m.any_popup_open());
+        if self.view.tool.is_some() && !popup {
             let esc = |e: &egui::Event| {
                 matches!(
                     e,
@@ -114,6 +117,10 @@ impl SidAcidApp {
         for (k, m, pressed, repeat) in keys {
             if !pressed {
                 self.view.dock.delete_held = false;
+                continue;
+            }
+            if popup && k == Key::Escape {
+                used.push(false);
                 continue;
             }
             if erase(k) && repeat && self.view.dock.delete_held {
@@ -170,6 +177,49 @@ impl SidAcidApp {
                 .dock
                 .rect
                 .is_some_and(|d| !d.contains_rect(r.rect))
+    }
+
+    /// Start of a frame: Tab, Shift+Tab or an arrow pressed last frame
+    /// while the dock had the keys moved egui's focus to a widget outside
+    /// the dock (egui moves it during and after the frame, so this looks
+    /// one frame on): the focus goes back where it was, so the dock keeps
+    /// its keys. Then notes this frame's such keys.
+    pub(crate) fn hold_dock_focus(&mut self, ctx: &egui::Context) {
+        if let Some(before) = self.view.dock.focus_held.take()
+            && self.view.dock.keyboard
+            && self.widget_keyboard(ctx)
+        {
+            ctx.memory_mut(|m| match before {
+                Some(id) => m.request_focus(id),
+                None => {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                }
+            });
+        }
+        if !self.view.dock.keyboard || self.widget_keyboard(ctx) {
+            return;
+        }
+        let moves_focus = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: Key::Tab
+                            | Key::ArrowUp
+                            | Key::ArrowDown
+                            | Key::ArrowLeft
+                            | Key::ArrowRight,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        });
+        if moves_focus {
+            self.view.dock.focus_held = Some(ctx.memory(|m| m.focused()));
+        }
     }
 
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {

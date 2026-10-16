@@ -3452,4 +3452,42 @@ mod tests {
         assert!(chances(&app, FM)[0] < first, "the second drag moved it on");
         assert_eq!(app.doc.undo_depth(), 2);
     }
+
+    #[test]
+    fn tab_never_strands_the_dock_keys() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let tap = |k: egui::Key, mods: egui::Modifiers| {
+            let ev = |pressed| egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: mods,
+            };
+            vec![ev(true), ev(false)]
+        };
+        let mut time = 1.0;
+        for mods in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            for _ in 0..3 {
+                frame(&mut app, &ctx, time, tap(egui::Key::Tab, mods));
+                time += 0.1;
+            }
+            frame(&mut app, &ctx, time, vec![]);
+            time += 0.1;
+            assert!(app.view.dock.keyboard);
+            let start = app.doc.project.roll(FM, 0).unwrap().notes[0].start;
+            frame(
+                &mut app,
+                &ctx,
+                time,
+                tap(egui::Key::ArrowRight, egui::Modifiers::NONE),
+            );
+            time += 0.1;
+            let now = app.doc.project.roll(FM, 0).unwrap().notes[0].start;
+            assert_eq!(now, start + 4, "an arrow still moves the note ({mods:?})");
+        }
+    }
 }
