@@ -49,9 +49,13 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Delay sends (tempo-synced, ping-pong) and reverb sends.
   - Master compressor, an 8-bit lo-fi switch, and meters.
 - **Song mode:**
-  - Arrange bars, each with a pattern per machine plus mutes and transpose (the two synths and the FM synth).
-  - Loop a range of bars.
-  - **Record** pattern changes and knob moves. Only the knobs you touch get overwritten, and each record pass is one undo step.
+  - One lane of pattern blocks per machine. Blocks never overlap, gaps are silence, and the song ends at its last block.
+  - A block follows its pattern's length; drag its right edge to fix a length (longer loops the pattern, shorter plays its start). Lengthening a pattern pushes later blocks on that lane right.
+  - Double-click empty space to place the part's selected pattern, or a block to open it in Pattern mode. Click, Shift-click or box select; drag to move by bars (Alt: steps) with the group's layout kept; Ctrl-drag copies; right-click deletes; arrow keys, Delete and Ctrl+C/X/V/D/A work on blocks.
+  - The ruler shows bars: click to set the song start, drag to select a range. Loop the range, or insert or delete time across every lane. Capture places every part's selected pattern at the song start.
+  - A selected block has its own pattern, Mute and Transpose.
+  - **Record** pattern changes as blocks, and knob moves. Only the knobs you touch get overwritten, and each record pass is one undo step.
+  - The Mono arpeggiator restarts at each block. Older projects convert and play the same.
 - **Smart randomise:**
   - Synth dice for Notes, Accent, Slide, Rest and Octave, with scales, groove-aware note placement, and slides that chain.
   - Drum Template and Evolve.

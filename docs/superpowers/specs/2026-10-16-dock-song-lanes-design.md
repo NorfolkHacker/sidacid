@@ -217,7 +217,8 @@ engine act on `chance`, `ratchet` and `cond`.
   `len: Some(n)`: fixed by dragging the block's right edge. Longer than
   the pattern loops it; shorter plays only its start.
 - Automation stays keyed by global step. `loop_range` becomes a step
-  range. The song ends at the last block's end, rounded up to 16 steps.
+  range. The song ends at its last block's end, or at a later end point a
+  converted song carries (`end`).
 
 ### Ripple and overlap
 
@@ -226,6 +227,8 @@ engine act on `chance`, `ratchet` and `cond`.
   growth first), cascading down the lane.
 - When a pattern shrinks, later blocks stay put and a gap opens.
 - `Some` blocks never ripple.
+- A pattern-length edit whose ripple would pass the maximum song length
+  is refused.
 - No operation can create an overlap: a move or paste onto occupied
   space lands on the nearest free spot.
 
@@ -240,7 +243,10 @@ engine act on `chance`, `ratchet` and `cond`.
   Ctrl+C/V/D, Delete and ←/→ (one bar) work on blocks as in section 3.
 - Drag a block's right edge to fix its length.
 - Ruler selection: **Loop**, **Insert time** (push everything after it
-  right on every lane), **Delete time** (remove it and close the gap).
+  right on every lane), **Delete time** (remove it and close the gap; a
+  block spanning the deleted range shrinks and keeps its tail). The loop
+  triggers when playback crosses its end; a song start after the loop
+  plays on.
 - **Capture** places every machine's selected pattern at the song
   cursor, replacing "Add bar".
 - With one block selected, the dock header shows its pattern, mute and
@@ -253,6 +259,7 @@ engine act on `chance`, `ratchet` and `cond`.
 - `CompiledSong` holds a sorted block list per rack position. At a
   block's start the track restarts its pattern. Gaps and muted blocks are
   silent. Pattern mode is unchanged.
+- Each track's arpeggiator clock counts from its block's start.
 - The current-bar machinery (`bar_len`, `compiled_bar_steps`) is
   replaced by block lookup by global step; the song position display
   shows bar = step / 16.
