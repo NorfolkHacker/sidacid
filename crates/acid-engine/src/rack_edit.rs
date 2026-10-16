@@ -3,7 +3,7 @@
 
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid, default_name};
 use crate::params::ParamId;
-use crate::project::{AutoLane, Cell, MachineBody, MachineEntry, ParamLane, Project};
+use crate::project::{AutoLane, Block, MachineBody, MachineEntry, ParamLane, Project};
 
 /// Everything removing a machine takes out of the project, so undo can put it back exactly.
 #[derive(Clone, Debug, PartialEq)]
@@ -11,8 +11,8 @@ pub struct RemovedMachine {
     /// Its rack position.
     pub index: usize,
     pub entry: MachineEntry,
-    /// (bar index, index within `bar.cells`, its cell).
-    pub cells: Vec<(usize, usize, Cell)>,
+    /// (index in `song.lanes`, its blocks).
+    pub song_lane: Option<(usize, Vec<Block>)>,
     /// (index in `song.automation`, lane).
     pub lanes: Vec<(usize, AutoLane)>,
     /// (synth uid, pattern index, lane) that targeted it.
@@ -58,18 +58,17 @@ impl Project {
         Some(())
     }
 
-    /// Takes `uid` out of the rack with its song cells, its song automation lanes and
+    /// Takes `uid` out of the rack with its song lane, its song automation lanes and
     /// every synth pattern param lane that targets it.
     pub fn remove_machine(&mut self, uid: MachineUid) -> Option<RemovedMachine> {
         let index = self.position(uid)?;
         let entry = self.machines.remove(index);
-        let mut cells = Vec::new();
-        for (b, bar) in self.song.bars.iter_mut().enumerate() {
-            if let Some(i) = bar.cells.iter().position(|(u, _)| *u == uid) {
-                let (_, cell) = bar.cells.remove(i);
-                cells.push((b, i, cell));
-            }
-        }
+        let song_lane = self
+            .song
+            .lanes
+            .iter()
+            .position(|(u, _)| *u == uid)
+            .map(|i| (i, self.song.lanes.remove(i).1));
         let mut lanes = Vec::new();
         let mut kept = Vec::with_capacity(self.song.automation.len());
         for (i, lane) in self.song.automation.drain(..).enumerate() {
@@ -98,18 +97,18 @@ impl Project {
         Some(RemovedMachine {
             index,
             entry,
-            cells,
+            song_lane,
             lanes,
             param_lanes,
         })
     }
 
-    /// Puts a removed machine back exactly (entry at its index, cells, lanes at their indices, param lanes).
+    /// Puts a removed machine back exactly (entry at its index, song lane and automation lanes at their indices, param lanes).
     pub fn restore_machine(&mut self, removed: RemovedMachine) {
         let RemovedMachine {
             index,
             entry,
-            cells,
+            song_lane,
             lanes,
             param_lanes,
         } = removed;
@@ -117,13 +116,11 @@ impl Project {
         if self.insert_machine(index, entry).is_none() {
             return;
         }
-        for (b, i, cell) in cells {
-            if let Some(bar) = self.song.bars.get_mut(b)
-                && !bar.cells.iter().any(|(u, _)| *u == uid)
-            {
-                let i = i.min(bar.cells.len());
-                bar.cells.insert(i, (uid, cell));
-            }
+        if let Some((i, blocks)) = song_lane
+            && !self.song.lanes.iter().any(|(u, _)| *u == uid)
+        {
+            let i = i.min(self.song.lanes.len());
+            self.song.lanes.insert(i, (uid, blocks));
         }
         // Ascending indices: each lane lands where it was once its predecessors are back.
         for (i, lane) in lanes {
@@ -184,7 +181,7 @@ fn targets(param: ParamId, uid: MachineUid) -> bool {
 mod tests {
     use super::*;
     use crate::params::{KitParam, MachineParam, SynthParam};
-    use crate::project::{Bar, PatternRef};
+    use crate::project::PatternRef;
 
     #[test]
     fn new_machines_take_fresh_uids_and_default_names() {
@@ -213,7 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_machine_takes_its_cells_lanes_and_foreign_param_lanes_and_restore_undoes_it() {
+    fn removing_a_machine_takes_its_song_lane_lanes_and_foreign_param_lanes_and_restore_undoes_it()
+    {
         let mut p = crate::demo::demo_project();
         // Synth 1's pattern 0 has a param lane on the 909's Level; the song names the 909; automation too.
         let target = ParamId::Machine(MachineUid(4), MachineParam::Kit(KitParam::Volume));
@@ -221,18 +219,12 @@ mod tests {
             param: target,
             values: vec![Some(0.5); crate::project::STEPS],
         });
-        let mut bar = Bar::default();
-        *bar.cell_mut(MachineUid(4)) = Cell {
-            pattern: Some(PatternRef(1)),
-            mute: false,
-            transpose: 0,
-        };
-        *bar.cell_mut(MachineUid(1)) = Cell {
-            pattern: Some(PatternRef(0)),
-            mute: false,
-            transpose: 0,
-        };
-        p.song.bars.push(bar);
+        p.song
+            .lane_mut(MachineUid(4))
+            .push(Block::new(0, PatternRef(1)));
+        p.song
+            .lane_mut(MachineUid(1))
+            .push(Block::new(0, PatternRef(0)));
         p.song.automation.push(AutoLane {
             param: target,
             points: [(0u32, 0.3f32)].into_iter().collect(),
@@ -242,7 +234,8 @@ mod tests {
         let removed = p.remove_machine(MachineUid(4)).unwrap();
         assert_eq!(removed.index, 3);
         assert!(p.machine(MachineUid(4)).is_none());
-        assert_eq!(p.song.bars[0].cells.len(), 1);
+        assert_eq!(p.song.lanes.len(), 1);
+        assert!(p.song.lane(MachineUid(4)).is_empty());
         assert!(p.song.automation.is_empty());
         assert!(
             p.synth(MachineUid(1)).unwrap().patterns[0]
@@ -255,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_copy_sound_and_patterns_but_not_song_cells() {
+    fn duplicates_copy_sound_and_patterns_but_not_song_lanes() {
         let mut p = crate::demo::demo_project();
         let d = p.duplicate_machine(MachineUid(1)).unwrap();
         assert_eq!(d.name, "Synth 1 copy");
@@ -263,12 +256,7 @@ mod tests {
         assert_eq!(d.body, p.machine(MachineUid(1)).unwrap().body);
         assert_eq!(d.params, p.machine(MachineUid(1)).unwrap().params);
         p.insert_machine(1, d.clone()).unwrap();
-        assert!(
-            p.song
-                .bars
-                .iter()
-                .all(|b| b.cells.iter().all(|(u, _)| *u != d.uid))
-        );
+        assert!(p.song.lanes.iter().all(|(u, _)| *u != d.uid));
         p.validate().unwrap();
     }
 
@@ -287,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_puts_interleaved_cells_and_lanes_back_in_their_places() {
+    fn restore_puts_interleaved_song_lanes_and_automation_lanes_back_in_their_places() {
         let mut p = Project::default();
         let lane = |u: u16| AutoLane {
             param: ParamId::Machine(MachineUid(u), MachineParam::Kit(KitParam::Accent)),
@@ -298,23 +286,18 @@ mod tests {
             ParamId::Machine(MachineUid(3), MachineParam::Kit(KitParam::Volume));
         p.song.automation[3].param =
             ParamId::Machine(MachineUid(4), MachineParam::Kit(KitParam::Volume));
-        for order in [[3u16, 4, 1], [4, 1, 3], [1, 3, 4]] {
-            let mut bar = Bar::default();
-            for u in order {
-                bar.cell_mut(MachineUid(u)).mute = true;
-            }
-            p.song.bars.push(bar);
+        for (start, u) in [3u16, 4, 1].into_iter().enumerate() {
+            p.song.lane_mut(MachineUid(u)).push(Block {
+                mute: true,
+                ..Block::new(start as u32 * 16, PatternRef(0))
+            });
         }
         p.validate().unwrap();
         let before = p.clone();
         let removed = p.remove_machine(MachineUid(4)).unwrap();
         assert_eq!(p.song.automation.len(), 2);
         assert_eq!(
-            p.song.bars[0]
-                .cells
-                .iter()
-                .map(|c| c.0.0)
-                .collect::<Vec<_>>(),
+            p.song.lanes.iter().map(|l| l.0.0).collect::<Vec<_>>(),
             [3, 1]
         );
         p.validate().unwrap();

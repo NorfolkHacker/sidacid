@@ -2,18 +2,20 @@
 //! bars and two synth transposes. v1 and v2 named params by machine
 //! position (`LegacyParamId`); v3 names them by machine uid. v3 and v4
 //! stored acid and drum patterns as 1/16 steps; v5 stores them as notes.
+//! v1 to v5 songs are rows of bars; v6 songs are lanes of blocks.
 
 use crate::drums::KitKind;
-use crate::machine::{MachineType, MachineUid, standard_rack};
+use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
 use crate::params::{
     ChannelParam, DRUM_INSTRUMENTS, DrumParam, FmParam, FxParam, GlobalParam, KitParam,
     MachineParam, MasterParam, OpParam, ParamId, SamplerParam, SlotParam, SynthParam,
 };
 use crate::project::{
-    AutoLane, Bar, Cell, DrumMachine, DrumPattern, FmMachine, MachineBody, MachineEntry,
-    MonoMachine, PATTERNS, PROJECT_VERSION, ParamLane, PatternRef, Project, ProjectError, STEPS,
-    SamplerMachine, Song, SynthMachine, SynthPattern,
+    AutoLane, Block, DrumMachine, DrumPattern, FmMachine, MachineBody, MachineEntry, MonoMachine,
+    PATTERNS, PROJECT_VERSION, ParamLane, PatternRef, Project, ProjectError, STEPS, SamplerMachine,
+    Song, SynthMachine, SynthPattern,
 };
+use crate::song::{Banks, MAX_BARS};
 use crate::steps::{DrumGrid, DrumHit, SynthGrid, SynthStep};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -140,7 +142,7 @@ pub(crate) struct ProjectV4 {
     pub machines: Vec<MachineEntryV4>,
     pub next_uid: u16,
     pub globals: BTreeMap<GlobalParam, f32>,
-    pub song: Song,
+    pub song: SongV5,
 }
 
 impl Default for SynthPatternV4 {
@@ -282,14 +284,14 @@ impl ProjectV4 {
                 .into_iter()
                 .map(|g| (g, g.info().default))
                 .collect(),
-            song: Song::default(),
+            song: SongV5::default(),
         }
     }
 
     /// A v5 project: acid and drum steps become notes.
-    pub(crate) fn upgrade(self) -> Project {
-        Project {
-            version: PROJECT_VERSION,
+    pub(crate) fn upgrade(self) -> ProjectV5 {
+        ProjectV5 {
+            version: 5,
             name: self.name,
             bpm: self.bpm,
             swing: self.swing,
@@ -309,6 +311,170 @@ impl ProjectV4 {
             globals: self.globals,
             song: self.song,
         }
+    }
+}
+
+/// One machine's slot in a v1..v5 song bar, frozen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CellV5 {
+    pub pattern: Option<PatternRef>,
+    pub mute: bool,
+    pub transpose: i8,
+}
+
+/// A v3..v5 song bar: one cell per machine, by uid. It lasts as long as
+/// its longest pattern; shorter ones loop inside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BarV5 {
+    pub cells: Vec<(MachineUid, CellV5)>,
+}
+
+impl BarV5 {
+    fn cell(&self, uid: MachineUid) -> CellV5 {
+        self.cells
+            .iter()
+            .find(|(u, _)| *u == uid)
+            .map_or_else(CellV5::default, |(_, c)| *c)
+    }
+}
+
+/// The v3..v5 song: a row of bars, the loop as bar indices (inclusive).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SongV5 {
+    pub bars: Vec<BarV5>,
+    pub loop_range: Option<(u16, u16)>,
+    pub automation: Vec<AutoLane>,
+}
+
+/// A bar with no pattern lasts this long.
+const DEFAULT_BAR_STEPS: usize = 16;
+
+/// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
+fn bar_steps(bar: &BarV5, banks: Banks<'_>) -> usize {
+    (0..MAX_MACHINES)
+        .filter_map(|pos| {
+            let (uid, _) = banks.machines[pos]?;
+            banks.length(pos, bar.cell(uid).pattern?.0)
+        })
+        .max()
+        .unwrap_or(DEFAULT_BAR_STEPS)
+}
+
+/// Global step at which `bar` starts (`bar == bars.len()` gives the song length).
+fn bar_start_step(song: &SongV5, bar: usize, banks: Banks<'_>) -> u32 {
+    song.bars
+        .iter()
+        .take(bar)
+        .map(|b| bar_steps(b, banks) as u32)
+        .sum()
+}
+
+/// The v5 project: notes everywhere, the song still in bars.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProjectV5 {
+    pub version: u32,
+    pub name: String,
+    pub bpm: f32,
+    pub swing: f32,
+    pub machines: Vec<MachineEntry>,
+    pub next_uid: u16,
+    pub globals: BTreeMap<GlobalParam, f32>,
+    pub song: SongV5,
+}
+
+impl ProjectV5 {
+    /// The v5 song rules the conversion relies on: cells on rack
+    /// machines, once per bar, patterns in range, at most `MAX_BARS` bars
+    /// and a loop inside them.
+    pub(crate) fn check_song(&self) -> Result<(), ProjectError> {
+        let bad = |m: &str| Err(ProjectError::Invalid(m.into()));
+        for bar in &self.song.bars {
+            for (i, (uid, cell)) in bar.cells.iter().enumerate() {
+                if !self.machines.iter().any(|m| m.uid == *uid) {
+                    return bad("song bar names a machine not in the rack");
+                }
+                if bar.cells[..i].iter().any(|(u, _)| u == uid) {
+                    return bad("song bar names a machine twice");
+                }
+                if cell.pattern.is_some_and(|r| r.0 as usize >= PATTERNS) {
+                    return bad("song references a pattern out of range");
+                }
+            }
+        }
+        if self.song.bars.len() > MAX_BARS {
+            return Err(ProjectError::Invalid(format!(
+                "song has {} bars",
+                self.song.bars.len()
+            )));
+        }
+        if let Some((a, b)) = self.song.loop_range
+            && (a > b || b as usize >= self.song.bars.len())
+        {
+            return bad("song loop range is out of bounds");
+        }
+        Ok(())
+    }
+
+    /// A v6 project: each bar's cells become blocks at the bar's start,
+    /// as long as the bar (`len: None` when the pattern is exactly that
+    /// long), so the song plays, ends and loops exactly as before.
+    pub(crate) fn upgrade(self) -> Project {
+        let song = convert_song(&self.song, Banks::of_machines(&self.machines));
+        Project {
+            version: PROJECT_VERSION,
+            name: self.name,
+            bpm: self.bpm,
+            swing: self.swing,
+            machines: self.machines,
+            next_uid: self.next_uid,
+            globals: self.globals,
+            song,
+        }
+    }
+}
+
+/// Bars to lanes (see `ProjectV5::upgrade`). Lanes come in rack order,
+/// one per machine with a pattern somewhere; cells of machines outside
+/// `banks` are dropped (`check_song` rejects them first).
+fn convert_song(old: &SongV5, banks: Banks<'_>) -> Song {
+    let starts: Vec<u32> = (0..=old.bars.len())
+        .map(|i| bar_start_step(old, i, banks))
+        .collect();
+    let total = starts[old.bars.len()];
+    let mut lanes = Vec::new();
+    for pos in 0..MAX_MACHINES {
+        let Some((uid, _)) = banks.machines[pos] else {
+            continue;
+        };
+        let blocks: Vec<Block> = old
+            .bars
+            .iter()
+            .enumerate()
+            .filter_map(|(i, bar)| {
+                let cell = bar.cell(uid);
+                let pattern = cell.pattern?;
+                let bar_len = starts[i + 1] - starts[i];
+                let own = banks.length(pos, pattern.0).map(|n| n as u32);
+                Some(Block {
+                    start: starts[i],
+                    pattern,
+                    len: (own != Some(bar_len)).then_some(bar_len as u16),
+                    mute: cell.mute,
+                    transpose: cell.transpose,
+                })
+            })
+            .collect();
+        if !blocks.is_empty() {
+            lanes.push((uid, blocks));
+        }
+    }
+    Song {
+        lanes,
+        end: (total > 0).then_some(total),
+        loop_range: old
+            .loop_range
+            .map(|(a, b)| (starts[a as usize], starts[b as usize + 1])),
+        automation: old.automation.clone(),
     }
 }
 
@@ -389,8 +555,8 @@ pub(crate) struct BarV2 {
 
 impl BarV2 {
     /// One cell per fixed machine, on the standard rack's uids.
-    fn upgrade(self) -> Bar {
-        Bar {
+    fn upgrade(self) -> BarV5 {
+        BarV5 {
             cells: standard_rack()
                 .iter()
                 .enumerate()
@@ -401,7 +567,7 @@ impl BarV2 {
                         4 => self.transpose[2],
                         _ => 0,
                     };
-                    let cell = Cell {
+                    let cell = CellV5 {
                         pattern: self.patterns[i],
                         mute: self.mutes[i],
                         transpose,
@@ -486,7 +652,7 @@ impl ProjectV2 {
                 }
             }
         }
-        p.song = Song {
+        p.song = SongV5 {
             bars: self.song.bars.into_iter().map(BarV2::upgrade).collect(),
             loop_range: self.song.loop_range,
             automation: self
@@ -570,6 +736,136 @@ mod tests {
 
     fn load(v4: &ProjectV4) -> Result<Project, ProjectError> {
         Project::from_ron(&ron::ser::to_string(v4).unwrap())
+    }
+
+    /// A v5 project with Synth 1's A02 32 steps long and the sampler's A03
+    /// 8 steps, and a song of five bars: 32 (a short pattern looping in
+    /// a longer bar, mutes, a transpose), empty, 8, 16, empty.
+    fn v5_with_song() -> ProjectV5 {
+        let mut v5 = ProjectV4::standard().upgrade();
+        let MachineBody::Synth(s) = &mut v5.machines[0].body else {
+            panic!("position 0 is Synth 1")
+        };
+        s.patterns[1].roll.length = 32;
+        let MachineBody::Sampler(x) = &mut v5.machines[5].body else {
+            panic!("position 5 is the sampler")
+        };
+        x.patterns[2].length = 8;
+        let cell = |slot: Option<u8>, mute, transpose| CellV5 {
+            pattern: slot.map(PatternRef),
+            mute,
+            transpose,
+        };
+        let bar = |cells: Vec<(u16, CellV5)>| BarV5 {
+            cells: cells.into_iter().map(|(u, c)| (MachineUid(u), c)).collect(),
+        };
+        v5.song = SongV5 {
+            bars: vec![
+                bar(vec![
+                    (1, cell(Some(1), false, 0)),
+                    (3, cell(Some(0), true, 0)),
+                    (5, cell(Some(0), false, 3)),
+                ]),
+                bar(vec![(4, cell(None, true, 0))]),
+                bar(vec![(6, cell(Some(2), false, 0)), (1, cell(None, true, 0))]),
+                bar(vec![
+                    (3, cell(Some(0), false, 0)),
+                    (2, cell(Some(0), false, -1)),
+                ]),
+                bar(Vec::new()),
+            ],
+            loop_range: Some((1, 3)),
+            automation: vec![AutoLane {
+                param: ParamId::Master(MasterParam::Level),
+                points: [(40, 0.5)].into_iter().collect(),
+            }],
+        };
+        v5
+    }
+
+    #[test]
+    fn v5_bars_convert_to_blocks_exactly() {
+        let p = v5_with_song().upgrade();
+        let b = |start, slot| Block::new(start, PatternRef(slot));
+        assert_eq!(
+            p.song.lanes,
+            [
+                (MachineUid(1), vec![b(0, 1)]),
+                (
+                    MachineUid(2),
+                    vec![Block {
+                        transpose: -1,
+                        ..b(56, 0)
+                    }]
+                ),
+                (
+                    MachineUid(3),
+                    vec![
+                        Block {
+                            len: Some(32),
+                            mute: true,
+                            ..b(0, 0)
+                        },
+                        b(56, 0)
+                    ]
+                ),
+                (
+                    MachineUid(5),
+                    vec![Block {
+                        len: Some(32),
+                        transpose: 3,
+                        ..b(0, 0)
+                    }]
+                ),
+                (MachineUid(6), vec![b(48, 2)]),
+            ]
+        );
+        assert_eq!(p.song.end, Some(32 + 16 + 8 + 16 + 16), "empty bars kept");
+        assert_eq!(p.song.loop_range, Some((32, 72)), "bars 1..=3 as steps");
+        assert_eq!(p.song.automation, v5_with_song().song.automation);
+        p.validate().unwrap();
+    }
+
+    #[test]
+    fn an_empty_v5_song_converts_to_the_empty_song() {
+        assert_eq!(
+            ProjectV4::standard().upgrade().upgrade(),
+            Project::default()
+        );
+    }
+
+    #[test]
+    fn a_v5_file_loads_converted_and_saves_as_v6() {
+        let v5 = v5_with_song();
+        let text = ron::ser::to_string_pretty(&v5, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("version: 5,"));
+        let p = Project::from_ron(&text).unwrap();
+        assert_eq!(p, v5_with_song().upgrade());
+        assert_eq!(p.version, PROJECT_VERSION);
+        assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
+    }
+
+    #[test]
+    fn a_damaged_v5_song_is_invalid_not_a_panic() {
+        let load = |v5: &ProjectV5| Project::from_ron(&ron::ser::to_string(v5).unwrap());
+        let mut v5 = v5_with_song();
+        v5.song.loop_range = Some((2, 5));
+        assert!(matches!(load(&v5), Err(ProjectError::Invalid(_))), "loop");
+        let mut v5 = v5_with_song();
+        v5.song.loop_range = Some((3, 2));
+        assert!(matches!(load(&v5), Err(ProjectError::Invalid(_))), "loop");
+        let mut v5 = v5_with_song();
+        v5.song.bars[0].cells[0].1.pattern = Some(PatternRef(PATTERNS as u8));
+        assert!(matches!(load(&v5), Err(ProjectError::Invalid(_))), "ref");
+        let mut v5 = v5_with_song();
+        v5.song.bars[0]
+            .cells
+            .push((MachineUid(42), CellV5::default()));
+        assert!(matches!(load(&v5), Err(ProjectError::Invalid(_))), "uid");
+        let mut v5 = v5_with_song();
+        v5.song.bars = vec![BarV5::default(); MAX_BARS + 1];
+        v5.song.loop_range = None;
+        assert!(matches!(load(&v5), Err(ProjectError::Invalid(_))), "bars");
     }
 
     #[test]

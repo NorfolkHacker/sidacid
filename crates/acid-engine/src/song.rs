@@ -1,17 +1,18 @@
 //! Pure song helpers shared by the sequencer, offline render and the UI:
-//! bar lengths, global step positions, automation lookup and editing.
+//! block lanes (ends, lookup, placement without overlap, ripple, time
+//! insert/delete, recorded pattern changes) and automation.
 
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::params::ParamId;
 use crate::project::{
-    AutoLane, Bar, DrumPattern, NotePattern, PATTERNS, PatternRef, Project, STEPS, Song,
-    SynthPattern, steps_of,
+    AutoLane, Block, DrumPattern, MachineEntry, NotePattern, PATTERNS, PatternRef, Project, STEPS,
+    Song, SynthPattern, steps_of,
 };
-use crate::rack::{CompiledBar, CompiledSong, Slot, SlotPatterns};
+use crate::rack::{CompiledSong, Slot, SlotPatterns};
 use std::collections::BTreeMap;
 
+/// Bars in the longest song (with `STEPS` steps each, `MAX_SONG_STEPS`).
 pub const MAX_BARS: usize = 999;
-pub const DEFAULT_BAR_STEPS: usize = 16;
 
 /// One machine's pattern bank, borrowed, by what plays it.
 #[derive(Clone, Copy)]
@@ -59,7 +60,7 @@ impl<'a> Bank<'a> {
 #[derive(Clone, Copy)]
 pub struct Banks<'a> {
     pub slots: [Option<Bank<'a>>; MAX_MACHINES],
-    /// The machine at each position: song bars are keyed by its uid, and
+    /// The machine at each position: song lanes are keyed by its uid, and
     /// its type says whether the song transpose applies.
     pub machines: [Option<(MachineUid, MachineType)>; MAX_MACHINES],
 }
@@ -85,9 +86,14 @@ impl<'a> Banks<'a> {
 
     /// The project's rack, in order.
     pub fn of(p: &'a Project) -> Self {
+        Self::of_machines(&p.machines)
+    }
+
+    /// A rack of machine entries, in order.
+    pub fn of_machines(machines: &'a [MachineEntry]) -> Self {
         use crate::project::MachineBody;
         let mut b = Self::empty();
-        for (i, m) in p.machines.iter().take(MAX_MACHINES).enumerate() {
+        for (i, m) in machines.iter().take(MAX_MACHINES).enumerate() {
             b.slots[i] = Some(match &m.body {
                 MachineBody::Synth(x) => Bank::Synth(&x.patterns),
                 MachineBody::Kit(x) => Bank::Drum(&x.patterns),
@@ -124,58 +130,273 @@ impl<'a> Banks<'a> {
     }
 }
 
-/// Steps in a bar whose patterns per position `pattern_at` gives: its
-/// longest assigned pattern, or 16 when none is assigned.
-fn steps_with(banks: Banks<'_>, pattern_at: impl Fn(usize) -> Option<PatternRef>) -> usize {
-    let longest = (0..MAX_MACHINES)
-        .filter_map(|pos| banks.length(pos, pattern_at(pos)?.0))
-        .max()
-        .unwrap_or(0);
-    if longest == 0 {
-        DEFAULT_BAR_STEPS
-    } else {
-        longest
+/// `block_end` of a block on the lane at rack position `pos` of a
+/// compiled song, with lengths from the engine's own banks (real-time
+/// safe).
+pub fn compiled_block_end(b: &Block, pos: usize, banks: Banks<'_>) -> u32 {
+    let len = b.len.map_or_else(
+        || {
+            banks
+                .length(pos, b.pattern.0)
+                .map_or(DEFAULT_PATTERN_STEPS, |n| n as u32)
+        },
+        u32::from,
+    );
+    b.start.saturating_add(len)
+}
+
+/// `song_end` of a compiled song (real-time safe).
+pub fn compiled_song_end(song: &CompiledSong, banks: Banks<'_>) -> u32 {
+    song.lanes
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, lane)| Some(compiled_block_end(lane.last()?, pos, banks)))
+        .fold(song.end.unwrap_or(0), u32::max)
+}
+
+/// `block_at` on the lane at rack position `pos` of a compiled song
+/// (real-time safe).
+pub fn compiled_block_at(
+    song: &CompiledSong,
+    pos: usize,
+    step: u32,
+    banks: Banks<'_>,
+) -> Option<usize> {
+    let lane = song.lanes.get(pos)?;
+    let i = lane.partition_point(|b| b.start <= step).checked_sub(1)?;
+    (step < compiled_block_end(&lane[i], pos, banks)).then_some(i)
+}
+
+/// Steps of pattern `slot` on machine `uid`: what a block lasts when it
+/// has no length of its own.
+pub type Lens<'a> = &'a dyn Fn(MachineUid, u8) -> u32;
+
+/// `Lens` over the project's machines: the steps of that machine's
+/// pattern, 16 when the machine or pattern is missing.
+pub fn lens_of(p: &Project) -> impl Fn(MachineUid, u8) -> u32 {
+    let banks = Banks::of(p);
+    move |uid, slot| {
+        banks
+            .machines
+            .iter()
+            .position(|m| m.is_some_and(|(u, _)| u == uid))
+            .and_then(|pos| banks.length(pos, slot))
+            .map_or(DEFAULT_PATTERN_STEPS, |n| n as u32)
     }
 }
 
-/// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
-pub fn bar_steps(bar: &Bar, banks: Banks<'_>) -> usize {
-    steps_with(banks, |pos| {
-        let (uid, _) = banks.machines[pos]?;
-        bar.cell(uid).pattern
-    })
+/// A missing pattern's length.
+const DEFAULT_PATTERN_STEPS: u32 = 16;
+
+/// The step after `b`'s last.
+pub fn block_end(b: &Block, uid: MachineUid, lens: Lens<'_>) -> u32 {
+    let len = b.len.map_or_else(|| lens(uid, b.pattern.0), u32::from);
+    b.start.saturating_add(len)
 }
 
-/// `bar_steps` of a bar compiled to rack positions.
-pub fn compiled_bar_steps(bar: &CompiledBar, banks: Banks<'_>) -> usize {
-    steps_with(banks, |pos| bar.patterns[pos])
-}
-
-/// `total_steps` of a compiled song.
-pub fn compiled_total_steps(song: &CompiledSong, banks: Banks<'_>) -> u32 {
-    compiled_bar_start_step(song, song.bars.len(), banks)
-}
-
-/// `bar_start_step` of a compiled song.
-pub fn compiled_bar_start_step(song: &CompiledSong, bar: usize, banks: Banks<'_>) -> u32 {
-    song.bars
+/// Where the song ends: its last block's end, or `song.end` if later.
+pub fn song_end(song: &Song, lens: Lens<'_>) -> u32 {
+    song.lanes
         .iter()
-        .take(bar)
-        .map(|b| compiled_bar_steps(b, banks) as u32)
-        .sum()
+        .flat_map(|(uid, blocks)| blocks.iter().map(|b| block_end(b, *uid, lens)))
+        .fold(song.end.unwrap_or(0), u32::max)
 }
 
-/// Global step at which `bar` starts (`bar == bars.len()` gives the song length).
-pub fn bar_start_step(song: &Song, bar: usize, banks: Banks<'_>) -> u32 {
-    song.bars
-        .iter()
-        .take(bar)
-        .map(|b| bar_steps(b, banks) as u32)
-        .sum()
+/// The block of a sorted lane that covers `step`.
+pub fn block_at(blocks: &[Block], uid: MachineUid, step: u32, lens: Lens<'_>) -> Option<usize> {
+    let i = blocks.partition_point(|b| b.start <= step).checked_sub(1)?;
+    (step < block_end(&blocks[i], uid, lens)).then_some(i)
 }
 
-pub fn total_steps(song: &Song, banks: Banks<'_>) -> u32 {
-    bar_start_step(song, song.bars.len(), banks)
+/// Puts `block` on a sorted lane at its start if that's free, else at the
+/// nearest free start on the step grid, searching both ways (later wins
+/// a tie). Returns its index, or `None` (lane untouched) when it fits
+/// nowhere before `MAX_SONG_STEPS`.
+pub fn place(
+    blocks: &mut Vec<Block>,
+    uid: MachineUid,
+    block: Block,
+    lens: Lens<'_>,
+) -> Option<usize> {
+    let len = block_end(&Block { start: 0, ..block }, uid, lens);
+    let max = MAX_SONG_STEPS as u32;
+    if len == 0 || len > max {
+        return None;
+    }
+    let want = block.start;
+    // Each gap [from, to) between blocks, the last up to the limit.
+    let mut best: Option<u32> = None;
+    let mut from = 0;
+    for i in 0..=blocks.len() {
+        let to = blocks.get(i).map_or(max, |b| b.start.min(max));
+        if to >= from && to - from >= len {
+            let start = want.clamp(from, to - len);
+            let better = best.is_none_or(|b| {
+                let (d, e) = (start.abs_diff(want), b.abs_diff(want));
+                d < e || (d == e && start > b)
+            });
+            if better {
+                best = Some(start);
+            }
+        }
+        if let Some(b) = blocks.get(i) {
+            from = from.max(block_end(b, uid, lens));
+        }
+    }
+    let start = best?;
+    let i = blocks.partition_point(|b| b.start < start);
+    blocks.insert(i, Block { start, ..block });
+    Some(i)
+}
+
+/// Pattern `slot` grew from `old_len` to `new_len` steps: each of its
+/// `len: None` blocks grows, and later blocks move right only as far as
+/// needed to clear the block in front (a gap absorbs growth first),
+/// cascading down the lane. Shrinking leaves gaps; `Some` blocks never
+/// ripple. Other blocks' lengths come from `lens`.
+pub fn ripple(
+    blocks: &mut [Block],
+    uid: MachineUid,
+    slot: u8,
+    old_len: u32,
+    new_len: u32,
+    lens: Lens<'_>,
+) {
+    if new_len <= old_len {
+        return;
+    }
+    let mut front = 0;
+    for b in blocks.iter_mut() {
+        b.start = b.start.max(front);
+        front = if b.len.is_none() && b.pattern.0 == slot {
+            b.start.saturating_add(new_len)
+        } else {
+            block_end(b, uid, lens)
+        };
+    }
+}
+
+/// Inserts `n` steps at step `at` on every lane: blocks and automation
+/// points at or after it move right, as do the song's end and the loop
+/// (inserting at or before the loop start shifts it, inside it or right
+/// at its end extends it). At most the room left before
+/// `MAX_SONG_STEPS` is inserted.
+pub fn insert_time(song: &mut Song, at: u32, n: u32, lens: Lens<'_>) {
+    let max = MAX_SONG_STEPS as u32;
+    let n = n.min(max.saturating_sub(song_end(song, lens)));
+    if n == 0 {
+        return;
+    }
+    for (_, blocks) in &mut song.lanes {
+        for b in blocks.iter_mut().filter(|b| b.start >= at) {
+            b.start += n;
+        }
+    }
+    shift_automation(song, at, n as i64);
+    if let Some(e) = &mut song.end
+        && *e >= at
+    {
+        *e = e.saturating_add(n).min(max);
+    }
+    if let Some((a, b)) = song.loop_range {
+        let shift = |i: u32| i.saturating_add(n).min(max);
+        song.loop_range = Some(if at <= a {
+            (shift(a), shift(b))
+        } else if at <= b {
+            (a, shift(b))
+        } else {
+            (a, b)
+        });
+    }
+}
+
+/// Removes steps `a..b` from every lane and closes the gap: blocks
+/// starting inside go, a block running into `a` is cut to end there,
+/// later blocks and automation move left, points inside go (and lanes
+/// left empty), the song's end follows, and a loop whose start or last
+/// step is inside is cleared.
+pub fn delete_time(song: &mut Song, a: u32, b: u32, lens: Lens<'_>) {
+    if a >= b {
+        return;
+    }
+    let d = b - a;
+    for (uid, blocks) in &mut song.lanes {
+        blocks.retain(|x| x.start < a || x.start >= b);
+        for x in blocks.iter_mut() {
+            if x.start >= b {
+                x.start -= d;
+            } else if block_end(x, *uid, lens) > a {
+                x.len = Some((a - x.start) as u16);
+            }
+        }
+    }
+    for lane in &mut song.automation {
+        lane.points.retain(|k, _| *k < a || *k >= b);
+    }
+    shift_automation(song, b, -(d as i64));
+    song.automation.retain(|l| !l.points.is_empty());
+    if let Some(e) = &mut song.end {
+        *e = if *e >= b { *e - d } else { (*e).min(a) };
+    }
+    let inside = |i: u32| (a..b).contains(&i);
+    let map = |i: u32| if i >= b { i - d } else { i };
+    song.loop_range = song
+        .loop_range
+        .filter(|&(la, lb)| !inside(la) && !inside(lb.saturating_sub(1)))
+        .map(|(la, lb)| (map(la), map(lb)));
+}
+
+/// A pattern change recorded at `step` on `uid`'s lane, at the start of
+/// its 16-step bar. The block covering that is split there (the left
+/// part keeps its pattern, fixed to its length); the right part and each
+/// following block that touches the one before with the same old
+/// pattern switch to `slot`, keeping their spans. In a gap, a new block
+/// of `slot` goes there, cut to end before the next block. Out-of-range
+/// slots are ignored.
+pub fn record_pattern(song: &mut Song, uid: MachineUid, step: u32, slot: u8, lens: Lens<'_>) {
+    let max = MAX_SONG_STEPS as u32;
+    let at = step / 16 * 16;
+    if slot as usize >= PATTERNS || at >= max {
+        return;
+    }
+    let new = PatternRef(slot);
+    let new_len = lens(uid, slot);
+    let blocks = song.lane_mut(uid);
+    let Some(mut i) = block_at(blocks, uid, at, lens) else {
+        let i = blocks.partition_point(|b| b.start < at);
+        let room = blocks.get(i).map_or(max, |b| b.start) - at;
+        blocks.insert(
+            i,
+            Block {
+                len: (new_len > room).then_some(room as u16),
+                ..Block::new(at, new)
+            },
+        );
+        return;
+    };
+    let old = blocks[i].pattern;
+    if blocks[i].start < at {
+        let end = block_end(&blocks[i], uid, lens);
+        let right = Block {
+            start: at,
+            len: Some((end - at) as u16),
+            ..blocks[i]
+        };
+        blocks[i].len = Some((at - blocks[i].start) as u16);
+        i += 1;
+        blocks.insert(i, right);
+    }
+    let mut end = blocks[i].start;
+    while let Some(b) = blocks.get_mut(i)
+        && b.start == end
+        && b.pattern == old
+    {
+        end = block_end(b, uid, lens);
+        let span = end - b.start;
+        b.pattern = new;
+        b.len = (span != new_len).then_some(span as u16);
+        i += 1;
+    }
 }
 
 /// The lane's value at `step`: its last point at or before it.
@@ -228,24 +449,6 @@ pub fn clear_automation(song: &mut Song, param: ParamId) {
     song.automation.retain(|l| l.param != param);
 }
 
-/// A pattern change made while recording: sets machine `uid` to `slot` in
-/// `bar` and in the following bars that still held the bar's old reference.
-/// Out-of-range bars and slots are ignored.
-pub fn write_pattern_ref(song: &mut Song, bar: usize, uid: MachineUid, slot: u8) {
-    if slot as usize >= PATTERNS {
-        return;
-    }
-    let Some(old) = song.bars.get(bar).map(|b| b.cell(uid).pattern) else {
-        return;
-    };
-    for b in bar..song.bars.len() {
-        if b > bar && song.bars[b].cell(uid).pattern != old {
-            break;
-        }
-        song.bars[b].cell_mut(uid).pattern = Some(PatternRef(slot));
-    }
-}
-
 /// Moves every automation point at or after `from` by `delta` steps.
 fn shift_automation(song: &mut Song, from: u32, delta: i64) {
     for lane in &mut song.automation {
@@ -262,160 +465,363 @@ fn shift_automation(song: &mut Song, from: u32, delta: i64) {
     }
 }
 
-/// Inserts `bars` before bar `at` (clamped to the song end), moving later
-/// automation along. The loop range follows: inserting before or at the
-/// loop's first bar shifts the loop; inserting inside it, or right after
-/// its last bar, extends it to include the new bars; inserting further on
-/// leaves it alone. Paste and Duplicate go through here too.
-pub fn insert_bars(song: &mut Song, at: usize, bars: &[Bar], banks: Banks<'_>) {
-    let at = at.min(song.bars.len());
-    let room = MAX_BARS.saturating_sub(song.bars.len());
-    let bars = &bars[..bars.len().min(room)];
-    if bars.is_empty() {
-        return;
-    }
-    let start = bar_start_step(song, at, banks);
-    let added: u32 = bars.iter().map(|b| bar_steps(b, banks) as u32).sum();
-    shift_automation(song, start, added as i64);
-    song.bars.splice(at..at, bars.iter().cloned());
-    if let Some((a, b)) = song.loop_range {
-        let n = bars.len() as u16;
-        // a stray range past the bars can't overflow or leave the bar cap
-        let shift = |i: u16| i.saturating_add(n).min((MAX_BARS - 1) as u16);
-        let (a_at, b_at) = (a as usize, b as usize);
-        song.loop_range = Some(if at <= a_at {
-            (shift(a), shift(b))
-        } else if at <= b_at + 1 {
-            (a, shift(b))
-        } else {
-            (a, b)
-        });
-    }
-}
-
-pub fn delete_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'_>) {
-    if song.bars.is_empty() {
-        return;
-    }
-    let last = last.min(song.bars.len() - 1);
-    if first > last {
-        return;
-    }
-    let start = bar_start_step(song, first, banks);
-    let end = bar_start_step(song, last + 1, banks);
-    for lane in &mut song.automation {
-        lane.points.retain(|k, _| *k < start || *k >= end);
-    }
-    shift_automation(song, end, -((end - start) as i64));
-    song.automation.retain(|l| !l.points.is_empty());
-    song.bars.drain(first..=last);
-    let n = (last - first + 1) as u16;
-    song.loop_range = song.loop_range.and_then(|(a, b)| {
-        let map = |i: u16| -> Option<u16> {
-            if (i as usize) < first {
-                Some(i)
-            } else if i as usize > last {
-                Some(i - n)
-            } else {
-                None
-            }
-        };
-        Some((map(a)?, map(b)?))
-    });
-}
-
-pub fn duplicate_bars(song: &mut Song, first: usize, last: usize, banks: Banks<'_>) {
-    if first > last || last >= song.bars.len() {
-        return;
-    }
-    let copy: Vec<Bar> = song.bars[first..=last].to_vec();
-    let src_start = bar_start_step(song, first, banks);
-    let src_end = bar_start_step(song, last + 1, banks);
-    let points: Vec<(ParamId, Vec<(u32, f32)>)> = song
-        .automation
-        .iter()
-        .map(|l| {
-            (
-                l.param,
-                l.points
-                    .range(src_start..src_end)
-                    .map(|(k, v)| (k - src_start, *v))
-                    .collect(),
-            )
-        })
-        .collect();
-    let before = song.bars.len();
-    insert_bars(song, last + 1, &copy, banks);
-    let inserted = song.bars.len() - before;
-    if inserted == 0 {
-        return;
-    }
-    // At the bar cap only the first `inserted` bars were copied: their
-    // automation ends where the truncated copy ends.
-    let span = bar_start_step(song, first + inserted, banks) - src_start;
-    let dst = bar_start_step(song, last + 1, banks);
-    for (param, pts) in points {
-        for (offset, v) in pts.into_iter().filter(|(o, _)| *o < span) {
-            write_automation(song, param, dst + offset, dst + offset, v);
-        }
-    }
-}
-
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)] // tests set one field of a default song
 mod tests {
     use super::*;
     use crate::params::{MasterParam, SynthParam};
-    use crate::project::{DrumPattern, NotePattern, Project, SynthPattern};
 
-    fn project_with_lengths(synth0: u8, drum0: u8) -> Project {
-        let mut p = Project::default();
-        p.synth_mut(MachineUid(1)).unwrap().patterns[1] = SynthPattern {
-            roll: NotePattern {
-                length: synth0,
-                ..NotePattern::default()
-            },
-            ..SynthPattern::default()
-        };
-        p.kit_mut(MachineUid(3)).unwrap().patterns[2] = DrumPattern {
-            roll: NotePattern {
-                length: drum0,
-                ..NotePattern::default()
-            },
-        };
-        p
-    }
+    const U: MachineUid = MachineUid(1);
 
-    fn bar(refs: [Option<u8>; 4]) -> Bar {
-        let mut bar = Bar::default();
-        for (m, r) in refs.into_iter().enumerate() {
-            bar.cell_mut(MachineUid(m as u16 + 1)).pattern = r.map(PatternRef);
+    /// Slot 1 is 32 steps, slot 2 is 8, the rest 16.
+    fn lens(_: MachineUid, slot: u8) -> u32 {
+        match slot {
+            1 => 32,
+            2 => 8,
+            _ => 16,
         }
-        bar
+    }
+
+    fn b(start: u32, slot: u8) -> Block {
+        Block::new(start, PatternRef(slot))
+    }
+
+    fn fixed(start: u32, slot: u8, len: u16) -> Block {
+        Block {
+            len: Some(len),
+            ..b(start, slot)
+        }
+    }
+
+    /// (start, slot, len) of each block.
+    fn shape(blocks: &[Block]) -> Vec<(u32, u8, Option<u16>)> {
+        blocks
+            .iter()
+            .map(|b| (b.start, b.pattern.0, b.len))
+            .collect()
     }
 
     #[test]
-    fn bar_length_is_the_longest_assigned_pattern() {
-        let p = project_with_lengths(32, 12);
-        let b = Banks::of(&p);
-        assert_eq!(bar_steps(&bar([None; 4]), b), DEFAULT_BAR_STEPS);
-        assert_eq!(bar_steps(&bar([Some(1), None, Some(2), None]), b), 32);
-        assert_eq!(bar_steps(&bar([None, None, Some(2), None]), b), 12);
+    fn a_block_ends_after_its_pattern_or_its_own_length() {
+        assert_eq!(block_end(&b(4, 1), U, &lens), 36);
+        assert_eq!(block_end(&b(4, 0), U, &lens), 20);
+        assert_eq!(block_end(&fixed(4, 1, 10), U, &lens), 14, "shorter");
+        assert_eq!(block_end(&fixed(4, 2, 40), U, &lens), 44, "longer loops");
     }
 
     #[test]
-    fn start_steps_accumulate_bar_lengths() {
-        let mut p = project_with_lengths(32, 16);
-        p.song.bars = vec![
-            bar([None; 4]),
-            bar([Some(1), None, None, None]),
-            bar([None; 4]),
-        ];
+    fn the_song_ends_at_its_last_block_or_its_end_if_later() {
+        let mut song = Song::default();
+        assert_eq!(song_end(&song, &lens), 0, "empty");
+        song.lane_mut(U).extend([b(0, 0), b(16, 1)]);
+        song.lane_mut(MachineUid(3)).push(fixed(8, 0, 24));
+        assert_eq!(song_end(&song, &lens), 48);
+        song.end = Some(64);
+        assert_eq!(song_end(&song, &lens), 64, "trailing empty bars");
+        song.end = Some(20);
+        assert_eq!(song_end(&song, &lens), 48);
+    }
+
+    #[test]
+    fn block_at_finds_the_covering_block() {
+        let lane = [b(0, 0), b(32, 2)];
+        let at = |step| block_at(&lane, U, step, &lens);
+        assert_eq!(at(0), Some(0));
+        assert_eq!(at(15), Some(0));
+        assert_eq!(at(16), None, "a gap");
+        assert_eq!(at(32), Some(1));
+        assert_eq!(at(39), Some(1));
+        assert_eq!(at(40), None, "past the end");
+        assert_eq!(block_at(&[], U, 0, &lens), None);
+    }
+
+    #[test]
+    fn place_takes_the_asked_start_when_free() {
+        let mut lane = vec![b(0, 0), b(32, 0)];
+        assert_eq!(place(&mut lane, U, b(16, 0), &lens), Some(1));
+        assert_eq!(shape(&lane), [(0, 0, None), (16, 0, None), (32, 0, None)]);
+    }
+
+    #[test]
+    fn place_moves_an_overlapping_block_to_the_nearest_free_start() {
+        let mut lane = vec![b(16, 0)];
+        assert_eq!(place(&mut lane, U, b(8, 0), &lens), Some(0), "back to 0");
+        assert_eq!(lane[0].start, 0);
+        let mut lane = vec![b(16, 0)];
+        assert_eq!(place(&mut lane, U, b(28, 0), &lens), Some(1), "on to 32");
+        assert_eq!(lane[1].start, 32);
+        // An 8-step block at 20: 8 (12 back) or 32 (12 on); later wins.
+        let mut lane = vec![b(16, 0)];
+        assert_eq!(place(&mut lane, U, b(20, 2), &lens), Some(1));
+        assert_eq!(shape(&lane), [(16, 0, None), (32, 2, None)]);
+        // A gap too short is skipped.
+        let mut lane = vec![b(0, 0), b(24, 0)];
+        assert_eq!(place(&mut lane, U, b(16, 0), &lens), Some(2));
+        assert_eq!(lane[2].start, 40);
+        // Mute, transpose and length are kept.
+        let mut lane = vec![b(0, 0)];
+        let block = Block {
+            mute: true,
+            transpose: -3,
+            ..fixed(4, 0, 6)
+        };
+        place(&mut lane, U, block, &lens);
+        assert_eq!(lane[1], Block { start: 16, ..block });
+    }
+
+    #[test]
+    fn place_refuses_a_block_that_fits_nowhere() {
+        let max = MAX_SONG_STEPS as u32;
+        let mut lane = vec![fixed(0, 0, max as u16)];
+        assert_eq!(place(&mut lane, U, b(40, 0), &lens), None);
+        assert_eq!(lane.len(), 1, "lane untouched");
+        let mut lane = Vec::new();
+        assert_eq!(place(&mut lane, U, b(max - 8, 0), &lens), Some(0));
+        assert_eq!(lane[0].start, max - 16, "kept inside the song limit");
+        let mut lane = Vec::new();
+        assert_eq!(
+            place(&mut lane, U, fixed(0, 0, 0), &lens),
+            None,
+            "no length"
+        );
+    }
+
+    #[test]
+    fn a_growing_pattern_pushes_later_blocks_right_in_a_cascade() {
+        // Slot 0 grows from 16 to 24; the lens still says 16.
+        let mut lane = vec![b(0, 0), b(16, 3), b(32, 3), b(64, 3)];
+        ripple(&mut lane, U, 0, 16, 24, &lens);
+        assert_eq!(
+            shape(&lane),
+            [(0, 0, None), (24, 3, None), (40, 3, None), (64, 3, None)],
+            "the gap before 64 absorbs the rest"
+        );
+        let mut lane = vec![b(0, 0), b(16, 0), b(32, 3)];
+        ripple(&mut lane, U, 0, 16, 24, &lens);
+        assert_eq!(
+            shape(&lane),
+            [(0, 0, None), (24, 0, None), (48, 3, None)],
+            "every block of the pattern grows"
+        );
+    }
+
+    #[test]
+    fn a_gap_absorbs_growth_first() {
+        let mut lane = vec![b(0, 0), b(20, 3)];
+        ripple(&mut lane, U, 0, 16, 20, &lens);
+        assert_eq!(shape(&lane), [(0, 0, None), (20, 3, None)]);
+        ripple(&mut lane, U, 0, 20, 22, &lens);
+        assert_eq!(shape(&lane), [(0, 0, None), (22, 3, None)]);
+    }
+
+    #[test]
+    fn shrinking_leaves_a_gap_and_fixed_blocks_never_ripple() {
+        let mut lane = vec![b(0, 0), b(16, 3)];
+        ripple(&mut lane, U, 0, 16, 8, &lens);
+        assert_eq!(shape(&lane), [(0, 0, None), (16, 3, None)]);
+        let mut lane = vec![fixed(0, 0, 16), b(16, 3)];
+        ripple(&mut lane, U, 0, 16, 32, &lens);
+        assert_eq!(shape(&lane), [(0, 0, Some(16)), (16, 3, None)]);
+        let mut lane = vec![b(0, 5), b(16, 3)];
+        ripple(&mut lane, U, 0, 16, 32, &lens);
+        assert_eq!(shape(&lane), [(0, 5, None), (16, 3, None)], "other pattern");
+    }
+
+    fn three_block_song() -> (Song, ParamId) {
+        let mut song = Song::default();
+        song.lane_mut(U).extend([b(0, 0), b(16, 0), b(32, 0)]);
+        song.lane_mut(MachineUid(3)).push(fixed(8, 0, 16));
+        (song, ParamId::Master(MasterParam::Level))
+    }
+
+    fn keys(song: &Song, id: ParamId) -> Vec<u32> {
+        lane(song, id).unwrap().points.keys().copied().collect()
+    }
+
+    #[test]
+    fn insert_time_moves_later_blocks_automation_and_the_loop() {
+        let (mut song, id) = three_block_song();
+        write_automation(&mut song, id, 5, 5, 0.1);
+        write_automation(&mut song, id, 16, 16, 0.2);
+        write_automation(&mut song, id, 20, 20, 0.3);
+        song.loop_range = Some((16, 48));
+        song.end = Some(48);
+        insert_time(&mut song, 16, 8, &lens);
+        assert_eq!(
+            shape(song.lane(U)),
+            [(0, 0, None), (24, 0, None), (40, 0, None)]
+        );
+        assert_eq!(shape(song.lane(MachineUid(3))), [(8, 0, Some(16))]);
+        assert_eq!(keys(&song, id), [5, 24, 28]);
+        assert_eq!(song.loop_range, Some((24, 56)), "at the loop start: shifts");
+        assert_eq!(song.end, Some(56));
+        let loop_after = |at: u32| {
+            let (mut song, _) = three_block_song();
+            song.loop_range = Some((16, 48));
+            insert_time(&mut song, at, 8, &lens);
+            song.loop_range
+        };
+        assert_eq!(loop_after(0), Some((24, 56)), "before: shifts");
+        assert_eq!(loop_after(32), Some((16, 56)), "inside: extends");
+        assert_eq!(loop_after(48), Some((16, 56)), "right after: extends");
+        assert_eq!(loop_after(49), Some((16, 48)), "past: unchanged");
+    }
+
+    #[test]
+    fn insert_time_stops_at_the_song_length_limit() {
+        let max = MAX_SONG_STEPS as u32;
+        let mut song = Song::default();
+        song.lane_mut(U).push(b(max - 32, 0));
+        insert_time(&mut song, 0, 100, &lens);
+        assert_eq!(song.lane(U)[0].start, max - 16, "only the room left");
+    }
+
+    #[test]
+    fn delete_time_cuts_removes_and_closes_the_gap() {
+        let mut song = Song::default();
+        song.lane_mut(U).extend([b(0, 0), b(16, 0), b(40, 0)]);
+        song.lane_mut(MachineUid(3)).push(fixed(4, 1, 40));
+        let id = ParamId::Master(MasterParam::Level);
+        let other = MachineUid(1).param(SynthParam::Cutoff);
+        write_automation(&mut song, id, 4, 4, 0.1);
+        write_automation(&mut song, id, 10, 10, 0.2);
+        write_automation(&mut song, id, 30, 30, 0.3);
+        write_automation(&mut song, other, 12, 20, 0.5);
+        song.loop_range = Some((32, 48));
+        song.end = Some(64);
+        delete_time(&mut song, 8, 24, &lens);
+        assert_eq!(
+            shape(song.lane(U)),
+            [(0, 0, Some(8)), (24, 0, None)],
+            "cut at 8, the block at 16 removed, 40 moved to 24"
+        );
+        assert_eq!(shape(song.lane(MachineUid(3))), [(4, 1, Some(4))]);
+        assert_eq!(keys(&song, id), [4, 14]);
+        assert!(lane(&song, other).is_none(), "an emptied lane is pruned");
+        assert_eq!(
+            song.loop_range,
+            Some((16, 32)),
+            "a loop after the cut moves"
+        );
+        assert_eq!(song.end, Some(48));
+        let loop_after = |range: (u32, u32)| {
+            let (mut song, _) = three_block_song();
+            song.loop_range = Some(range);
+            delete_time(&mut song, 16, 32, &lens);
+            song.loop_range
+        };
+        assert_eq!(loop_after((0, 16)), Some((0, 16)), "before: kept");
+        assert_eq!(loop_after((0, 48)), Some((0, 32)), "around: shrinks");
+        assert_eq!(loop_after((16, 32)), None, "inside: cleared");
+        assert_eq!(loop_after((8, 24)), None, "its end deleted: cleared");
+        assert_eq!(loop_after((24, 48)), None, "its start deleted: cleared");
+    }
+
+    #[test]
+    fn a_recorded_pattern_change_splits_the_block_it_lands_in() {
+        let mut song = Song::default();
+        song.lane_mut(U)
+            .extend([fixed(0, 0, 64), b(64, 0), b(80, 0), b(96, 5), b(112, 0)]);
+        record_pattern(&mut song, U, 37, 9, &lens);
+        assert_eq!(
+            shape(song.lane(U)),
+            [
+                (0, 0, Some(32)),
+                (32, 9, Some(32)),
+                (64, 9, None),
+                (80, 9, None),
+                (96, 5, None),
+                (112, 0, None),
+            ],
+            "split at bar 32; the change runs until another pattern"
+        );
+        // A switched block keeps its span when the patterns differ in length.
+        let mut song = Song::default();
+        song.lane_mut(U).extend([b(0, 0), b(16, 0)]);
+        record_pattern(&mut song, U, 16, 1, &lens);
+        assert_eq!(shape(song.lane(U)), [(0, 0, None), (16, 1, Some(16))]);
+    }
+
+    #[test]
+    fn a_recorded_pattern_change_runs_through_following_blocks() {
+        let mut song = Song::default();
+        song.lane_mut(U).extend(
+            [0, 0, 0, 5, 0]
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| b(i as u32 * 16, s)),
+        );
+        record_pattern(&mut song, U, 16, 9, &lens);
+        let slots: Vec<u8> = song.lane(U).iter().map(|b| b.pattern.0).collect();
+        assert_eq!(slots, [0, 9, 9, 5, 0]);
+        // A gap ends the run too.
+        let mut song = Song::default();
+        song.lane_mut(U).extend([b(0, 0), b(32, 0)]);
+        record_pattern(&mut song, U, 0, 9, &lens);
+        let slots: Vec<u8> = song.lane(U).iter().map(|b| b.pattern.0).collect();
+        assert_eq!(slots, [9, 0]);
+    }
+
+    #[test]
+    fn a_recorded_pattern_change_in_a_gap_places_a_block_cut_to_fit() {
+        let mut song = Song::default();
+        record_pattern(&mut song, MachineUid(6), 20, 3, &lens);
+        assert_eq!(shape(song.lane(MachineUid(6))), [(16, 3, None)]);
+        let mut song = Song::default();
+        song.lane_mut(U).push(b(40, 0));
+        record_pattern(&mut song, U, 33, 1, &lens);
+        assert_eq!(shape(song.lane(U)), [(32, 1, Some(8)), (40, 0, None)]);
+        let before = song.clone();
+        record_pattern(&mut song, U, 0, PATTERNS as u8, &lens);
+        assert_eq!(song, before, "out-of-range slot ignored");
+    }
+
+    #[test]
+    fn lens_of_reads_the_project_patterns() {
+        let mut p = Project::default();
+        p.sampler_mut(MachineUid(6)).unwrap().patterns[3].length = 48;
+        let l = lens_of(&p);
+        assert_eq!(l(MachineUid(6), 3), 48);
+        assert_eq!(l(MachineUid(6), 0), 16);
+        assert_eq!(l(MachineUid(42), 3), 16, "missing machine");
+        assert_eq!(l(MachineUid(6), 200), 16, "missing pattern");
+    }
+
+    #[test]
+    fn banks_read_lengths_and_ignore_bad_slots() {
+        let mut p = Project::default();
+        p.synth_mut(MachineUid(1)).unwrap().patterns[1].roll.length = 0;
+        p.kit_mut(MachineUid(3)).unwrap().patterns[2].roll.length = 255;
+        p.sampler_mut(MachineUid(6)).unwrap().patterns[3].length = 48;
         let b = Banks::of(&p);
-        assert_eq!(bar_start_step(&p.song, 0, b), 0);
-        assert_eq!(bar_start_step(&p.song, 1, b), 16);
-        assert_eq!(bar_start_step(&p.song, 2, b), 48);
-        assert_eq!(total_steps(&p.song, b), 64);
+        assert_eq!(b.length(0, 200), None, "slot past the bank");
+        assert_eq!(b.length(0, 1), Some(1), "length 0 counts as 1");
+        assert_eq!(b.length(2, 2), Some(STEPS), "length past STEPS is clamped");
+        assert_eq!(b.length(5, 3), Some(48));
+        assert_eq!(b.length(6, 0), None);
+        assert_eq!(b.bank_len(4), PATTERNS);
+    }
+
+    #[test]
+    fn compiled_lookups_match_the_project_ones() {
+        let mut p = Project::default();
+        p.synth_mut(MachineUid(2)).unwrap().patterns[1].roll.length = 32;
+        p.song.lane_mut(MachineUid(2)).extend([b(0, 1), b(48, 0)]);
+        p.song.lane_mut(MachineUid(5)).push(fixed(16, 0, 40));
+        let c = CompiledSong::compile(&p.song, &p.rack_uids());
+        let banks = Banks::of(&p);
+        let l = lens_of(&p);
+        assert_eq!(compiled_song_end(&c, banks), song_end(&p.song, &l));
+        assert_eq!(compiled_song_end(&c, banks), 64);
+        for step in [0, 31, 32, 47, 48, 63, 64] {
+            assert_eq!(
+                compiled_block_at(&c, 1, step, banks),
+                block_at(p.song.lane(MachineUid(2)), MachineUid(2), step, &l),
+                "step {step}"
+            );
+        }
+        assert_eq!(compiled_block_at(&c, 4, 55, banks), Some(0));
+        assert_eq!(compiled_block_at(&c, 4, 56, banks), None);
+        assert_eq!(compiled_block_at(&c, 15, 0, banks), None, "past the rack");
     }
 
     #[test]
@@ -451,163 +857,12 @@ mod tests {
     }
 
     #[test]
-    fn recorded_pattern_change_runs_until_the_next_change() {
-        let mut song = Song::default();
-        song.bars = [0, 0, 0, 5, 0]
-            .iter()
-            .map(|&r| bar([Some(r), None, None, None]))
-            .collect();
-        write_pattern_ref(&mut song, 1, MachineUid(1), 9);
-        let refs: Vec<_> = song
-            .bars
-            .iter()
-            .map(|b| b.cell(MachineUid(1)).pattern.unwrap().0)
-            .collect();
-        assert_eq!(refs, vec![0, 9, 9, 5, 0]);
-        write_pattern_ref(&mut song, 99, MachineUid(1), 1);
-        assert_eq!(song.bars.len(), 5, "out-of-range bar is ignored");
-    }
-
-    fn sixteen_step_song(n: usize) -> (Project, ParamId) {
-        let mut p = Project::default();
-        p.song.bars = vec![Bar::default(); n];
-        (p, ParamId::Master(MasterParam::Level))
-    }
-
-    #[test]
-    fn insert_shifts_automation_and_loop() {
-        let (mut p, id) = sixteen_step_song(3);
-        write_automation(&mut p.song, id, 5, 5, 0.1);
-        write_automation(&mut p.song, id, 20, 20, 0.2);
-        p.song.loop_range = Some((1, 2));
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        insert_bars(&mut p.song, 1, &[Bar::default(), Bar::default()], b);
-        assert_eq!(p.song.bars.len(), 5);
-        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
-        assert_eq!(keys, vec![5, 52], "points from bar 1 on move by 32 steps");
-        assert_eq!(p.song.loop_range, Some((3, 4)));
-    }
-
-    #[test]
-    fn delete_removes_and_shifts_automation_and_clears_a_broken_loop() {
-        let (mut p, id) = sixteen_step_song(4);
-        write_automation(&mut p.song, id, 5, 5, 0.1);
-        write_automation(&mut p.song, id, 20, 20, 0.2);
-        write_automation(&mut p.song, id, 40, 40, 0.3);
-        p.song.loop_range = Some((2, 3));
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        delete_bars(&mut p.song, 1, 1, b);
-        assert_eq!(p.song.bars.len(), 3);
-        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
-        assert_eq!(keys, vec![5, 24]);
-        assert_eq!(
-            p.song.loop_range,
-            Some((1, 2)),
-            "loop after the cut moves back"
-        );
-        delete_bars(&mut p.song, 2, 2, b);
-        assert_eq!(p.song.loop_range, None, "loop endpoint deleted");
-    }
-
-    #[test]
-    fn duplicate_copies_bars_and_their_automation() {
-        let (mut p, id) = sixteen_step_song(2);
-        p.song.bars[1].cell_mut(MachineUid(3)).mute = true;
-        write_automation(&mut p.song, id, 18, 18, 0.6);
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        duplicate_bars(&mut p.song, 1, 1, b);
-        assert_eq!(p.song.bars.len(), 3);
-        assert!(p.song.bars[2].cell(MachineUid(3)).mute);
-        let keys: Vec<u32> = lane(&p.song, id).unwrap().points.keys().copied().collect();
-        assert_eq!(keys, vec![18, 34]);
-    }
-
-    #[test]
-    fn duplicate_at_the_cap_copies_only_the_inserted_bars_automation() {
-        let (mut p, id) = sixteen_step_song(MAX_BARS - 1);
-        write_automation(&mut p.song, id, 5, 5, 0.1);
-        write_automation(&mut p.song, id, 20, 20, 0.2);
-        write_automation(&mut p.song, id, 36, 36, 0.3);
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        duplicate_bars(&mut p.song, 0, 1, b);
-        assert_eq!(p.song.bars.len(), MAX_BARS, "only bar 0 fit");
-        let points: Vec<(u32, f32)> = lane(&p.song, id)
-            .unwrap()
-            .points
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
-        assert_eq!(
-            points,
-            vec![(5, 0.1), (20, 0.2), (37, 0.1), (52, 0.3)],
-            "bar 1's point is not copied over the shifted bar 2"
-        );
-    }
-
-    #[test]
     fn non_finite_automation_is_ignored() {
         let mut song = Song::default();
         let id = ParamId::Master(MasterParam::Level);
         write_automation(&mut song, id, 0, 3, f32::NAN);
         write_automation(&mut song, id, 0, 3, f32::INFINITY);
         assert!(song.automation.is_empty());
-    }
-
-    #[test]
-    fn out_of_range_pattern_refs_are_ignored() {
-        let mut song = Song::default();
-        song.bars = vec![bar([Some(0); 4]); 2];
-        let before = song.clone();
-        write_pattern_ref(&mut song, 0, MachineUid(1), PATTERNS as u8);
-        assert_eq!(song, before);
-    }
-
-    #[test]
-    fn deleting_all_of_a_lanes_points_removes_the_lane() {
-        let (mut p, id) = sixteen_step_song(3);
-        let other = MachineUid(1).param(SynthParam::Cutoff);
-        write_automation(&mut p.song, id, 18, 20, 0.5);
-        write_automation(&mut p.song, other, 40, 40, 0.5);
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        delete_bars(&mut p.song, 1, 1, b);
-        assert!(lane(&p.song, id).is_none(), "empty lane pruned");
-        assert_eq!(p.song.automation.len(), 1);
-        assert!(is_automated(&p.song, other));
-    }
-
-    #[test]
-    fn note_patterns_count_toward_bar_length() {
-        let mut p = Project::default();
-        p.sampler_mut(MachineUid(6)).unwrap().patterns[3].length = 48;
-        let mut b = Bar::default();
-        b.cell_mut(MachineUid(6)).pattern = Some(PatternRef(3));
-        assert_eq!(bar_steps(&b, Banks::of(&p)), 48);
-        assert_eq!(Banks::of(&p).length(5, 3), Some(48));
-        assert_eq!(Banks::of(&p).length(6, 0), None);
-        assert_eq!(Banks::of(&p).bank_len(4), PATTERNS);
-    }
-
-    #[test]
-    fn recorded_pattern_change_reaches_the_sampler() {
-        let mut song = Song {
-            bars: vec![Bar::default(); 3],
-            ..Default::default()
-        };
-        write_pattern_ref(&mut song, 1, MachineUid(6), 7);
-        assert_eq!(
-            song.bars[1].cell(MachineUid(6)).pattern,
-            Some(PatternRef(7))
-        );
-        assert_eq!(
-            song.bars[2].cell(MachineUid(6)).pattern,
-            Some(PatternRef(7))
-        );
-        assert!(song.bars[0].cells.iter().all(|(_, c)| c.pattern.is_none()));
     }
 
     #[test]
@@ -644,70 +899,6 @@ mod tests {
         assert!(
             !write_automation(&mut song, id, 0, u32::MAX, f32::NAN),
             "ignored, not cut"
-        );
-    }
-
-    #[test]
-    fn bar_steps_ignores_bad_slots_and_clamps_lengths() {
-        let mut p = Project::default();
-        p.synth_mut(MachineUid(1)).unwrap().patterns[1].roll.length = 0;
-        p.kit_mut(MachineUid(3)).unwrap().patterns[2].roll.length = 255;
-        let b = Banks::of(&p);
-        assert_eq!(b.length(0, 200), None, "slot past the bank");
-        assert_eq!(b.length(0, 1), Some(1), "length 0 counts as 1");
-        assert_eq!(b.length(2, 2), Some(STEPS), "length past STEPS is clamped");
-        assert_eq!(
-            bar_steps(&bar([Some(200), None, None, None]), b),
-            DEFAULT_BAR_STEPS
-        );
-        assert_eq!(bar_steps(&bar([Some(1), None, None, None]), b), 1);
-        assert_eq!(bar_steps(&bar([Some(1), None, Some(2), None]), b), STEPS);
-    }
-
-    #[test]
-    fn inserting_inside_or_at_the_end_of_the_loop_extends_it() {
-        let (p, _) = sixteen_step_song(5);
-        let b = Banks::of(&p);
-        let insert_at = |at: usize| {
-            let mut song = p.song.clone();
-            song.loop_range = Some((1, 3));
-            insert_bars(&mut song, at, &[Bar::default()], b);
-            song.loop_range
-        };
-        assert_eq!(insert_at(0), Some((2, 4)), "before the loop: shifts");
-        assert_eq!(insert_at(1), Some((2, 4)), "at the loop start: shifts");
-        assert_eq!(insert_at(2), Some((1, 4)), "inside: extends");
-        assert_eq!(insert_at(3), Some((1, 4)), "before the last bar: extends");
-        assert_eq!(insert_at(4), Some((1, 4)), "right after the end: extends");
-        assert_eq!(insert_at(5), Some((1, 3)), "past the end: unchanged");
-    }
-
-    #[test]
-    fn bar_count_is_capped() {
-        let (mut p, _) = sixteen_step_song(MAX_BARS - 1);
-        let snapshot = p.clone();
-        let b = Banks::of(&snapshot);
-        insert_bars(&mut p.song, 0, &vec![Bar::default(); 5], b);
-        assert_eq!(p.song.bars.len(), MAX_BARS);
-    }
-
-    #[test]
-    fn insert_before_an_extreme_loop_range_saturates() {
-        let (p, _) = sixteen_step_song(3);
-        let b = Banks::of(&p);
-        let insert = |range: (u16, u16), at: usize| {
-            let mut song = p.song.clone();
-            song.loop_range = Some(range);
-            insert_bars(&mut song, at, &vec![Bar::default(); 2], b);
-            song.loop_range
-        };
-        let top = (MAX_BARS - 1) as u16;
-        assert_eq!(insert((u16::MAX - 1, u16::MAX), 0), Some((top, top)));
-        assert_eq!(insert((0, u16::MAX), 1), Some((0, top)), "extends");
-        assert_eq!(
-            insert((1, 2), 0),
-            Some((3, 4)),
-            "a normal loop still shifts"
         );
     }
 }

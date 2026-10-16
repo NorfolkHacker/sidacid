@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub use crate::rack_edit::RemovedMachine;
 
-pub const PROJECT_VERSION: u32 = 5;
+pub const PROJECT_VERSION: u32 = 6;
 pub const STEPS: usize = 64;
 
 /// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
@@ -390,55 +390,80 @@ impl PatternRef {
     }
 }
 
-/// One machine's slot in a song bar.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cell {
-    pub pattern: Option<PatternRef>,
-    pub mute: bool,
-    /// Song transpose; only machine types that transpose use it.
-    pub transpose: i8,
-}
-
-/// A song bar: one cell per machine, by uid. A machine with no cell
-/// plays nothing (a default cell).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Bar {
-    pub cells: Vec<(MachineUid, Cell)>,
-}
-
-impl Bar {
-    /// `uid`'s cell; the default (empty) cell if the bar has none.
-    pub fn cell(&self, uid: MachineUid) -> Cell {
-        self.cells
-            .iter()
-            .find(|(u, _)| *u == uid)
-            .map_or_else(Cell::default, |(_, c)| *c)
-    }
-
-    /// `uid`'s cell, added as a default cell if the bar has none.
-    pub fn cell_mut(&mut self, uid: MachineUid) -> &mut Cell {
-        let i = match self.cells.iter().position(|(u, _)| *u == uid) {
-            Some(i) => i,
-            None => {
-                self.cells.push((uid, Cell::default()));
-                self.cells.len() - 1
-            }
-        };
-        &mut self.cells[i].1
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutoLane {
     pub param: ParamId,
     pub points: BTreeMap<u32, f32>,
 }
 
+fn is_zero(n: &i8) -> bool {
+    *n == 0
+}
+
+/// One pattern placed on a machine's song lane, in steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Block {
+    /// First step, from the song start.
+    pub start: u32,
+    pub pattern: PatternRef,
+    /// `None`: as long as the pattern (and follows it). `Some(n)`: `n`
+    /// steps; longer than the pattern loops it, shorter plays its start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub len: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mute: bool,
+    /// Song transpose; only machine types that transpose use it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub transpose: i8,
+}
+
+impl Block {
+    /// An unmuted, untransposed block as long as its pattern.
+    pub fn new(start: u32, pattern: PatternRef) -> Self {
+        Self {
+            start,
+            pattern,
+            len: None,
+            mute: false,
+            transpose: 0,
+        }
+    }
+}
+
+/// The song: one lane of blocks per machine (sorted by start, never
+/// overlapping), global-step automation and a loop.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Song {
-    pub bars: Vec<Bar>,
-    pub loop_range: Option<(u16, u16)>,
+    pub lanes: Vec<(MachineUid, Vec<Block>)>,
+    /// The song lasts at least this many steps (it ends at the later of
+    /// this and its last block's end). Converted songs keep their length.
+    #[serde(default)]
+    pub end: Option<u32>,
+    /// Steps `(start, end)`, end exclusive.
+    pub loop_range: Option<(u32, u32)>,
     pub automation: Vec<AutoLane>,
+}
+
+impl Song {
+    /// `uid`'s blocks; empty if it has no lane.
+    pub fn lane(&self, uid: MachineUid) -> &[Block] {
+        self.lanes
+            .iter()
+            .find(|(u, _)| *u == uid)
+            .map_or(&[], |(_, b)| b.as_slice())
+    }
+
+    /// `uid`'s blocks, its lane added (empty) if it has none.
+    pub fn lane_mut(&mut self, uid: MachineUid) -> &mut Vec<Block> {
+        let i = match self.lanes.iter().position(|(u, _)| *u == uid) {
+            Some(i) => i,
+            None => {
+                self.lanes.push((uid, Vec::new()));
+                self.lanes.len() - 1
+            }
+        };
+        &mut self.lanes[i].1
+    }
 }
 
 /// A machine's sound data and patterns, by type.
@@ -779,27 +804,7 @@ impl Project {
         if sampler_bytes > crate::sampler::SAMPLE_POOL {
             return bad("sampler audio exceeds 256 MB".into());
         }
-        for bar in &self.song.bars {
-            for (i, (uid, cell)) in bar.cells.iter().enumerate() {
-                if self.machine(*uid).is_none() {
-                    return bad("song bar names a machine not in the rack".into());
-                }
-                if bar.cells[..i].iter().any(|(u, _)| u == uid) {
-                    return bad("song bar names a machine twice".into());
-                }
-                if cell.pattern.is_some_and(|r| r.0 as usize >= PATTERNS) {
-                    return bad("song references a pattern out of range".into());
-                }
-            }
-        }
-        if self.song.bars.len() > crate::song::MAX_BARS {
-            return bad(format!("song has {} bars", self.song.bars.len()));
-        }
-        if let Some((a, b)) = self.song.loop_range
-            && (a > b || b as usize >= self.song.bars.len())
-        {
-            return bad("song loop range is out of bounds".into());
-        }
+        self.validate_lanes()?;
         let mut seen = std::collections::BTreeSet::new();
         for lane in &self.song.automation {
             if !self.param_in_rack(lane.param) || !seen.insert(lane.param) {
@@ -812,6 +817,49 @@ impl Project {
             {
                 return bad("song automation value is out of range".into());
             }
+        }
+        Ok(())
+    }
+
+    /// Checks the song's lanes, length and loop: lanes on rack machines,
+    /// one each; blocks sorted, never overlapping, on patterns in range
+    /// and within `MAX_SONG_STEPS`.
+    fn validate_lanes(&self) -> Result<(), ProjectError> {
+        let bad = |m: &str| Err(ProjectError::Invalid(m.into()));
+        let max = crate::song::MAX_SONG_STEPS as u32;
+        let lens = crate::song::lens_of(self);
+        for (i, (uid, blocks)) in self.song.lanes.iter().enumerate() {
+            if self.machine(*uid).is_none() {
+                return bad("song lane names a machine not in the rack");
+            }
+            if self.song.lanes[..i].iter().any(|(u, _)| u == uid) {
+                return bad("song names a machine's lane twice");
+            }
+            let mut prev_end = 0;
+            for b in blocks {
+                if b.pattern.0 as usize >= PATTERNS {
+                    return bad("song references a pattern out of range");
+                }
+                if b.len == Some(0) {
+                    return bad("song block has no length");
+                }
+                let end = crate::song::block_end(b, *uid, &lens);
+                if b.start < prev_end {
+                    return bad("song blocks overlap or are out of order");
+                }
+                if end > max {
+                    return bad("song block is past the song length limit");
+                }
+                prev_end = end;
+            }
+        }
+        if self.song.end.is_some_and(|e| e > max) {
+            return bad("song end is past the song length limit");
+        }
+        if let Some((a, b)) = self.song.loop_range
+            && (a >= b || b > max)
+        {
+            return bad("song loop range is out of bounds");
         }
         Ok(())
     }
@@ -904,9 +952,13 @@ impl Project {
         let head: VersionOnly = ron::from_str(text).map_err(parse)?;
         // Each known version is matched explicitly, so bumping
         // PROJECT_VERSION without an upgrade path can't misread old files.
+        let v5 = |p: crate::migrate::ProjectV5| -> Result<Project, ProjectError> {
+            p.check_song()?;
+            Ok(p.upgrade())
+        };
         let v4 = |p: crate::migrate::ProjectV4| -> Result<Project, ProjectError> {
             p.check_shapes()?;
-            Ok(p.upgrade())
+            v5(p.upgrade())
         };
         let p = match head.version {
             0 | 1 => v4(ron::from_str::<crate::migrate::ProjectV1>(text)
@@ -921,6 +973,10 @@ impl Project {
             // v4 only added the Mono machine: a v3 file reads as v4.
             3 | 4 => v4(
                 with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV4>(text))
+                    .map_err(parse)?,
+            )?,
+            5 => v5(
+                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV5>(text))
                     .map_err(parse)?,
             )?,
             PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
@@ -1016,12 +1072,16 @@ mod tests {
         assert_eq!(p.next_uid, 7);
         assert!(matches!(&p.machines[2].body, MachineBody::Kit(k) if k.kind == KitKind::K808));
         assert!(matches!(&p.machines[3].body, MachineBody::Kit(k) if k.kind == KitKind::K909));
-        // The fixture's bar 2 mutes the 909 and transposes Synth 2 by -2, FM by 4.
-        let bar = &p.song.bars[2];
-        assert!(bar.cell(MachineUid(4)).mute);
-        assert_eq!(bar.cell(MachineUid(2)).transpose, -2);
-        assert_eq!(bar.cell(MachineUid(5)).transpose, 4);
-        assert_eq!(bar.cell(MachineUid(3)).transpose, 0);
+        // The fixture's bar 2 mutes the 909 and transposes Synth 2 by -2,
+        // FM by 4: its blocks carry that. Every machine plays every bar.
+        assert_eq!(p.song.lanes.len(), 6);
+        assert!(p.song.lanes.iter().all(|(_, blocks)| blocks.len() == 4));
+        let block = |u: u16| p.song.lane(MachineUid(u))[2];
+        assert!(block(4).mute);
+        assert!(!block(3).mute);
+        assert_eq!(block(2).transpose, -2);
+        assert_eq!(block(5).transpose, 4);
+        assert_eq!(block(3).transpose, 0);
         p.validate().unwrap();
     }
 
@@ -1033,7 +1093,7 @@ mod tests {
         assert!(text.contains("version: 4,") && text.contains("view: PianoRoll"));
         let p = Project::from_ron(text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
-        assert_eq!(PROJECT_VERSION, 5);
+        assert_eq!(PROJECT_VERSION, 6);
         let demo = crate::demo::demo_project();
         assert_eq!(p.machines[..6], demo.machines[..6]);
         assert_eq!(p.song, demo.song);
@@ -1050,21 +1110,25 @@ mod tests {
     }
 
     #[test]
-    fn v5_round_trips() {
-        for p in [Project::default(), crate::demo::demo_project()] {
+    fn v6_round_trips() {
+        let mut with_song = crate::demo::demo_project();
+        with_song.song.lane_mut(MachineUid(1)).push(Block {
+            len: Some(24),
+            mute: true,
+            transpose: -2,
+            ..Block::new(16, PatternRef(3))
+        });
+        with_song.song.end = Some(64);
+        with_song.song.loop_range = Some((16, 40));
+        for p in [Project::default(), crate::demo::demo_project(), with_song] {
             assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
         }
     }
 
     #[test]
-    fn a_bar_may_not_name_a_machine_twice() {
+    fn a_song_may_not_name_a_machine_lane_twice() {
         let mut p = Project::default();
-        p.song.bars.push(Bar {
-            cells: vec![
-                (MachineUid(1), Cell::default()),
-                (MachineUid(1), Cell::default()),
-            ],
-        });
+        p.song.lanes = vec![(MachineUid(1), Vec::new()), (MachineUid(1), Vec::new())];
         assert!(p.validate().unwrap_err().to_string().contains("twice"));
     }
 
@@ -1078,10 +1142,10 @@ mod tests {
         p.next_uid = 6;
         assert!(p.validate().is_err(), "next_uid not above every uid");
         let mut p = ok.clone();
-        p.song.bars.push(Bar {
-            cells: vec![(MachineUid(42), Cell::default())],
-        });
-        assert!(p.validate().is_err(), "cell for unknown uid");
+        p.song
+            .lane_mut(MachineUid(42))
+            .push(Block::new(0, PatternRef(0)));
+        assert!(p.validate().is_err(), "lane for unknown uid");
         let mut p = ok.clone();
         p.song.automation.push(AutoLane {
             param: ParamId::Machine(MachineUid(1), MachineParam::Fm(FmParam::Volume)),
@@ -1157,20 +1221,16 @@ mod tests {
     }
 
     #[test]
-    fn bar_cells_default_when_absent() {
-        let mut bar = Bar::default();
-        assert_eq!(bar.cell(MachineUid(3)), Cell::default());
-        bar.cell_mut(MachineUid(3)).mute = true;
-        bar.cell_mut(MachineUid(3)).transpose = 2;
-        assert_eq!(bar.cells.len(), 1);
-        assert_eq!(
-            bar.cell(MachineUid(3)),
-            Cell {
-                pattern: None,
-                mute: true,
-                transpose: 2
-            }
-        );
+    fn song_lanes_are_empty_when_absent() {
+        let mut song = Song::default();
+        assert!(song.lane(MachineUid(3)).is_empty());
+        song.lane_mut(MachineUid(3))
+            .push(Block::new(0, PatternRef(2)));
+        song.lane_mut(MachineUid(3))
+            .push(Block::new(16, PatternRef(2)));
+        assert_eq!(song.lanes.len(), 1);
+        assert_eq!(song.lane(MachineUid(3)).len(), 2);
+        assert!(song.lane(MachineUid(4)).is_empty());
     }
 
     #[test]
@@ -1489,15 +1549,22 @@ mod tests {
             ..Note::new(16, 4, 0, 100)
         });
         p.set_param(MachineUid(1).param(SynthParam::Resonance), 0.95);
-        let mut bar = Bar::default();
-        bar.cell_mut(MachineUid(1)).pattern = Some(PatternRef(5));
-        bar.cell_mut(MachineUid(3)).pattern = Some(PatternRef(2));
-        bar.cell_mut(MachineUid(5)).pattern = Some(PatternRef(9));
-        bar.cell_mut(MachineUid(5)).transpose = -5;
-        bar.cell_mut(MachineUid(2)).mute = true;
-        bar.cell_mut(MachineUid(2)).transpose = 3;
-        bar.cell_mut(MachineUid(6)).mute = true;
-        p.song.bars.push(bar);
+        p.song
+            .lane_mut(MachineUid(1))
+            .push(Block::new(0, PatternRef(5)));
+        p.song
+            .lane_mut(MachineUid(3))
+            .push(Block::new(0, PatternRef(2)));
+        p.song.lane_mut(MachineUid(5)).push(Block {
+            transpose: -5,
+            ..Block::new(0, PatternRef(9))
+        });
+        p.song.lane_mut(MachineUid(2)).push(Block {
+            mute: true,
+            transpose: 3,
+            len: Some(7),
+            ..Block::new(16, PatternRef(0))
+        });
         fm_mut(&mut p).patterns[9]
             .notes
             .push(Note::new(3, 6, 64, 90));
@@ -1600,17 +1667,48 @@ mod tests {
 
     #[test]
     fn song_shapes_are_validated() {
-        let mut p = Project::default();
-        p.song.bars = vec![Bar::default(); crate::song::MAX_BARS + 1];
-        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
+        let invalid = |p: &Project| matches!(p.validate(), Err(ProjectError::Invalid(_)));
+        let max = crate::song::MAX_SONG_STEPS as u32;
+        let with_lane = |blocks: Vec<Block>| {
+            let mut p = Project::default();
+            p.synth_mut(MachineUid(1)).unwrap().patterns[1].roll.length = 32;
+            *p.song.lane_mut(MachineUid(1)) = blocks;
+            p
+        };
+        let b = |start, slot| Block::new(start, PatternRef(slot));
+        assert!(with_lane(vec![b(0, 1), b(32, 0)]).validate().is_ok());
+        assert!(invalid(&with_lane(vec![b(0, 1), b(31, 0)])), "overlap");
+        assert!(invalid(&with_lane(vec![b(32, 0), b(0, 0)])), "out of order");
+        assert!(invalid(&with_lane(vec![b(0, PATTERNS as u8)])), "bad ref");
+        let no_len = Block {
+            len: Some(0),
+            ..b(0, 0)
+        };
+        assert!(invalid(&with_lane(vec![no_len])), "zero length");
+        let fixed = Block {
+            len: Some(8),
+            ..b(0, 1)
+        };
+        assert!(
+            with_lane(vec![fixed, b(8, 0)]).validate().is_ok(),
+            "own length"
+        );
+        assert!(with_lane(vec![b(max - 16, 0)]).validate().is_ok());
+        assert!(invalid(&with_lane(vec![b(max - 15, 0)])), "past the limit");
 
         let mut p = Project::default();
-        p.song.bars = vec![Bar::default(); 3];
-        p.song.loop_range = Some((2, 1));
-        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
-        p.song.loop_range = Some((1, 3));
-        assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
-        p.song.loop_range = Some((1, 2));
+        p.song.end = Some(max);
+        p.validate().unwrap();
+        p.song.end = Some(max + 1);
+        assert!(invalid(&p), "end past the limit");
+        let mut p = Project::default();
+        p.song.loop_range = Some((32, 16));
+        assert!(invalid(&p));
+        p.song.loop_range = Some((16, 16));
+        assert!(invalid(&p), "empty loop");
+        p.song.loop_range = Some((16, max + 1));
+        assert!(invalid(&p));
+        p.song.loop_range = Some((16, 32));
         p.validate().unwrap();
 
         let id = MachineUid(1).param(SynthParam::Cutoff);
@@ -1729,24 +1827,22 @@ mod tests {
         assert_eq!(p.param(MachineUid(1).param(SynthParam::Cutoff)), 0.9);
         let ch = MachineParam::Channel(crate::params::ChannelParam::Level);
         assert_eq!(p.machines[5].params.get(&ch), Some(&ch.info().default));
-        let bar = &p.song.bars[0];
-        let patterns: Vec<_> = (1..=6).map(|u| bar.cell(MachineUid(u)).pattern).collect();
+        // The one bar's cells with a pattern become blocks at step 0; the
+        // 909's mute and Synth 2's transpose had no pattern to act on.
+        let synth = Block {
+            mute: true,
+            transpose: 2,
+            ..Block::new(0, PatternRef(1))
+        };
         assert_eq!(
-            patterns,
+            p.song.lanes,
             [
-                Some(PatternRef(1)),
-                None,
-                Some(PatternRef(3)),
-                None,
-                None,
-                None
+                (MachineUid(1), vec![synth]),
+                (MachineUid(3), vec![Block::new(0, PatternRef(3))])
             ]
         );
-        let mutes: Vec<_> = (1..=6).map(|u| bar.cell(MachineUid(u)).mute).collect();
-        assert_eq!(mutes, [true, false, false, true, false, false]);
-        let transposes = [1, 2, 5].map(|u| bar.cell(MachineUid(u)).transpose);
-        assert_eq!(transposes, [2, -3, 0]);
-        assert_eq!(p.song.loop_range, Some((0, 0)));
+        assert_eq!(p.song.end, Some(16));
+        assert_eq!(p.song.loop_range, Some((0, 16)), "bar 0 as steps");
         assert_eq!(p.fm(FM).unwrap().patterns.len(), PATTERNS);
         assert!(sampler(&p).patterns.iter().all(|n| n.notes.is_empty()));
         assert_eq!(p.kit(MachineUid(4)).unwrap().kind, KitKind::K909);
