@@ -136,6 +136,7 @@ impl SidAcidApp {
     /// The Len field. `merge` is true only while dragging, so a drag is one
     /// undo step and each arrow key or typed value is its own.
     pub(crate) fn set_synth_length(&mut self, uid: MachineUid, slot: u8, length: u8, merge: bool) {
+        self.tool_yield(uid, slot);
         let cmds = self
             .doc
             .apply(Edit::NoteLength { uid, slot, length }, merge);
@@ -152,6 +153,7 @@ impl SidAcidApp {
         transpose: i8,
         merge: bool,
     ) {
+        self.tool_yield(uid, slot);
         let cmds = self.doc.apply(
             Edit::SynthTranspose {
                 uid,
@@ -205,8 +207,9 @@ impl SidAcidApp {
         dice: acid_engine::random::Dice,
         seed: u64,
     ) {
-        let p = &self.doc.project;
         let slot = self.selected(uid);
+        self.tool_yield(uid, slot);
+        let p = &self.doc.project;
         let empty = DrumPattern::default();
         let groove = self
             .groove_kit(uid)
@@ -233,6 +236,7 @@ impl SidAcidApp {
     pub(crate) fn drum_template(&mut self, uid: MachineUid) {
         let seed = self.next_seed();
         let slot = self.selected(uid);
+        self.tool_yield(uid, slot);
         let Some(kit) = self.doc.project.kit(uid) else {
             return;
         };
@@ -257,6 +261,7 @@ impl SidAcidApp {
 
     pub(crate) fn evolve_drums_seeded(&mut self, uid: MachineUid, seed: u64) {
         let slot = self.selected(uid);
+        self.tool_yield(uid, slot);
         let Some(kit) = self.doc.project.kit(uid) else {
             return;
         };

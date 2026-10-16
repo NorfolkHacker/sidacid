@@ -451,14 +451,17 @@ impl SidAcidApp {
     /// synth, drums onto any kit (808 and 909 alike), notes onto FM, Mono
     /// or Sampler.
     pub(crate) fn paste_pattern(&mut self) {
-        // Not over an open note tool's preview.
-        if self.view.tool.is_some() {
-            return;
-        }
         let Some(entry) = self.focused().and_then(|uid| self.doc.project.machine(uid)) else {
             return;
         };
         let (uid, slot) = (entry.uid, entry.selected);
+        if self.view.clipboard.is_some() {
+            // Onto the pattern as it was before an open tool's preview.
+            self.tool_yield(uid, slot);
+        }
+        let Some(entry) = self.doc.project.machine(uid) else {
+            return;
+        };
         let edit = match (&self.view.clipboard, &entry.body) {
             (None, _) => return,
             (Some(Clip::Synth(p)), MachineBody::Synth(_)) => {

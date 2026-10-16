@@ -26,6 +26,7 @@ impl SidAcidApp {
                             .prefix("Len "),
                     );
                     if r.changed() {
+                        self.tool_yield(uid, slot);
                         let cmds = self.doc.apply(
                             Edit::NoteLength { uid, slot, length },
                             // Only a drag merges into one undo step; an arrow key

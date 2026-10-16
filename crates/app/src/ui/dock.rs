@@ -770,6 +770,11 @@ impl SidAcidApp {
         let Some(uid) = self.focused() else {
             return false;
         };
+        // Esc closes an open note tool as Cancel does.
+        if key == egui::Key::Escape && self.view.tool.is_some() {
+            self.cancel_tool();
+            return true;
+        }
         // A mouse move or resize redoes its edit every frame; a key's edit
         // would be overwritten and split the undo step. Used, so no widget
         // acts on it either.

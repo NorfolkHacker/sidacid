@@ -94,6 +94,7 @@ impl SidAcidApp {
     /// The Len field. `merge` is true only while dragging, so a drag is one
     /// undo step and each arrow key or typed value is its own.
     pub(crate) fn set_drum_length(&mut self, uid: MachineUid, slot: u8, length: u8, merge: bool) {
+        self.tool_yield(uid, slot);
         let cmds = self
             .doc
             .apply(Edit::NoteLength { uid, slot, length }, merge);
