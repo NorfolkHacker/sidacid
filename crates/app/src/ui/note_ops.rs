@@ -59,10 +59,14 @@ pub fn in_box(p: &NotePattern, t0: u16, t1: u16, lo: u8, hi: u8) -> Vec<usize> {
         .collect()
 }
 
-/// Notes starting in `[t0, t1)`.
+/// Notes starting in `[t0, t1)` and inside the visible pattern.
 pub fn in_range(p: &NotePattern, t0: u16, t1: u16) -> Vec<usize> {
+    let visible = p.ticks();
     (0..p.notes.len())
-        .filter(|&i| (t0..t1).contains(&p.notes[i].start))
+        .filter(|&i| {
+            let start = p.notes[i].start;
+            start < visible && (t0..t1).contains(&start)
+        })
         .collect()
 }
 
@@ -444,6 +448,12 @@ mod tests {
         assert_eq!(spans(&p), vec![(0, 8, 36), (8, 4, 60), (12, 4, 67)]);
         let got: Vec<u8> = idx.iter().map(|&i| p.notes[i].pitch).collect();
         assert_eq!(got, [60, 67], "the first chord note wins its start");
+    }
+
+    #[test]
+    fn a_range_skips_notes_past_the_pattern_end() {
+        let p = pat(&[(0, 4, 60), (100, 4, 62)]);
+        assert_eq!(in_range(&p, 0, 200), vec![0]);
     }
 
     #[test]

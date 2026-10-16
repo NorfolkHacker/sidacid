@@ -469,9 +469,10 @@ impl SidAcidApp {
 
     /// Copies to the note clipboard: with a ruler range, every lane's notes
     /// starting in it (relative to its start); else the focused lane's
-    /// selection, or the whole lane when nothing is selected (relative to
-    /// the earliest start). With `cut` the copied notes are then removed,
-    /// in one undo step. Nothing to copy leaves the clipboard as it was.
+    /// selection, or the whole visible lane when nothing is selected
+    /// (relative to the earliest start). With `cut` the copied notes are
+    /// then removed, in one undo step; a cut with nothing selected and no
+    /// range does nothing. Nothing to copy leaves the clipboard as it was.
     pub(crate) fn copy_notes(&mut self, cut: bool) {
         use super::note_ops::{copy, delete, in_range};
         let mut lanes = Vec::new();
@@ -506,7 +507,14 @@ impl SidAcidApp {
             };
             let mut idx = self.selection(uid);
             if idx.is_empty() {
-                idx = (0..p.notes.len()).collect();
+                if cut {
+                    // Cut needs a selection; it never takes the whole lane.
+                    return;
+                }
+                let visible = p.ticks();
+                idx = (0..p.notes.len())
+                    .filter(|&i| p.notes[i].start < visible)
+                    .collect();
             }
             let Some(origin) = idx.iter().map(|&i| p.notes[i].start).min() else {
                 return;
@@ -648,8 +656,8 @@ impl SidAcidApp {
         self.apply_note_edits(edits);
     }
 
-    /// Selects every note of the focused lane's pattern (and drops the
-    /// ruler range).
+    /// Selects every note of the focused lane's pattern that starts inside
+    /// it (and drops the ruler range).
     pub(crate) fn select_all_notes(&mut self) {
         let Some(uid) = self.focused() else {
             return;
@@ -657,7 +665,14 @@ impl SidAcidApp {
         let Some(p) = self.doc.project.roll(uid, self.selected(uid)) else {
             return;
         };
-        let notes = p.notes.clone();
+        // Not the notes hidden past the pattern's end.
+        let visible = p.ticks();
+        let notes: Vec<Note> = p
+            .notes
+            .iter()
+            .filter(|n| n.start < visible)
+            .copied()
+            .collect();
         self.drop_range();
         self.set_selection(uid, notes);
     }
@@ -1383,6 +1398,49 @@ mod tests {
             [0, 4],
             "relative to the earliest start"
         );
+    }
+
+    #[test]
+    fn notes_hidden_past_the_pattern_end_are_never_selected_or_cut() {
+        use crate::test_rack::{FM, SYNTH1};
+        use egui::Key;
+        let mut app = sel_app(FM, &[(0, 4, 60), (100, 4, 62)], &[]);
+        app.doc.project.roll_mut(FM, 0).unwrap().length = 16;
+        shortcut_frame(&mut app, vec![key_event(Key::A, true, false, true)]);
+        assert_eq!(app.selection(FM), vec![0], "Ctrl+A: the visible note");
+        shortcut_frame(&mut app, vec![key_event(Key::Delete, true, false, false)]);
+        assert_eq!(notes_of(&app, FM), [(100, 4, 62)], "the hidden note stays");
+        // The whole-lane copy leaves it out too.
+        app.doc
+            .project
+            .roll_mut(FM, 0)
+            .unwrap()
+            .notes
+            .insert(0, acid_engine::project::Note::new(8, 4, 60, 100));
+        app.copy_notes(false);
+        let clip = app.view.note_clip.as_ref().unwrap();
+        assert_eq!(clip.lanes[0].2.len(), 1, "{:?}", clip.lanes);
+        // A range cut over it leaves it be.
+        let mut app = range_app();
+        let p = app.doc.project.roll_mut(FM, 0).unwrap();
+        p.length = 16;
+        p.notes
+            .push(acid_engine::project::Note::new(100, 4, 66, 100));
+        app.view.focus = Some(FM);
+        app.view.dock.range = Some((0, 200));
+        app.copy_notes(true);
+        assert_eq!(notes_of(&app, FM), [(100, 4, 66)]);
+        assert!(notes_of(&app, SYNTH1).is_empty());
+    }
+
+    #[test]
+    fn cut_with_nothing_selected_cuts_nothing() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(4, 4, 60), (8, 2, 62)], &[]);
+        shortcut_frame(&mut app, vec![key_event(egui::Key::X, true, false, true)]);
+        assert_eq!(notes_of(&app, FM), [(4, 4, 60), (8, 2, 62)]);
+        assert!(app.view.note_clip.is_none(), "nothing copied either");
+        assert!(!app.doc.can_undo());
     }
 
     #[test]
