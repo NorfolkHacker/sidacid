@@ -79,8 +79,8 @@ pub fn entry_key(key: Key, mods: Modifiers) -> Option<EntryKey> {
     })
 }
 
-/// The start tick of grid cell `cell + by`, wrapping over the pattern's cells.
-fn cell_tick(cell: u16, by: i32, cells: u16) -> u16 {
+/// The index of grid cell `cell + by`, wrapping over the pattern's `cells`.
+fn wrap_cell(cell: u16, by: i32, cells: u16) -> u16 {
     (cell as i32 + by).rem_euclid(cells.max(1) as i32) as u16
 }
 
@@ -104,11 +104,11 @@ pub fn apply_entry(
     };
     match key {
         EntryKey::Left => {
-            cursor.tick = cell_tick(cell, -1, cells) * s;
+            cursor.tick = wrap_cell(cell, -1, cells) * s;
             false
         }
         EntryKey::Right => {
-            cursor.tick = cell_tick(cell, 1, cells) * s;
+            cursor.tick = wrap_cell(cell, 1, cells) * s;
             false
         }
         EntryKey::Up => {
@@ -131,14 +131,14 @@ pub fn apply_entry(
                 make_mono(roll, i);
             }
             cursor.pitch = pitch;
-            cursor.tick = cell_tick(cell, 1, cells) * s;
+            cursor.tick = wrap_cell(cell, 1, cells) * s;
             true
         }
         EntryKey::Back => {
             let pitch = cursor.pitch.min(top);
             let mut hit = note_at(roll, cursor.tick.min(ticks - 1), pitch);
             if hit.is_none() {
-                let ct = cell_tick(cell, -1, cells) * s;
+                let ct = wrap_cell(cell, -1, cells) * s;
                 cursor.tick = ct;
                 hit = note_at(roll, ct, pitch)
                     .or_else(|| {
