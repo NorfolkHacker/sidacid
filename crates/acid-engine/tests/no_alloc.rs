@@ -7,7 +7,7 @@ use acid_engine::host::{self, Command, Event, PatternData};
 use acid_engine::machine::MachineUid;
 use acid_engine::params::{MachineParam, MasterParam, ParamId};
 use acid_engine::project::{
-    Bar, DrumPattern, Note, NotePattern, PatternRef, Project, SynthPattern,
+    Block, DrumPattern, Note, NotePattern, PatternRef, Project, SynthPattern,
 };
 use acid_engine::rack::CompiledSong;
 use acid_engine::sequencer::Mode;
@@ -107,24 +107,17 @@ fn busy_project() -> Project {
         MachineUid(6).param(acid_engine::params::SamplerParam::Grit),
         1.0,
     );
-    let bar = Bar {
-        cells: p
-            .machines
-            .iter()
-            .map(|m| {
-                let pattern = Some(PatternRef(0));
-                (
-                    m.uid,
-                    acid_engine::project::Cell {
-                        pattern,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect(),
-    };
-    p.song.bars = vec![bar; 4];
-    p.song.loop_range = Some((0, 3));
+    // Four 16-step bars: a block per machine and bar.
+    p.song.lanes = p
+        .machines
+        .iter()
+        .map(|m| {
+            let blocks = (0..4).map(|i| Block::new(i * 16, PatternRef(0))).collect();
+            (m.uid, blocks)
+        })
+        .collect();
+    p.song.end = Some(64);
+    p.song.loop_range = Some((0, 64));
     acid_engine::song::write_automation(
         &mut p.song,
         ParamId::Master(MasterParam::Level),
@@ -181,7 +174,7 @@ fn a_sixteen_slot_rack_does_not_allocate() {
 fn busy_sixteen_slot_project() -> Project {
     use acid_engine::machine::{MAX_MACHINES, MachineUid};
     use acid_engine::params::{ChannelParam, MachineParam};
-    use acid_engine::project::{Cell, MachineBody, MachineEntry};
+    use acid_engine::project::{MachineBody, MachineEntry};
     let mut p = busy_project();
     p.machines.swap(0, 3);
     for u in 7..=MAX_MACHINES as u16 {
@@ -199,20 +192,19 @@ fn busy_sixteen_slot_project() -> Project {
             .iter()
             .any(|m| m.uid.0 > 6 && matches!(m.body, MachineBody::Sampler(_)))
     );
-    for bar in &mut p.song.bars {
-        bar.cells = p
-            .machines
-            .iter()
-            .map(|m| {
-                let cell = Cell {
-                    pattern: Some(PatternRef(0)),
+    p.song.lanes = p
+        .machines
+        .iter()
+        .map(|m| {
+            let blocks = (0..4)
+                .map(|i| Block {
                     transpose: 3,
-                    ..Default::default()
-                };
-                (m.uid, cell)
-            })
-            .collect();
-    }
+                    ..Block::new(i * 16, PatternRef(0))
+                })
+                .collect();
+            (m.uid, blocks)
+        })
+        .collect();
     for u in [8u16, 12, 16] {
         let id = ParamId::Machine(MachineUid(u), MachineParam::Channel(ChannelParam::Level));
         acid_engine::song::write_automation(&mut p.song, id, 0, 40, 0.4);
@@ -534,9 +526,7 @@ fn a_rack_swap_through_the_host_does_not_allocate() {
         "S2".into(),
     ));
     q.next_uid = 8;
-    q.song.bars.iter_mut().for_each(|b| {
-        b.cells.retain(|(u, _)| *u != MachineUid(3));
-    });
+    q.song.lanes.retain(|(u, _)| *u != MachineUid(3));
     q.validate().unwrap();
     let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
     // And a malformed one (a repeated uid), refused without allocating.

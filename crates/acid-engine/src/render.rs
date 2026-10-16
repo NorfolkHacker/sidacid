@@ -52,7 +52,7 @@ fn render_tail<E>(
     Ok(())
 }
 
-/// Renders the whole song from bar 1 (the loop range is ignored so the
+/// Renders the whole song from its start (the loop range is ignored so the
 /// export always ends), then lets FX tails ring out. `progress` gets
 /// 0..=1 and finishes with 1.0.
 pub fn render_song(project: &Project, progress: impl FnMut(f32)) -> (Vec<f32>, Vec<f32>) {
@@ -82,7 +82,7 @@ fn render_song_to<E>(
     engine.set_song_start(0);
     engine.play();
     let compiled = CompiledSong::compile(&p.song, &p.rack_uids());
-    let steps = song::compiled_total_steps(&compiled, song::Banks::of(&p)).max(1) as f64;
+    let steps = song::compiled_song_end(&compiled, song::Banks::of(&p)).max(1) as f64;
     let step_samples = 60.0 / p.bpm.clamp(40.0, 300.0) as f64 / 4.0 * sr as f64;
     let expected = steps * step_samples;
     let mut rendered = 0;
@@ -170,24 +170,18 @@ mod tests {
     }
 
     fn two_bar_song() -> Project {
+        two_bar_song_of(2)
+    }
+
+    /// `bars` bars of every machine's pattern A01.
+    fn two_bar_song_of(bars: usize) -> Project {
         let mut p = crate::demo::demo_project();
         p.bpm = 120.0;
-        let bar = crate::project::Bar {
-            cells: crate::machine::standard_rack()
-                .iter()
-                .map(|m| {
-                    let pattern = Some(crate::project::PatternRef(0));
-                    (
-                        m.0,
-                        crate::project::Cell {
-                            pattern,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
-        };
-        p.song.bars = vec![bar.clone(), bar];
+        let bar: Vec<_> = crate::machine::standard_rack()
+            .iter()
+            .map(|m| (m.0, 0))
+            .collect();
+        p.song = crate::testutil::bar_song(&p, &vec![bar; bars]);
         p
     }
 
@@ -219,9 +213,7 @@ mod tests {
             .push(crate::project::Note::new(0, 8, 60, 120));
         // OP1 releases slowly: the note rings past the song's end.
         p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::R4)), 0.3);
-        let mut bar = crate::project::Bar::default();
-        bar.cell_mut(MachineUid(5)).pattern = Some(crate::project::PatternRef(0));
-        p.song.bars = vec![bar];
+        p.song = crate::testutil::bar_song(&p, &[vec![(MachineUid(5), 0)]]);
         let (l, _) = render_song(&p, |_| {});
         let sr = EXPORT_SAMPLE_RATE as usize;
         assert!(l.len() > 2 * sr + sr / 4, "a tail follows the song");
@@ -234,7 +226,7 @@ mod tests {
     #[test]
     fn looped_song_still_ends_when_exported() {
         let mut p = two_bar_song();
-        p.song.loop_range = Some((0, 1));
+        p.song.loop_range = Some((0, 32));
         let (l, _) = render_song(&p, |_| {});
         assert!(l.len() <= 15 * EXPORT_SAMPLE_RATE as usize);
     }
@@ -250,9 +242,7 @@ mod tests {
 
     #[test]
     fn the_song_length_cap_stops_a_runaway_render() {
-        let mut p = two_bar_song();
-        let bar = p.song.bars[0].clone();
-        p.song.bars = vec![bar; 999];
+        let p = two_bar_song_of(999);
         let cap = 2 * CHUNK;
         let (mut n, mut seen) = (0, Vec::new());
         render_song_to(

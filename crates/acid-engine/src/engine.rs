@@ -15,7 +15,7 @@ use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::{Mode, SeqEvent, Sequencer};
-use crate::song::{Banks, MAX_BARS};
+use crate::song::{Banks, MAX_SONG_STEPS};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -65,19 +65,23 @@ fn max_param_count() -> usize {
 }
 
 /// Whether `song` can play on a rack with `param_count` params, where
-/// `fits` tells which params the rack has: bars within `MAX_BARS`, pattern
-/// refs within the bank, and at most one lane per param, each on a param
-/// the rack has.
+/// `fits` tells which params the rack has: a lane per position at most,
+/// each sorted by start with starts and the end within `MAX_SONG_STEPS`,
+/// pattern refs within the bank, and at most one automation lane per
+/// param, each on a param the rack has.
 fn song_fits(song: &CompiledSong, param_count: usize, fits: impl Fn(ParamId) -> bool) -> bool {
-    let refs_ok = song
-        .bars
-        .iter()
-        .flat_map(|b| &b.patterns)
-        .flatten()
-        .all(|r| (r.0 as usize) < PATTERNS);
+    let max = MAX_SONG_STEPS as u32;
+    let blocks_ok = song.lanes.len() <= MAX_MACHINES
+        && song.lanes.iter().all(|lane| {
+            lane.windows(2).all(|w| w[0].start < w[1].start)
+                && lane
+                    .iter()
+                    .all(|b| b.start < max && (b.pattern.0 as usize) < PATTERNS)
+        });
+    let end_ok = song.end.is_none_or(|e| e <= max);
     let lanes_ok =
         song.automation.len() <= param_count && song.automation.iter().all(|l| fits(l.param));
-    song.bars.len() <= MAX_BARS && refs_ok && lanes_ok
+    blocks_ok && end_ok && lanes_ok
 }
 
 pub struct Engine {
@@ -230,7 +234,7 @@ impl Engine {
     /// Swaps in a new rack (real-time safe: nothing is built, dropped or
     /// allocated). Surviving machines move to their new positions with
     /// their voices, knobs, patterns and sequencer tracks; fresh slots
-    /// come in on their selected pattern (on their bar's cell while a song
+    /// come in on their selected pattern (on their song block while a song
     /// plays), in phase with the running tracks. Afterwards `swap.into` holds the
     /// old slot `Vec` with the removed machines, `swap.fresh` any unused
     /// slots and `swap.song` the old song, all for disposal off the audio
@@ -598,8 +602,9 @@ impl Engine {
         self.seq.mode()
     }
 
-    pub fn set_song_start(&mut self, bar: usize) {
-        self.seq.set_song_start(bar);
+    /// The step Song-mode Play starts from.
+    pub fn set_song_start(&mut self, step: u32) {
+        self.seq.set_song_start(step);
     }
 
     pub fn song_bar(&self) -> usize {
@@ -779,7 +784,6 @@ impl Engine {
             let until = self.seq.samples_to_next_tick();
             if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
                 ticks_here += 1;
-                let (tick, tick_len) = self.seq.tick_clock();
                 self.events.clear();
                 self.seq
                     .tick(Banks::of_slots(&self.slots), &self.song, &mut self.events);
@@ -787,8 +791,10 @@ impl Engine {
                     let ev = self.events[i];
                     self.handle_event(ev);
                 }
-                // After this tick's notes, so a note on a step boundary sounds on it.
-                for s in &mut self.slots {
+                // After this tick's notes, so a note on a step boundary
+                // sounds on it. Each Mono clocks from its own block.
+                let clocks = self.seq.tick_clocks();
+                for (s, &(tick, tick_len)) in self.slots.iter_mut().zip(&clocks) {
                     if let MachineDsp::Mono(m) = &mut s.dsp {
                         m.clock_tick(tick, tick_len);
                     }
@@ -1004,12 +1010,9 @@ mod tests {
                 }
             }
         }
-        let mut bar = crate::project::Bar::default();
-        for m in &p.machines {
-            bar.cell_mut(m.uid).pattern = Some(crate::project::PatternRef(0));
-        }
-        p.song.bars = vec![bar; 2];
-        p.song.loop_range = Some((0, 1));
+        let bar: Vec<_> = p.machines.iter().map(|m| (m.uid, 0)).collect();
+        p.song = crate::testutil::bar_song(&p, &[bar.clone(), bar]);
+        p.song.loop_range = Some((0, 32));
         let ids: Vec<ParamId> = p
             .machines
             .iter()
@@ -1199,11 +1202,10 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_added_during_a_song_plays_its_cell_at_once() {
+    fn a_machine_added_during_a_song_plays_its_block_at_once() {
         let mut p = crate::demo::demo_project();
-        let mut bar = crate::project::Bar::default();
-        bar.cell_mut(MachineUid(1)).pattern = Some(crate::project::PatternRef(0));
-        p.song.bars = vec![bar.clone(), bar];
+        let bar = vec![(MachineUid(1), 0)];
+        p.song = crate::testutil::bar_song(&p, &[bar.clone(), bar]);
         let mut eng = Engine::from_project(48000.0, &p);
         eng.set_mode(Mode::Song);
         eng.play();
@@ -1218,22 +1220,22 @@ mod tests {
         }
         q.machines.push(e);
         q.next_uid = 8;
-        for b in &mut q.song.bars {
-            b.cell_mut(MachineUid(7)).pattern = Some(crate::project::PatternRef(2));
-        }
+        q.song.lane_mut(MachineUid(7)).extend(
+            [0, 16].map(|start| crate::project::Block::new(start, crate::project::PatternRef(2))),
+        );
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
         eng.set_rack(&mut swap).unwrap();
         assert_eq!(
             eng.current_patterns()[6],
             2,
-            "the bar's cell, not the selection"
+            "the block's pattern, not the selection"
         );
         assert_eq!(eng.playhead()[6], eng.playhead()[0]);
         eng.take_meters();
         let (mut l, mut r) = (vec![0.0; 12000], vec![0.0; 12000]);
         eng.process(&mut l, &mut r);
-        assert_eq!(eng.song_bar(), 0, "still the same bar");
-        assert!(eng.take_meters()[6] > 0.0, "sounds before the next bar");
+        assert_eq!(eng.song_bar(), 0, "still the same block");
+        assert!(eng.take_meters()[6] > 0.0, "sounds before the next block");
     }
 
     #[test]
@@ -2037,22 +2039,11 @@ mod tests {
 
     fn two_bar_demo() -> Project {
         let mut p = crate::demo::demo_project();
-        let bar = crate::project::Bar {
-            cells: crate::machine::standard_rack()
-                .iter()
-                .map(|m| {
-                    let pattern = Some(crate::project::PatternRef(0));
-                    (
-                        m.0,
-                        crate::project::Cell {
-                            pattern,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
-        };
-        p.song.bars = vec![bar.clone(), bar];
+        let bar: Vec<_> = crate::machine::standard_rack()
+            .iter()
+            .map(|m| (m.0, 0))
+            .collect();
+        p.song = crate::testutil::bar_song(&p, &[bar.clone(), bar]);
         p
     }
 
@@ -2119,22 +2110,35 @@ mod tests {
         let mut e = demo_engine();
         let mut good = compiled(&two_bar_demo().song);
         assert!(e.swap_song(&mut good));
-        let mut bad = CompiledSong {
-            bars: vec![Default::default(); crate::song::MAX_BARS + 1],
-            ..Default::default()
-        };
-        assert!(!e.swap_song(&mut bad));
-        assert_eq!(
-            bad.bars.len(),
-            crate::song::MAX_BARS + 1,
-            "rejected song is untouched"
-        );
+        use crate::project::{Block, PATTERNS, PatternRef};
+        let max = crate::song::MAX_SONG_STEPS as u32;
+        let b = |start, slot| Block::new(start, PatternRef(slot));
+        for (lanes, end) in [
+            (vec![vec![b(max, 0)]], None),
+            (vec![vec![b(0, PATTERNS as u8)]], None),
+            (vec![vec![b(16, 0), b(0, 0)]], None),
+            (vec![vec![b(0, 0), b(0, 1)]], None),
+            (vec![vec![]; crate::machine::MAX_MACHINES + 1], None),
+            (Vec::new(), Some(max + 1)),
+        ] {
+            let mut bad = CompiledSong {
+                lanes: lanes.clone(),
+                end,
+                ..Default::default()
+            };
+            assert!(!e.swap_song(&mut bad), "{lanes:?} {end:?}");
+            assert_eq!(
+                (bad.lanes, bad.end),
+                (lanes, end),
+                "rejected song is untouched"
+            );
+        }
     }
 
     #[test]
     fn looping_back_before_the_first_point_restores_the_knob() {
         let mut p = two_bar_demo();
-        p.song.loop_range = Some((0, 1));
+        p.song.loop_range = Some((0, 32));
         crate::song::write_automation(
             &mut p.song,
             ParamId::Master(MasterParam::Level),
@@ -2158,7 +2162,7 @@ mod tests {
     }
 
     #[test]
-    fn swapping_the_song_mid_bar_resyncs_the_position() {
+    fn swapping_the_song_mid_block_reseeks_the_tracks() {
         let mut e = Engine::from_project(SR, &two_bar_demo());
         let mut long = crate::demo::demo_project()
             .synth(MachineUid(1))
@@ -2178,8 +2182,9 @@ mod tests {
             e.process(&mut l, &mut r);
         }
         assert_eq!((e.song_bar(), e.song_step()), (1, 19));
+        assert_eq!(e.current_patterns()[0], 0);
         let mut song = two_bar_demo().song;
-        song.bars[0].cell_mut(MachineUid(1)).pattern = Some(crate::project::PatternRef(7));
+        song.lane_mut(MachineUid(1))[1].pattern = crate::project::PatternRef(7);
         assert!(e.swap_song(&mut compiled(&song)));
         for _ in 0..10_000 {
             if e.song_step() > 20 {
@@ -2187,15 +2192,17 @@ mod tests {
             }
             e.process(&mut l, &mut r);
         }
-        assert_eq!(e.song_step(), 32 + 3, "bar 0 is now 32 steps long");
+        assert_eq!(e.song_step(), 21, "the position stays");
         assert_eq!(e.song_bar(), 1);
+        assert_eq!(e.current_patterns()[0], 7, "the new block's pattern");
+        assert_eq!(e.playhead()[0], 4, "at its step 4");
     }
 
     #[test]
     fn song_start_and_position() {
         let mut e = Engine::from_project(SR, &two_bar_demo());
         e.set_mode(crate::sequencer::Mode::Song);
-        e.set_song_start(1);
+        e.set_song_start(16);
         e.play();
         render(&mut e, 0.01);
         assert_eq!(e.song_bar(), 1);
@@ -2369,9 +2376,7 @@ mod tests {
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
             .push(Note::new(0, 8, 60, 120));
-        let mut bar = crate::project::Bar::default();
-        bar.cell_mut(MachineUid(5)).pattern = Some(crate::project::PatternRef(0));
-        p.song.bars = vec![bar];
+        p.song = crate::testutil::bar_song(&p, &[vec![(MachineUid(5), 0)]]);
         p
     }
 
@@ -2472,9 +2477,9 @@ mod tests {
     }
 
     #[test]
-    fn a_mono_arp_restarts_on_the_next_song_bar_after_a_short_one() {
+    fn a_mono_arp_restarts_on_the_next_block_after_a_short_one() {
         use crate::params::{MachineParam, MonoParam};
-        use crate::project::{Bar, MachineBody, Note, PatternRef};
+        use crate::project::{Block, MachineBody, Note, PatternRef};
         let mut p = Project::default();
         p.bpm = 120.0;
         let mut m = p.new_machine(MachineType::Mono);
@@ -2490,14 +2495,8 @@ mod tests {
         }
         let uid = m.uid;
         p.machines.push(m);
-        // A 6-step bar, then a 16-step one.
-        p.song.bars = [0, 1]
-            .map(|slot| {
-                let mut bar = Bar::default();
-                bar.cell_mut(uid).pattern = Some(PatternRef(slot));
-                bar
-            })
-            .to_vec();
+        // A 6-step block, then a 16-step one.
+        *p.song.lane_mut(uid) = vec![Block::new(0, PatternRef(0)), Block::new(6, PatternRef(1))];
         let mut eng = Engine::from_project(SR, &p);
         eng.set_mode(crate::sequencer::Mode::Song);
         eng.play();
@@ -2515,7 +2514,7 @@ mod tests {
                 break;
             }
         }
-        // Steps on beats 1 and 2 of the 6-step bar, then the second bar's
+        // Steps on beats 1 and 2 of the 6-step block, then the second one's
         // downbeat: 6 sixteenths in at 120 BPM, not a beat later.
         let bar_two = (6.0 * SR as f64 / 8.0) as usize;
         let third = third.expect("a third arp step");

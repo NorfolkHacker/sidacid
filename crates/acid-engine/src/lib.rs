@@ -43,4 +43,30 @@ pub(crate) mod testutil {
     pub fn all_finite(x: &[f32]) -> bool {
         x.iter().all(|v| v.is_finite())
     }
+
+    /// A song of bars as v5 had them, as the v6 conversion gives it: bar
+    /// i plays `bars[i]` (machine, pattern) and lasts its longest pattern
+    /// (16 steps if empty); each is one block at the bar's start, as long
+    /// as the bar. The song lasts every bar, empty ones too.
+    pub fn bar_song(
+        p: &crate::project::Project,
+        bars: &[Vec<(crate::machine::MachineUid, u8)>],
+    ) -> crate::project::Song {
+        use crate::project::{Block, PatternRef, Song};
+        let lens = crate::song::lens_of(p);
+        let mut song = Song::default();
+        let mut start = 0;
+        for bar in bars {
+            let len = bar.iter().map(|&(u, s)| lens(u, s)).max().unwrap_or(16);
+            for &(uid, slot) in bar {
+                song.lane_mut(uid).push(Block {
+                    len: (lens(uid, slot) != len).then_some(len as u16),
+                    ..Block::new(start, PatternRef(slot))
+                });
+            }
+            start += len;
+        }
+        song.end = (start > 0).then_some(start);
+        song
+    }
 }

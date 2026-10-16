@@ -7,14 +7,16 @@
 //! into one starting at its end, which then plays legato: the 303's
 //! half-step gate on a one-step note. The param lane sends on each
 //! step's first tick. Tracks are by rack position; a track's kind comes
-//! from the bank at its position.
+//! from the bank at its position. In Song mode each track follows its own
+//! machine's lane of blocks: a block's start restarts its pattern, and
+//! gaps and muted blocks are silent.
 
 use crate::machine::MAX_MACHINES;
 use crate::params::{DRUM_INSTRUMENTS, ParamId};
-use crate::project::{DrumPattern, Note, NotePattern, PatternRef, SynthPattern, TICKS_PER_STEP};
+use crate::project::{Block, DrumPattern, Note, NotePattern, SynthPattern, TICKS_PER_STEP};
 use crate::rack::{CompiledSong, RackMap};
 use crate::song::{
-    Bank, Banks, DEFAULT_BAR_STEPS, compiled_bar_start_step, compiled_bar_steps, value_at,
+    Bank, Banks, compiled_block_at, compiled_block_end, compiled_song_end, value_at,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -98,10 +100,17 @@ struct Track {
     /// (only possible from a hand-made file), the later track's write wins
     /// within a step, and its restore can undo the earlier track's value.
     lane_override: Option<ParamId>,
-    /// The machine plays nothing this bar.
+    /// The machine plays nothing now (a gap, a muted block, or a block
+    /// on a missing pattern).
     silent: bool,
-    /// The bar's synth transpose.
+    /// The block's song transpose.
     transpose_add: i8,
+    /// Song mode: the block playing, by index into the track's lane.
+    block: Option<usize>,
+    /// Song mode: that block's first step (kept through a gap after it).
+    block_start: u32,
+    /// Song mode: that block's end step, as last read.
+    block_end: u32,
     /// Tick position in the pattern.
     pos: u16,
     /// Note tracks: pitches sounding now, one bit per MIDI note.
@@ -120,18 +129,19 @@ pub struct Sequencer {
     /// By rack position.
     tracks: [Track; MAX_MACHINES],
     mode: Mode,
-    song_start: usize,
-    song_bar: usize,
-    bar_step: usize,
-    bar_len: usize,
+    /// Song mode: the step Play starts from.
+    song_start: u32,
+    /// Song mode: the global step playing (it advances on quarter 2).
     song_step: u32,
-    /// The song position must be recomputed at the next bar start.
+    /// Play: the next step start finds every track's block.
     seek: bool,
     /// The next step emits every lane's held value, not just its points.
     auto_sync: bool,
-    /// The song changed while playing: the next step start recomputes
-    /// the song position and the current bar's length.
+    /// The song changed while playing: the next step start finds every
+    /// track's block afresh.
     resync_pending: bool,
+    /// The arp clock of the tick last run, per rack position.
+    clocks: [(u64, f64); MAX_MACHINES],
     /// The pattern last selected per machine; restored when song
     /// playback (which overrides the tracks' patterns) is left.
     chosen: [u8; MAX_MACHINES],
@@ -163,6 +173,37 @@ fn advance(t: &mut Track, ticks: u16) {
     }
 }
 
+/// A note cut by a block line: the hold check closes the gate on the
+/// line's first tick unless a note starts there (the bar-line cut of v4).
+fn cut_gate(t: &mut Track) {
+    if t.gate_open && (t.gate_left > 0 || t.hold_left > 0) {
+        if t.gate_left > 0 {
+            t.prev_slide = false;
+        }
+        t.gate_left = 0;
+        t.hold_left = 1;
+    }
+}
+
+/// Takes block `i` of the lane at `pos` as the track's: its pattern (a
+/// pattern past the bank is silent), mute, transpose and span.
+fn take_block(t: &mut Track, pos: usize, i: usize, b: &Block, banks: Banks<'_>) {
+    if (b.pattern.0 as usize) < banks.bank_len(pos) {
+        t.pattern = b.pattern.0;
+        t.silent = b.mute;
+    } else {
+        t.silent = true;
+    }
+    t.transpose_add = if banks.transposes(pos) {
+        b.transpose
+    } else {
+        0
+    };
+    t.block = Some(i);
+    t.block_start = b.start;
+    t.block_end = compiled_block_end(b, pos, banks);
+}
+
 /// Note-offs for every pitch the track holds.
 fn release_all(t: &mut Track, slot: usize, out: &mut Vec<SeqEvent>) {
     while t.held != 0 {
@@ -185,13 +226,11 @@ impl Sequencer {
             tracks: [Track::default(); MAX_MACHINES],
             mode: Mode::Pattern,
             song_start: 0,
-            song_bar: 0,
-            bar_step: 0,
-            bar_len: DEFAULT_BAR_STEPS,
             song_step: 0,
             seek: false,
             auto_sync: false,
             resync_pending: false,
+            clocks: [(0, 0.0); MAX_MACHINES],
             chosen: [0; MAX_MACHINES],
             ended: false,
         }
@@ -241,9 +280,7 @@ impl Sequencer {
         self.samples_to_next = 0.0;
         self.ended = false;
         if self.mode == Mode::Song {
-            self.song_bar = self.song_start;
-            self.bar_step = 0;
-            self.bar_len = DEFAULT_BAR_STEPS;
+            self.song_step = self.song_start;
             self.seek = true;
         }
         for t in &mut self.tracks {
@@ -255,6 +292,9 @@ impl Sequencer {
             t.lane_override = None;
             t.silent = false;
             t.transpose_add = 0;
+            t.block = None;
+            t.block_start = 0;
+            t.block_end = 0;
             t.pos = 0;
             t.held = 0;
             if let Some(q) = t.queued.take() {
@@ -276,6 +316,9 @@ impl Sequencer {
             t.lane_override = None;
             t.silent = false;
             t.transpose_add = 0;
+            t.block = None;
+            t.block_start = 0;
+            t.block_end = 0;
             t.pos = 0;
             t.held = 0;
         }
@@ -292,8 +335,8 @@ impl Sequencer {
         }
     }
 
-    /// The song was edited while playing: re-derive the song position
-    /// (and the current bar's length) at the next step. Real-time safe.
+    /// The song was edited while playing: every track finds its block
+    /// afresh at the next step start. Real-time safe.
     pub fn resync(&mut self) {
         if self.playing && self.mode == Mode::Song {
             self.resync_pending = true;
@@ -316,27 +359,50 @@ impl Sequencer {
         self.mode
     }
 
-    pub fn set_song_start(&mut self, bar: usize) {
-        self.song_start = bar;
+    /// The step Song-mode Play starts from.
+    pub fn set_song_start(&mut self, step: u32) {
+        self.song_start = step;
     }
 
+    /// The 16-step bar of the song position (display only).
     pub fn song_bar(&self) -> usize {
-        self.song_bar
+        (self.song_step / 16) as usize
     }
 
     pub fn song_step(&self) -> u32 {
         self.song_step
     }
 
-    /// True once after a song played past its last bar.
+    /// True once after a song played past its end.
     pub fn take_ended(&mut self) -> bool {
         std::mem::take(&mut self.ended)
     }
 
-    /// Loads the current bar's patterns, mutes and transposes. Returns
-    /// false (and stops) when the song has no bar here.
-    fn load_bar(&mut self, song: &CompiledSong, banks: Banks<'_>, out: &mut Vec<SeqEvent>) -> bool {
-        let Some(bar) = song.bars.get(self.song_bar) else {
+    /// Song mode, each step's first tick: a pending seek or resync finds
+    /// every track's block, the loop jumps back, the song ends (releasing
+    /// what sounds; returns false), then each track starts the block
+    /// starting now or goes silent at its block's end, then automation.
+    fn song_step_start(
+        &mut self,
+        song: &CompiledSong,
+        banks: Banks<'_>,
+        out: &mut Vec<SeqEvent>,
+    ) -> bool {
+        if self.seek || self.resync_pending {
+            self.seek = false;
+            self.resync_pending = false;
+            self.seek_all(song, banks, false);
+            self.auto_sync = true;
+        }
+        if let Some((a, b)) = song.loop_range
+            && a < b
+            && self.song_step >= b
+        {
+            self.song_step = a;
+            self.seek_all(song, banks, true);
+            self.auto_sync = true;
+        }
+        if self.song_step >= compiled_song_end(song, banks) {
             for pos in 0..MAX_MACHINES {
                 if matches!(banks.slots[pos], Some(Bank::Synth(_))) && self.tracks[pos].gate_open {
                     out.push(SeqEvent::NoteOff { slot: pos });
@@ -350,45 +416,86 @@ impl Sequencer {
             self.stop();
             self.ended = true;
             return false;
-        };
-        if self.seek {
-            self.song_step = compiled_bar_start_step(song, self.song_bar, banks);
-            self.seek = false;
-            self.auto_sync = true;
         }
-        self.bar_len = compiled_bar_steps(bar, banks);
         for pos in 0..MAX_MACHINES {
-            let bank_len = banks.bank_len(pos);
-            let t = &mut self.tracks[pos];
-            t.step = 0;
-            t.pos = 0;
-            // A note cut by the bar line: the hold check closes the gate
-            // on the bar's first tick unless a note starts there (as v4).
-            if t.gate_open && (t.gate_left > 0 || t.hold_left > 0) {
-                if t.gate_left > 0 {
-                    t.prev_slide = false;
-                }
-                t.gate_left = 0;
-                t.hold_left = 1;
-            }
-            match bar.patterns[pos] {
-                Some(PatternRef(slot)) if (slot as usize) < bank_len => {
-                    t.pattern = slot;
-                    t.silent = bar.mutes[pos];
-                }
-                _ => t.silent = true,
-            }
-            t.transpose_add = if banks.transposes(pos) {
-                bar.transpose[pos]
-            } else {
-                0
-            };
+            self.follow_blocks(pos, song, banks);
         }
+        // Before the pattern lanes, so a lane value wins on its step.
+        self.emit_automation(song, out);
         true
     }
 
-    /// Song playback ignores the choice (the bars pick the patterns) but
-    /// remembers it for when playback stops or the mode changes.
+    /// The track at `pos` on a step start: a block starting now restarts
+    /// it on the block's pattern; else the end of its block (read live,
+    /// so a pattern edited while playing moves it) silences it. Both cut
+    /// an open acid gate as a bar line did.
+    fn follow_blocks(&mut self, pos: usize, song: &CompiledSong, banks: Banks<'_>) {
+        let lane = song.lane(pos);
+        let step = self.song_step;
+        let t = &mut self.tracks[pos];
+        if let Ok(i) = lane.binary_search_by_key(&step, |b| b.start) {
+            t.step = 0;
+            t.pos = 0;
+            cut_gate(t);
+            take_block(t, pos, i, &lane[i], banks);
+        } else if let Some(i) = t.block {
+            t.block_end = lane.get(i).map_or(0, |b| compiled_block_end(b, pos, banks));
+            if step >= t.block_end {
+                t.block = None;
+                t.silent = true;
+                t.step = 0;
+                t.pos = 0;
+                cut_gate(t);
+            }
+        }
+    }
+
+    /// Every track onto its block at the song position (a step start);
+    /// `cut` closes open gates as a block line does (the loop jump).
+    fn seek_all(&mut self, song: &CompiledSong, banks: Banks<'_>, cut: bool) {
+        let next = self.song_step as u64 * SUBS as u64;
+        for pos in 0..MAX_MACHINES {
+            if cut {
+                cut_gate(&mut self.tracks[pos]);
+            }
+            self.seek_track(pos, next, song, banks);
+        }
+    }
+
+    /// Puts the track at `pos` where it would be at song tick `next` (the
+    /// next tick to run, 4 per step): on the block covering it, at that
+    /// tick's place in its pattern (looping inside a longer block), or
+    /// silent in a gap.
+    fn seek_track(&mut self, pos: usize, next: u64, song: &CompiledSong, banks: Banks<'_>) {
+        let step = (next / SUBS as u64).min(u32::MAX as u64) as u32;
+        let t = &mut self.tracks[pos];
+        let Some(i) = compiled_block_at(song, pos, step, banks) else {
+            t.block = None;
+            t.silent = true;
+            return;
+        };
+        let b = song.lane(pos)[i];
+        take_block(t, pos, i, &b, banks);
+        let len = banks.length(pos, t.pattern).unwrap_or(1) as u64;
+        let ticks = len * TICKS_PER_STEP as u64;
+        let rel = next - b.start as u64 * SUBS as u64;
+        t.pos = (rel % ticks) as u16;
+        // As `advance` leaves it: the step of the last tick run.
+        let last = rel.checked_sub(1).map_or(0, |k| k % ticks);
+        t.step = (last / TICKS_PER_STEP as u64) as usize;
+    }
+
+    /// The song tick about to run. The step counter advances on quarter
+    /// 2, so on quarter 3 it is one step ahead of the ticks.
+    fn next_song_tick(&self) -> Option<u64> {
+        let at = self.song_step as u64 * SUBS as u64;
+        if self.sub == 3 {
+            at.checked_sub(1)
+        } else {
+            Some(at + self.sub as u64)
+        }
+    }
+
     /// Song automation for the current step. On a sync step every lane
     /// reports its held value, and lanes with no point yet reset.
     fn emit_automation(&mut self, song: &CompiledSong, out: &mut Vec<SeqEvent>) {
@@ -409,28 +516,6 @@ impl Sequencer {
             }
         }
         self.auto_sync = false;
-    }
-
-    /// Re-derives the song position after a song edit. At a bar start the
-    /// bar load does it; mid-bar the current bar's length and position are
-    /// recomputed here. A bar that no longer exists ends at its old length.
-    fn apply_resync(&mut self, song: &CompiledSong, banks: Banks<'_>) {
-        self.resync_pending = false;
-        if self.bar_step == 0 {
-            self.seek = true;
-            return;
-        }
-        let Some(bar) = song.bars.get(self.song_bar) else {
-            return;
-        };
-        self.song_step = compiled_bar_start_step(song, self.song_bar, banks) + self.bar_step as u32;
-        self.bar_len = compiled_bar_steps(bar, banks);
-        self.auto_sync = true;
-        if self.bar_step >= self.bar_len {
-            // The bar got shorter than where we are: the next bar start
-            // must find its position afresh.
-            self.seek = true;
-        }
     }
 
     /// Rack edit (real-time safe): track `p` takes the state of old track
@@ -470,52 +555,21 @@ impl Sequencer {
     /// Puts the fresh track at `pos` where it would be had it played from
     /// the start. Pattern mode: at the global step (tick, for note tracks)
     /// modulo its pattern's length, as the tracks that never switched are.
-    /// Song mode: on the current bar's cell (pattern, mute, transpose) at
-    /// the bar's step, shorter patterns looping as in `load_bar`. Stopped:
-    /// nothing to do. A step whose start tick has passed sounds from the
-    /// next step on.
+    /// Song mode: on its block at the song position (see `seek_track`).
+    /// Stopped: nothing to do. A step whose start tick has passed sounds
+    /// from the next step on.
     fn join(&mut self, pos: usize, banks: Banks<'_>, song: &CompiledSong) {
         if !self.playing {
             return;
         }
-        let sub = self.sub as u64;
-        // The next tick to run, counted from the start of play or the bar.
-        let next_tick = if self.mode == Mode::Song {
-            let Some(bar) = song.bars.get(self.song_bar) else {
-                // Past the end: the next step start ends the song.
-                self.tracks[pos].silent = true;
-                return;
-            };
-            // The step counters advance on quarter 2, so on quarter 3 they
-            // are one step ahead of the ticks.
-            let step_ticks = self.bar_step as u64 * SUBS as u64;
-            let Some(tick) = (if sub == 3 {
-                step_ticks.checked_sub(1)
-            } else {
-                Some(step_ticks + sub)
-            }) else {
-                // The bar just ended: its last tick is still to run, and
-                // the next bar's start loads every track.
-                self.tracks[pos].silent = true;
-                return;
-            };
-            let t = &mut self.tracks[pos];
-            match bar.patterns[pos] {
-                Some(PatternRef(slot)) if (slot as usize) < banks.bank_len(pos) => {
-                    t.pattern = slot;
-                    t.silent = bar.mutes[pos];
-                }
-                _ => t.silent = true,
+        if self.mode == Mode::Song {
+            match self.next_song_tick() {
+                Some(next) => self.seek_track(pos, next, song, banks),
+                None => self.tracks[pos].silent = true,
             }
-            t.transpose_add = if banks.transposes(pos) {
-                bar.transpose[pos]
-            } else {
-                0
-            };
-            tick
-        } else {
-            self.global_step * SUBS as u64 + sub
-        };
+            return;
+        }
+        let next_tick = self.global_step * SUBS as u64 + self.sub as u64;
         let t = &mut self.tracks[pos];
         let len = banks.length(pos, t.pattern).unwrap_or(1) as u64;
         let ticks = len * TICKS_PER_STEP as u64;
@@ -559,26 +613,28 @@ impl Sequencer {
         self.samples_to_next.max(0.0).ceil() as usize
     }
 
-    /// The tick about to run, at 4 per step (counted from the current song
-    /// bar's start in Song mode, from Play in Pattern mode), and its length
-    /// in samples, swing included. The Mono arp clocks from these.
-    pub fn tick_clock(&self) -> (u64, f64) {
-        let sub = self.sub as u64;
-        let tick = if self.mode == Mode::Song {
-            // Counted from the bar's start, so the arp's grid restarts on
-            // every bar however long the last one was. The step counters
-            // advance on quarter 2, so quarter 3 is one tick before them
-            // (and before the wrap, on a bar's last step).
-            let bar_step = self.bar_step as u64;
-            match (sub, bar_step) {
-                (3, 0) => self.bar_len as u64 * SUBS as u64 - 1,
-                (3, _) => bar_step * SUBS as u64 - 1,
-                _ => bar_step * SUBS as u64 + sub,
+    /// The arp clock of the tick last run, per rack position: the tick at
+    /// 4 per step (counted from Play in Pattern mode; in Song mode from
+    /// the start of that position's block, so the arp's grid restarts on
+    /// every block) and its length in samples, swing included. Read after
+    /// `tick`: a block starting on that tick is already counted.
+    pub fn tick_clocks(&self) -> [(u64, f64); MAX_MACHINES] {
+        self.clocks
+    }
+
+    fn set_clocks(&mut self, quarter: f64) {
+        if self.mode == Mode::Song {
+            let next = self.next_song_tick().unwrap_or(0);
+            for (c, t) in self.clocks.iter_mut().zip(&self.tracks) {
+                *c = (
+                    next.saturating_sub(t.block_start as u64 * SUBS as u64),
+                    quarter,
+                );
             }
         } else {
-            self.global_step * SUBS as u64 + sub
-        };
-        (tick, self.step_len(self.global_step) * 0.25)
+            let tick = self.global_step * SUBS as u64 + self.sub as u64;
+            self.clocks = [(tick, quarter); MAX_MACHINES];
+        }
     }
 
     pub fn advance(&mut self, n: usize) {
@@ -592,16 +648,12 @@ impl Sequencer {
             return;
         }
         let quarter = self.step_len(self.global_step) * 0.25;
-        if self.sub == 0 && self.mode == Mode::Song {
-            if self.resync_pending {
-                self.apply_resync(song, banks);
-            }
-            if self.bar_step == 0 && !self.load_bar(song, banks, out) {
-                return;
-            }
-            // Before the pattern lanes, so a lane value wins on its step.
-            self.emit_automation(song, out);
+        if self.sub == 0 && self.mode == Mode::Song && !self.song_step_start(song, banks, out) {
+            // The song ended on this tick: its clock is the first of none.
+            self.clocks = [(0, quarter); MAX_MACHINES];
+            return;
         }
+        self.set_clocks(quarter);
         for pos in 0..MAX_MACHINES {
             if let Some(Bank::Synth(bank)) = banks.slots[pos] {
                 self.synth_tick(pos, bank, out);
@@ -614,17 +666,6 @@ impl Sequencer {
         }
         if self.sub == 2 && self.mode == Mode::Song {
             self.song_step = self.song_step.saturating_add(1);
-            self.bar_step += 1;
-            if self.bar_step >= self.bar_len {
-                self.bar_step = 0;
-                self.song_bar += 1;
-                if let Some((a, b)) = song.loop_range
-                    && self.song_bar > b as usize
-                {
-                    self.song_bar = a as usize;
-                    self.seek = true;
-                }
-            }
         }
         self.note_ticks(banks, out);
         self.sub = (self.sub + 1) % SUBS;
@@ -831,7 +872,7 @@ impl Sequencer {
 mod tests {
     use super::*;
     use crate::machine::{MachineUid, standard_rack};
-    use crate::project::{DrumPattern, NotePattern, SynthPattern};
+    use crate::project::{DrumPattern, NotePattern, PatternRef, SynthPattern};
     use crate::steps::{ACID_VEL, DrumGrid, DrumHit, Gate, SynthGrid, SynthStep};
 
     /// Sets synth pattern steps the old way, through the grid view.
@@ -891,6 +932,40 @@ mod tests {
                 ],
                 song: crate::project::Song::default(),
             }
+        }
+
+        /// A song of bars as v5 had them, as the v6 conversion gives it:
+        /// `rows[i]` names the pattern of each of the first four machines
+        /// in bar i, which lasts its longest pattern (16 steps if none).
+        /// Each named pattern is one block at the bar's start, as long as
+        /// the bar; the song lasts every bar, empty ones too.
+        fn set_bars(&mut self, rows: &[[Option<u8>; 4]]) {
+            let mut song = crate::project::Song::default();
+            let banks = self.banks();
+            let mut start = 0u32;
+            for row in rows {
+                let bar = (0..4)
+                    .filter_map(|pos| banks.length(pos, row[pos]?))
+                    .max()
+                    .unwrap_or(16) as u32;
+                for (pos, slot) in row.iter().enumerate() {
+                    let Some(slot) = *slot else { continue };
+                    let own = banks.length(pos, slot).map(|n| n as u32);
+                    let block = Block {
+                        len: (own != Some(bar)).then_some(bar as u16),
+                        ..Block::new(start, PatternRef(slot))
+                    };
+                    song.lane_mut(MachineUid(pos as u16 + 1)).push(block);
+                }
+                start += bar;
+            }
+            song.end = (start > 0).then_some(start);
+            self.song = song;
+        }
+
+        /// The block `i` of machine `uid`'s lane.
+        fn block(&mut self, uid: u16, i: usize) -> &mut Block {
+            &mut self.song.lane_mut(MachineUid(uid))[i]
         }
 
         /// The standard rack's six tracks at positions 0..6.
@@ -1394,14 +1469,6 @@ mod tests {
         );
     }
 
-    fn song_bar(refs: [Option<u8>; 4]) -> crate::project::Bar {
-        let mut bar = crate::project::Bar::default();
-        for (m, r) in refs.into_iter().enumerate() {
-            bar.cell_mut(MachineUid(m as u16 + 1)).pattern = r.map(crate::project::PatternRef);
-        }
-        bar
-    }
-
     fn notes(ev: &[(usize, SeqEvent)]) -> Vec<(usize, u8)> {
         ev.iter()
             .filter_map(|(p, e)| match e {
@@ -1422,10 +1489,7 @@ mod tests {
         let mut f = Fixture::new();
         set_steps(&mut f.synths[0][0], 16, &[(0, on(0))]);
         set_steps(&mut f.synths[0][1], 16, &[(0, on(7))]);
-        f.song.bars = vec![
-            song_bar([Some(0), None, None, None]),
-            song_bar([Some(1), None, None, None]),
-        ];
+        f.set_bars(&[[Some(0), None, None, None], [Some(1), None, None, None]]);
         let mut s = song_seq();
         s.play();
         let ev = f.run(&mut s, 33 * 5513);
@@ -1436,11 +1500,12 @@ mod tests {
     }
 
     #[test]
-    fn bar_length_follows_the_longest_pattern_and_shorter_ones_loop() {
+    fn a_block_longer_than_its_pattern_loops_it() {
         let mut f = Fixture::new();
         set_steps(&mut f.synths[0][0], 8, &[(0, on(0))]);
         f.drums[0][0].roll.length = 16;
-        f.song.bars = vec![song_bar([Some(0), None, Some(0), None])];
+        f.set_bars(&[[Some(0), None, Some(0), None]]);
+        assert_eq!(f.block(1, 0).len, Some(16));
         let mut s = song_seq();
         s.play();
         let ev = f.run(&mut s, 17 * 5513);
@@ -1452,25 +1517,28 @@ mod tests {
     }
 
     #[test]
-    fn the_tick_clock_restarts_at_every_song_bar() {
+    fn the_tick_clock_restarts_at_every_block() {
         let mut f = Fixture::new();
         f.synths[0][0].roll.length = 6;
         f.synths[0][1].roll.length = 16;
-        f.song.bars = vec![
-            song_bar([Some(0), None, None, None]),
-            song_bar([Some(1), None, None, None]),
-        ];
+        f.set_bars(&[[Some(0), None, None, None], [Some(1), None, None, None]]);
+        // The 808 has its own block from step 2: its own clock.
+        f.song.lane_mut(MachineUid(3)).push(Block {
+            len: Some(4),
+            ..Block::new(2, PatternRef(0))
+        });
         let uids: Vec<_> = standard_rack().iter().map(|m| m.0).collect();
         let song = CompiledSong::compile(&f.song, &uids);
         let mut s = song_seq();
         s.play();
-        let mut ticks = Vec::new();
+        let (mut ticks, mut kit) = (Vec::new(), Vec::new());
         let mut buf = Vec::with_capacity(64);
         while s.is_playing() {
             if s.samples_to_next_tick() == 0 {
-                ticks.push(s.tick_clock().0);
                 buf.clear();
                 s.tick(f.banks(), &song, &mut buf);
+                ticks.push(s.tick_clocks()[0].0);
+                kit.push(s.tick_clocks()[2].0);
             } else {
                 s.advance(s.samples_to_next_tick());
             }
@@ -1479,6 +1547,7 @@ mod tests {
         let expected: Vec<u64> = [bar(6), bar(16)].concat();
         // The song-ending tick (the third bar's start) is clocked too.
         assert_eq!(ticks[..expected.len()], expected[..]);
+        assert_eq!(kit[8..24], bar(4)[..], "from its block's start at step 2");
     }
 
     #[test]
@@ -1486,11 +1555,9 @@ mod tests {
         let mut f = Fixture::new();
         set_steps(&mut f.synths[0][0], 16, &[(0, on(0))]);
         set_hits(&mut f.drums[0][0], 16, &[(0, 0, DrumHit::On)]);
-        let mut muted = song_bar([None, None, Some(0), None]);
-        muted.cell_mut(MachineUid(3)).mute = true;
-        let mut lifted = song_bar([Some(0), None, Some(0), None]);
-        lifted.cell_mut(MachineUid(1)).transpose = 5;
-        f.song.bars = vec![muted, lifted];
+        f.set_bars(&[[None, None, Some(0), None], [Some(0), None, Some(0), None]]);
+        f.block(3, 0).mute = true;
+        f.block(1, 0).transpose = 5;
         let mut s = song_seq();
         s.play();
         let ev = f.run(&mut s, 32 * 5513);
@@ -1509,12 +1576,8 @@ mod tests {
     #[test]
     fn loop_range_repeats_and_resets_the_song_step() {
         let mut f = Fixture::new();
-        f.song.bars = vec![
-            song_bar([None; 4]),
-            song_bar([None; 4]),
-            song_bar([None; 4]),
-        ];
-        f.song.loop_range = Some((1, 2));
+        f.set_bars(&[[None; 4]; 3]);
+        f.song.loop_range = Some((16, 48)); // bars 1 and 2
         let mut s = song_seq();
         s.play();
         f.run(&mut s, 48 * 5513 + 10);
@@ -1528,7 +1591,7 @@ mod tests {
         use crate::params::{MasterParam, ParamId};
         let id = ParamId::Master(MasterParam::Level);
         let mut f = Fixture::new();
-        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
+        f.set_bars(&[[None; 4]; 2]);
         crate::song::write_automation(&mut f.song, id, 3, 3, 0.25);
         crate::song::write_automation(&mut f.song, id, 16, 16, 0.75);
         let autos = |ev: &[(usize, SeqEvent)]| -> Vec<(usize, f32)> {
@@ -1545,7 +1608,7 @@ mod tests {
         assert_eq!(autos(&ev), vec![(16_538, 0.25), (88_200, 0.75)]);
 
         let mut s = song_seq();
-        s.set_song_start(1);
+        s.set_song_start(16);
         s.play();
         assert_eq!(s.song_bar(), 1);
         let ev = f.run(&mut s, 10);
@@ -1561,7 +1624,7 @@ mod tests {
     fn pattern_mode_ignores_the_song_and_mode_is_fixed_while_playing() {
         let mut f = Fixture::new();
         set_steps(&mut f.synths[0][0], 16, &[(0, on(0))]);
-        f.song.bars = vec![song_bar([None; 4])];
+        f.set_bars(&[[None; 4]]);
         let mut s = new_seq();
         s.play();
         s.set_mode(Mode::Song);
@@ -1581,7 +1644,7 @@ mod tests {
         }
         set_steps(&mut f.synths[0][2], 16, &[(0, on(4))]);
         set_steps(&mut f.synths[0][5], 16, &[(0, on(9))]);
-        f.song.bars = vec![song_bar([Some(5); 4]), song_bar([Some(5); 4])];
+        f.set_bars(&[[Some(5); 4]; 2]);
         let mut s = song_seq();
         s.play();
         f.run(&mut s, 3 * 5513);
@@ -1611,8 +1674,8 @@ mod tests {
         use crate::params::{MasterParam, ParamId};
         let id = ParamId::Master(MasterParam::Level);
         let mut f = Fixture::new();
-        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
-        f.song.loop_range = Some((0, 1));
+        f.set_bars(&[[None; 4]; 2]);
+        f.song.loop_range = Some((0, 32));
         crate::song::write_automation(&mut f.song, id, 20, 20, 0.0);
         let mut s = song_seq();
         s.play();
@@ -1654,7 +1717,7 @@ mod tests {
         let mut values = vec![None; 64];
         values[2] = Some(0.9);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
-        f.song.bars = vec![song_bar([Some(0), None, None, None])];
+        f.set_bars(&[[Some(0), None, None, None]]);
         crate::song::write_automation(&mut f.song, id, 2, 2, 0.1);
         let mut s = song_seq();
         s.play();
@@ -1675,21 +1738,25 @@ mod tests {
     }
 
     #[test]
-    fn resync_mid_bar_recomputes_the_song_position() {
+    fn resync_mid_block_reseeks_the_tracks() {
         let mut f = Fixture::new();
-        f.synths[0][1].roll.length = 32;
-        f.song.bars = vec![song_bar([None; 4]), song_bar([None; 4])];
+        set_steps(&mut f.synths[0][1], 32, &[(20, on(5))]);
+        f.set_bars(&[[Some(0), None, None, None]]);
+        f.block(1, 0).len = Some(32);
         let mut s = song_seq();
         s.play();
-        // Past the mid tick of step 18: bar 1, bar step 3, song step 19.
+        // Past the mid tick of step 18: song step 19.
         f.run(&mut s, 103_000);
         assert_eq!((s.song_bar(), s.song_step()), (1, 19));
-        f.song.bars[0] = song_bar([Some(1), None, None, None]);
+        assert_eq!(s.current_pattern(0), 0);
+        // The block now plays pattern 1, 32 steps long.
+        f.block(1, 0).pattern = PatternRef(1);
+        f.block(1, 0).len = None;
         s.resync();
-        f.run(&mut s, 3000); // the step-19 start tick
-        assert_eq!(s.song_step(), 32 + 3);
-        f.run(&mut s, 12 * 5513); // through the step-31 start tick
-        assert_eq!((s.song_bar(), s.song_step()), (1, 32 + 15));
+        let ev = f.run(&mut s, 13_000); // through the step-21 start tick
+        assert_eq!(s.song_step(), 21, "the position stays");
+        assert_eq!(s.current_pattern(0), 1, "on the new pattern at once");
+        assert_eq!(notes(&ev), vec![(110_250 - 103_000, 41)], "its step 20");
     }
 
     #[test]
@@ -1760,7 +1827,7 @@ mod tests {
                 (15, on(3)),
             ],
         );
-        f.song.bars = vec![song_bar([Some(0), None, None, None])];
+        f.set_bars(&[[Some(0), None, None, None]]);
         let mut s = song_seq();
         s.play();
         let ev = synth_events(&f.run(&mut s, 17 * 5513));
@@ -1772,11 +1839,12 @@ mod tests {
         assert!(!s.is_playing());
     }
 
-    // A bar lasts as long as its longest pattern, so a shorter acid
-    // pattern can be cut mid-note by the bar line: the note ends there,
-    // as in v4 (sample 88200 at 120 BPM), unless one starts on it.
+    // A v5 bar lasted as long as its longest pattern, so a shorter acid
+    // pattern looping in it could be cut mid-note by the bar line, which
+    // is now the next block's start: the note ends there, as in v4
+    // (sample 88200 at 120 BPM), unless one starts on it.
     #[test]
-    fn a_note_cut_by_the_bar_line_ends_on_it() {
+    fn a_note_cut_by_a_block_line_ends_on_it() {
         let mut f = Fixture::new();
         let tie = SynthStep {
             gate: Gate::Tie,
@@ -1784,8 +1852,7 @@ mod tests {
         };
         set_steps(&mut f.synths[0][0], 6, &[(3, on(3)), (4, tie), (5, tie)]);
         f.drums[0][0].roll.length = 16;
-        let bar = song_bar([Some(0), None, Some(0), None]);
-        f.song.bars = vec![bar.clone(), bar];
+        f.set_bars(&[[Some(0), None, Some(0), None]; 2]);
         let mut s = song_seq();
         s.play();
         // Up to the next bar's first note (step 19 = sample 104738).
@@ -1820,7 +1887,7 @@ mod tests {
         let mut values = vec![None; 64];
         values[15] = Some(0.8);
         f.synths[0][0].param_lane = Some(ParamLane { param: id, values });
-        f.song.bars = vec![song_bar([Some(0), None, None, None]), song_bar([None; 4])];
+        f.set_bars(&[[Some(0), None, None, None], [None; 4]]);
         let mut s = song_seq();
         s.play();
         let ev: Vec<_> = f
@@ -1839,7 +1906,7 @@ mod tests {
 
     /// One song bar playing synth pattern 0, whose last step slides into
     /// its own step 0, followed by `next`.
-    fn slide_across_the_bar_line(next: crate::project::Bar) -> Vec<(usize, SeqEvent)> {
+    fn slide_across_the_bar_line(next: [Option<u8>; 4]) -> Vec<(usize, SeqEvent)> {
         let mut f = Fixture::new();
         set_steps(&mut f.synths[0][0], 16, &[(0, on(0))]);
         set_steps(
@@ -1865,7 +1932,7 @@ mod tests {
                 },
             )],
         );
-        f.song.bars = vec![song_bar([Some(0), None, None, None]), next];
+        f.set_bars(&[[Some(0), None, None, None], next]);
         let mut s = song_seq();
         s.play();
         synth_events(&f.run(&mut s, 89_000))
@@ -1889,17 +1956,17 @@ mod tests {
             legato,
         };
         assert_eq!(
-            slide_across_the_bar_line(song_bar([Some(1), None, None, None])),
+            slide_across_the_bar_line([Some(1), None, None, None]),
             vec![(82_688, note(39, false)), (88_200, note(43, true))],
             "the next bar's first note slides in (legato)"
         );
         assert_eq!(
-            slide_across_the_bar_line(song_bar([Some(2), None, None, None])),
+            slide_across_the_bar_line([Some(2), None, None, None]),
             vec![(82_688, note(39, false)), (88_200, note(45, true))],
             "a Tie after the bar line starts its own note: it slides in too"
         );
         assert_eq!(
-            slide_across_the_bar_line(song_bar([None; 4])),
+            slide_across_the_bar_line([None; 4]),
             vec![
                 (82_688, note(39, false)),
                 (88_200, SeqEvent::NoteOff { slot: 0 })
@@ -2024,13 +2091,14 @@ mod tests {
         let mut f = Fixture::new();
         f.notes[0][0].notes.push(note(0, 4, 60));
         f.notes[1][0].notes.push(note(0, 4, 60));
-        let mut bar = song_bar([None; 4]);
-        bar.cell_mut(MachineUid(5)).pattern = Some(PatternRef(0));
-        let sampler = bar.cell_mut(MachineUid(6));
-        sampler.pattern = Some(PatternRef(0));
-        sampler.mute = true;
-        bar.cell_mut(MachineUid(5)).transpose = 3;
-        f.song.bars = vec![bar];
+        f.song.lane_mut(MachineUid(5)).push(Block {
+            transpose: 3,
+            ..Block::new(0, PatternRef(0))
+        });
+        f.song.lane_mut(MachineUid(6)).push(Block {
+            mute: true,
+            ..Block::new(0, PatternRef(0))
+        });
         let mut s = new_seq();
         s.set_mode(Mode::Song);
         s.play();
@@ -2052,9 +2120,9 @@ mod tests {
     fn a_song_ending_releases_held_notes() {
         let mut f = Fixture::new();
         f.notes[0][0].notes.push(note(0, 64, 60));
-        let mut bar = song_bar([None; 4]);
-        bar.cell_mut(MachineUid(5)).pattern = Some(PatternRef(0));
-        f.song.bars = vec![bar];
+        f.song
+            .lane_mut(MachineUid(5))
+            .push(Block::new(0, PatternRef(0)));
         let mut s = new_seq();
         s.set_mode(Mode::Song);
         s.play();
@@ -2218,19 +2286,14 @@ mod tests {
             b.machines[pos] = Some((uid, ty));
             b.slots[pos] = Some(bank);
         }
-        let mut bar = crate::project::Bar::default();
+        let mut song = crate::project::Song::default();
         for uid in [9, 3, 4].map(MachineUid) {
-            let cell = bar.cell_mut(uid);
-            cell.pattern = Some(PatternRef(0));
-            cell.transpose = 5;
+            song.lane_mut(uid).push(Block {
+                transpose: 5,
+                ..Block::new(0, PatternRef(0))
+            });
         }
-        let song = CompiledSong::compile(
-            &crate::project::Song {
-                bars: vec![bar],
-                ..Default::default()
-            },
-            &[MachineUid(9), MachineUid(3), MachineUid(4)],
-        );
+        let song = CompiledSong::compile(&song, &[MachineUid(9), MachineUid(3), MachineUid(4)]);
         let mut s = song_seq();
         s.play();
         let mut out = Vec::new();

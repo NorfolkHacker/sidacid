@@ -8,7 +8,7 @@ use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::{ChannelStrip, StereoBuf};
 use crate::params::MachineParam;
 use crate::project::{
-    AutoLane, DrumPattern, MachineBody, MachineEntry, NotePattern, PatternRef, Project, Song,
+    AutoLane, Block, DrumPattern, MachineBody, MachineEntry, NotePattern, Project, Song,
     SynthPattern,
 };
 use crate::sampler::slot::SlotPlay;
@@ -170,47 +170,37 @@ impl Slot {
     }
 }
 
-/// A song bar resolved to rack positions.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct CompiledBar {
-    pub patterns: [Option<PatternRef>; MAX_MACHINES],
-    pub mutes: [bool; MAX_MACHINES],
-    pub transpose: [i8; MAX_MACHINES],
-}
-
-/// A song whose bars are resolved to rack positions: what the sequencer
+/// A song whose lanes are resolved to rack positions: what the sequencer
 /// plays. Built on the UI thread for one rack order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompiledSong {
-    pub bars: Vec<CompiledBar>,
-    pub loop_range: Option<(u16, u16)>,
+    /// Per rack position: that machine's blocks, sorted by start.
+    pub lanes: Vec<Vec<Block>>,
+    pub end: Option<u32>,
+    pub loop_range: Option<(u32, u32)>,
     pub automation: Vec<AutoLane>,
 }
 
 impl CompiledSong {
-    /// Resolves uid cells to rack positions (UI thread; allocates). Cells
+    /// Resolves uid lanes to rack positions (UI thread; allocates). Lanes
     /// of machines not in `rack` are dropped; positions past
     /// `MAX_MACHINES` are ignored.
     pub fn compile(song: &Song, rack: &[MachineUid]) -> CompiledSong {
-        let bars = song
-            .bars
-            .iter()
-            .map(|bar| {
-                let mut c = CompiledBar::default();
-                for (pos, &uid) in rack.iter().take(MAX_MACHINES).enumerate() {
-                    let cell = bar.cell(uid);
-                    c.patterns[pos] = cell.pattern;
-                    c.mutes[pos] = cell.mute;
-                    c.transpose[pos] = cell.transpose;
-                }
-                c
-            })
-            .collect();
         CompiledSong {
-            bars,
+            lanes: rack
+                .iter()
+                .take(MAX_MACHINES)
+                .map(|&uid| song.lane(uid).to_vec())
+                .collect(),
+            end: song.end,
             loop_range: song.loop_range,
             automation: song.automation.clone(),
         }
+    }
+
+    /// The blocks at rack position `pos`; empty past the rack.
+    pub fn lane(&self, pos: usize) -> &[Block] {
+        self.lanes.get(pos).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -276,22 +266,29 @@ impl RackSwap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Bar, Cell};
+    use crate::project::PatternRef;
 
     #[test]
     fn songs_compile_to_rack_positions() {
         let mut song = Song::default();
-        let mut bar = Bar::default();
-        *bar.cell_mut(MachineUid(5)) = Cell {
-            pattern: Some(PatternRef(3)),
+        let block = Block {
             mute: true,
             transpose: 2,
+            ..Block::new(16, PatternRef(3))
         };
-        song.bars.push(bar);
+        song.lane_mut(MachineUid(5)).push(block);
+        song.lane_mut(MachineUid(9))
+            .push(Block::new(0, PatternRef(1)));
+        song.end = Some(64);
+        song.loop_range = Some((16, 32));
         let c = CompiledSong::compile(&song, &[MachineUid(5), MachineUid(1)]);
-        assert_eq!(c.bars[0].patterns[0], Some(PatternRef(3)));
-        assert!(c.bars[0].mutes[0]);
-        assert_eq!(c.bars[0].transpose[0], 2);
-        assert_eq!(c.bars[0].patterns[1], None);
+        assert_eq!(
+            c.lanes,
+            vec![vec![block], vec![]],
+            "uid 9 isn't in the rack"
+        );
+        assert_eq!(c.lane(0), [block]);
+        assert!(c.lane(7).is_empty());
+        assert_eq!((c.end, c.loop_range), (Some(64), Some((16, 32))));
     }
 }

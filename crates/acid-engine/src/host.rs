@@ -65,7 +65,8 @@ pub enum Command {
     SetMode(Mode),
     /// The song compiled for the engine's rack order.
     Song(Box<CompiledSong>),
-    SetSongStart(u16),
+    /// The step Song-mode Play starts from.
+    SetSongStart(u32),
     /// The user is holding (true) or released (false) a knob while recording.
     Touch(ParamId, bool),
     /// Sound follows the knob without changing its saved value (record mode).
@@ -107,6 +108,7 @@ pub struct Status {
     pub overruns: u32,
     pub guard_fired: bool,
     pub mode: Mode,
+    /// The 16-step bar of the song position (song mode; display only).
     pub song_bar: u16,
     /// Global song step (song mode).
     pub song_step: u32,
@@ -304,7 +306,7 @@ impl EngineHost {
                     self.song_rejected |= !self.engine.swap_song(&mut song);
                     self.dispose(Event::DisposeSong(song));
                 }
-                Command::SetSongStart(bar) => self.engine.set_song_start(bar as usize),
+                Command::SetSongStart(step) => self.engine.set_song_start(step),
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
                 Command::SetRack(mut swap) => {
@@ -696,14 +698,15 @@ mod tests {
     #[test]
     fn song_commands_and_status() {
         let (mut host, mut tx, mut rx) = host_with_demo();
+        // Four empty 16-step bars.
         let song = CompiledSong {
-            bars: vec![Default::default(); 4],
+            end: Some(64),
             ..Default::default()
         };
         tx.push(Command::Song(Box::new(song))).unwrap();
         tx.push(Command::SetMode(crate::sequencer::Mode::Song))
             .unwrap();
-        tx.push(Command::SetSongStart(2)).unwrap();
+        tx.push(Command::SetSongStart(32)).unwrap();
         tx.push(Command::Play).unwrap();
         run(&mut host, 2048);
         let events: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
@@ -863,22 +866,11 @@ mod tests {
     fn touch_holds_a_param_against_automation_until_released() {
         let id = ParamId::Master(crate::params::MasterParam::Level);
         let mut p = crate::demo::demo_project();
-        let bar = crate::project::Bar {
-            cells: crate::machine::standard_rack()
-                .iter()
-                .map(|m| {
-                    let pattern = Some(crate::project::PatternRef(0));
-                    (
-                        m.0,
-                        crate::project::Cell {
-                            pattern,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
-        };
-        p.song.bars = vec![bar.clone(), bar];
+        let bar: Vec<_> = crate::machine::standard_rack()
+            .iter()
+            .map(|m| (m.0, 0))
+            .collect();
+        p.song = crate::testutil::bar_song(&p, &[bar.clone(), bar]);
         crate::song::write_automation(&mut p.song, id, 0, 31, 0.8);
         let (mut host, mut tx, _rx) = channel(Engine::from_project(SR, &p));
         tx.push(Command::SetMode(Mode::Song)).unwrap();
@@ -904,7 +896,7 @@ mod tests {
     fn a_rejected_song_is_reported_once() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         let song = CompiledSong {
-            bars: vec![Default::default(); crate::song::MAX_BARS + 1],
+            end: Some(crate::song::MAX_SONG_STEPS as u32 + 1),
             ..Default::default()
         };
         tx.push(Command::Song(Box::new(song))).unwrap();
