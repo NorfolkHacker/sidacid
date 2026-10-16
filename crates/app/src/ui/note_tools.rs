@@ -397,7 +397,8 @@ fn ordered(a: u8, b: u8) -> (u8, u8) {
 /// `density` % chance, pitched in `key` within the pitch range (any pitch
 /// when the key is Chromatic; the nearest in-key pitch when the range
 /// holds none) or a random instrument on drums, `len_min..=len_max` grid
-/// steps long (cut at the span end). The same seed gives the same notes.
+/// steps long (cut at the span end). A span with no grid line in it
+/// holds one cell at its start. The same seed gives the same notes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Randomize {
     /// 10..=100 %.
@@ -444,8 +445,13 @@ pub fn randomize(
         (plo..=phi).filter(|&x| key.contains(x)).collect()
     };
     let seed = params.seed;
+    let mut grid: Vec<u16> = cells(lo, hi, g).collect();
+    if grid.is_empty() && lo < hi {
+        // A span shorter than a grid step holds one cell at its start.
+        grid.push(lo);
+    }
     let mut added = Vec::new();
-    for (k, t) in cells(lo, hi, g).enumerate() {
+    for (k, t) in grid.into_iter().enumerate() {
         if roll(seed, k, 0) % 100 >= density {
             continue;
         }
@@ -576,7 +582,8 @@ pub fn arpeggiate(
 
 /// Euclidean: `hits` notes spread as evenly as they go over `steps` grid
 /// cells of `snap` from the span's first grid line (Bjorklund: E(3,8) =
-/// x..x..x.), the pattern shifted `rotation` cells later, each one cell
+/// x..x..x.), the pattern shifted `rotation` cells later and repeated
+/// across the whole span (cell `c` takes step `c % steps`), each one cell
 /// long, on `pitch` (drums: that row, 0..8). `steps` is capped at the
 /// cells the span holds. Visible scope notes on that pitch are replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -647,8 +654,8 @@ pub fn euclid(
     if steps > 0 {
         let onsets = bjorklund(params.hits as usize, steps);
         let rot = params.rotation as usize % steps;
-        for (c, &t) in cells.iter().take(steps).enumerate() {
-            if onsets[(c + steps - rot) % steps] {
+        for (c, &t) in cells.iter().enumerate() {
+            if onsets[(c % steps + steps - rot) % steps] {
                 added.push(Note::new(t, g.min(hi - t).max(1), pitch, 100));
             }
         }
@@ -1243,6 +1250,33 @@ mod tests {
         assert_eq!(starts, vec![0, 16, 32, 48]);
     }
 
+    #[test]
+    fn randomize_short_span_places_one_cell_at_its_start() {
+        // One note 5..7: shorter than a step and off the grid.
+        let p = pat(&[(5, 2, 60)]);
+        let params = Randomize {
+            density: 100,
+            ..rnd(2)
+        };
+        let (q, idx) = randomize(&p, &[0], &params, LaneKind::Poly, c_minor(), Snap::Step);
+        assert_eq!(q.notes.len(), 1);
+        assert_eq!((q.notes[0].start, q.notes[0].len), (5, 2));
+        assert!(c_minor().contains(q.notes[0].pitch));
+        assert_eq!(idx, vec![0]);
+        // Density still applies: some seed at 10 % leaves it empty.
+        let empty = (0..50).any(|seed| {
+            let r = Randomize {
+                density: 10,
+                ..rnd(seed)
+            };
+            randomize(&p, &[0], &r, LaneKind::Poly, c_minor(), Snap::Step)
+                .0
+                .notes
+                .is_empty()
+        });
+        assert!(empty);
+    }
+
     // --- arpeggiate ---
 
     fn arp(style: ArpStyle) -> Arp {
@@ -1363,34 +1397,57 @@ mod tests {
     fn euclid_three_in_eight() {
         let p = pat(&[]);
         let (q, idx) = euclid(&p, &[], &eu(3, 8, 0, 60), LaneKind::Poly, Snap::Step);
-        // x..x..x.
-        assert_eq!(spans(&q), vec![(0, 4, 60), (12, 4, 60), (24, 4, 60)]);
-        assert_eq!(idx, vec![0, 1, 2]);
+        // x..x..x. twice over the 16-step pattern.
+        assert_eq!(
+            spans(&q),
+            vec![
+                (0, 4, 60),
+                (12, 4, 60),
+                (24, 4, 60),
+                (32, 4, 60),
+                (44, 4, 60),
+                (56, 4, 60)
+            ]
+        );
+        assert_eq!(idx, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn euclid_repeats_its_cycle_across_the_span() {
+        // Five cells of E(1,2): x.x.x
+        let p = pat(&[(0, 4, 50), (16, 4, 50)]);
+        let (q, _) = euclid(&p, &[0, 1], &eu(1, 2, 0, 60), LaneKind::Poly, Snap::Step);
+        assert_eq!(starts(&q), vec![0, 16, 0, 8, 16]);
+        // E(1,3) rotated by one: .x. then .x -> cells 1 and 4.
+        let (q, _) = euclid(&p, &[0, 1], &eu(1, 3, 1, 60), LaneKind::Poly, Snap::Step);
+        assert_eq!(starts(&q), vec![0, 16, 4, 16]);
     }
 
     #[test]
     fn euclid_five_in_eight() {
         let p = pat(&[]);
         let (q, _) = euclid(&p, &[], &eu(5, 8, 0, 60), LaneKind::Poly, Snap::Step);
-        // x.xx.xx.
-        assert_eq!(starts(&q), vec![0, 8, 12, 20, 24]);
+        // x.xx.xx. twice.
+        assert_eq!(starts(&q), vec![0, 8, 12, 20, 24, 32, 40, 44, 52, 56]);
     }
 
     #[test]
     fn euclid_rotation_shifts_later() {
         let p = pat(&[]);
         let (q, _) = euclid(&p, &[], &eu(3, 8, 1, 60), LaneKind::Poly, Snap::Step);
-        // .x..x..x
-        assert_eq!(starts(&q), vec![4, 16, 28]);
+        // .x..x..x twice.
+        assert_eq!(starts(&q), vec![4, 16, 28, 36, 48, 60]);
         let (q, _) = euclid(&p, &[], &eu(3, 8, 9, 60), LaneKind::Poly, Snap::Step);
-        assert_eq!(starts(&q), vec![4, 16, 28]);
+        assert_eq!(starts(&q), vec![4, 16, 28, 36, 48, 60]);
     }
 
     #[test]
     fn euclid_drums_use_the_row() {
         let p = pat(&[]);
         let (q, _) = euclid(&p, &[], &eu(2, 4, 0, 3), LaneKind::Drums, Snap::Step);
-        assert_eq!(spans(&q), vec![(0, 4, 3), (8, 4, 3)]);
+        assert_eq!(&spans(&q)[..2], &[(0, 4, 3), (8, 4, 3)]);
+        assert_eq!(starts(&q), (0..8).map(|k| k * 8).collect::<Vec<u16>>());
+        assert!(q.notes.iter().all(|n| n.pitch == 3));
         let (q, _) = euclid(&p, &[], &eu(1, 4, 0, 12), LaneKind::Drums, Snap::Step);
         assert_eq!(q.notes[0].pitch, 7);
     }
