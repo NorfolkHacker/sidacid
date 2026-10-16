@@ -539,10 +539,10 @@ impl SidAcidApp {
         };
         let max_scroll_y = (rows.count() as f32 * ROW_H - height).max(0.0);
         if !drums && self.view.panel(uid).lane_scroll_y.is_none() {
-            let pitch = self.roll_start_pitch(uid).min(127);
-            let row = rows.row_near(pitch);
-            let y = (row as f32 * ROW_H - height / 2.0).clamp(0.0, max_scroll_y);
-            self.view.panel(uid).lane_scroll_y = Some(y);
+            let pitch = middle_pitch(&pattern)
+                .unwrap_or_else(|| self.roll_start_pitch(uid))
+                .min(127);
+            self.view.panel(uid).lane_scroll_y = Some(centred_y(&rows, height, pitch));
         }
         // A lane made taller has a smaller maximum.
         if let Some(y) = &mut self.view.panel(uid).lane_scroll_y {
@@ -1483,6 +1483,18 @@ fn drum_accent_strip(
     }
 }
 
+/// The middle of the pitch range of `pattern`'s notes that start inside
+/// it, where a lane's first view centres (None with no such note).
+fn middle_pitch(pattern: &NotePattern) -> Option<u8> {
+    let ticks = pattern.ticks();
+    let mut inside = pattern.notes.iter().filter(|n| n.start < ticks);
+    let first = inside.next()?.pitch;
+    let (lo, hi) = inside.fold((first, first), |(lo, hi), n| {
+        (lo.min(n.pitch), hi.max(n.pitch))
+    });
+    Some(((lo as u16 + hi as u16) / 2) as u8)
+}
+
 /// The scroll that puts `pitch`'s row (or the one it is drawn on) in the
 /// middle of a `height` view of `rows`.
 fn centred_y(rows: &Rows, height: f32, pitch: u8) -> f32 {
@@ -2064,6 +2076,57 @@ mod tests {
             lane_frame(&mut app, &ctx, uid, 1.1, vec![button(false)]);
             assert!(!app.doc.is_dirty(), "{uid:?}: nothing edited");
         }
+    }
+
+    /// The pitches of `uid`'s selected pattern whose rows its lane shows.
+    fn pitches_in_view(app: &mut SidAcidApp, uid: MachineUid) -> (usize, usize) {
+        let pattern = app
+            .doc
+            .project
+            .roll(uid, app.selected(uid))
+            .unwrap()
+            .clone();
+        let fold = app.doc.project.machine(uid).unwrap().lane.fold;
+        let rows = app.lane_rows(uid, fold, &pattern);
+        let height = app.doc.project.machine(uid).unwrap().lane.clamped_height() as f32;
+        let top = app.view.panel(uid).lane_scroll_y.unwrap();
+        let shown = pattern
+            .notes
+            .iter()
+            .filter(|n| {
+                let y = rows.row_near(n.pitch) as f32 * ROW_H;
+                y >= top && y + ROW_H <= top + height
+            })
+            .count();
+        (shown, pattern.notes.len())
+    }
+
+    #[test]
+    fn a_lane_first_shows_its_notes() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let ctx = egui::Context::default();
+        lane_frame(&mut app, &ctx, SYNTH2, 0.0, vec![]);
+        lane_frame(&mut app, &ctx, SYNTH1, 0.0, vec![]);
+        let (shown, all) = pitches_in_view(&mut app, SYNTH2);
+        assert!(
+            all > 0 && shown > 0,
+            "Synth 2: {shown} of {all} notes in view"
+        );
+        let (shown, all) = pitches_in_view(&mut app, SYNTH1);
+        assert!(shown * 2 > all, "Synth 1: {shown} of {all} notes in view");
+    }
+
+    #[test]
+    fn an_empty_lane_first_centres_on_its_start_pitch() {
+        let mut app = fm_app();
+        let ctx = egui::Context::default();
+        lane_frame(&mut app, &ctx, FM, 0.0, vec![]);
+        let height = app.doc.project.machine(FM).unwrap().lane.clamped_height() as f32;
+        let pitch = app.roll_start_pitch(FM);
+        assert_eq!(
+            app.view.panel(FM).lane_scroll_y,
+            Some(centred_y(&Rows::Pitches, height, pitch))
+        );
     }
 
     #[test]
