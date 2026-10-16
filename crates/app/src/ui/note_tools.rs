@@ -1,5 +1,6 @@
-//! The dock's note tools that change timing or pitch: Quantize, Humanize,
-//! Legato, Reverse, Invert and Strum. Each is a pure function from a
+//! The dock's note tools. Timing and pitch: Quantize, Humanize,
+//! Legato, Reverse, Invert and Strum (the generators below add and remove
+//! notes; see their section). Each is a pure function from a
 //! pattern and a scope (indices of the notes it acts on) to the new
 //! pattern and the scope notes' new indices. Notes are edited in place, so
 //! the vector's order never changes (the engine keys its played-record
@@ -12,7 +13,8 @@
 use super::key_entry::LaneKind;
 use super::note_ops;
 use super::poly_edit::Snap;
-use acid_engine::project::{Note, NotePattern, STEPS, TICKS_PER_STEP};
+use acid_engine::project::{MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
+use acid_engine::scale::Key;
 
 /// Ticks a pattern can hold: starts stay below this.
 fn limit() -> u16 {
@@ -312,9 +314,358 @@ pub fn strum(
     finish(p, q, &scope, kind)
 }
 
+// --- generators ---
+//
+// Randomize in scale, Arpeggiate and Euclidean add and remove notes. They
+// keep the vector's order where they can: surviving notes stay where they
+// were (Arpeggiate edits a chord's notes in place), new notes are appended,
+// and removed notes close up. New and changed notes are then settled for
+// the lane kind; no tool grows the pattern past `MAX_NOTES`.
+
+/// The time a generator works over: the visible scope's span (first start
+/// to last end, cut at the pattern end), or the whole pattern when the
+/// visible scope is empty.
+fn span(p: &NotePattern, edit: &[usize]) -> (u16, u16) {
+    let ticks = p.ticks();
+    match edit.iter().map(|&i| p.notes[i].start).min() {
+        Some(lo) => {
+            let hi = edit.iter().map(|&i| end(&p.notes[i])).max().unwrap_or(lo);
+            (lo, hi.min(ticks))
+        }
+        None => (0, ticks),
+    }
+}
+
+/// The grid lines of `g` ticks from `lo` (inclusive) to `hi` (exclusive).
+fn cells(lo: u16, hi: u16, g: u16) -> impl Iterator<Item = u16> {
+    (lo.div_ceil(g) * g..hi).step_by(g as usize)
+}
+
+/// A seeded roll for cell (or step) `k`'s `field`.
+fn roll(seed: u64, k: usize, field: u64) -> u64 {
+    mix(seed ^ mix(((k as u64) << 2) | field))
+}
+
+/// Builds the result from `slots` (each old note's new value, `None` when
+/// removed) and `added` (appended, up to `MAX_NOTES`), settles every
+/// changed or added note, and returns it with the new indices of the
+/// surviving `keep` notes followed by the added ones. When nothing changed
+/// the pattern is returned as it was.
+fn rebuild(
+    p: &NotePattern,
+    slots: Vec<Option<Note>>,
+    added: Vec<Note>,
+    keep: &[usize],
+    kind: LaneKind,
+) -> (NotePattern, Vec<usize>) {
+    let mut q = p.clone();
+    q.notes.clear();
+    let mut at = vec![None; slots.len()];
+    let mut touched = Vec::new();
+    for (i, slot) in slots.into_iter().enumerate() {
+        if let Some(n) = slot {
+            if n != p.notes[i] {
+                touched.push(q.notes.len());
+            }
+            at[i] = Some(q.notes.len());
+            q.notes.push(n);
+        }
+    }
+    let first = q.notes.len();
+    q.notes
+        .extend(added.into_iter().take(MAX_NOTES.saturating_sub(first)));
+    touched.extend(first..q.notes.len());
+    let sel: Vec<usize> = keep
+        .iter()
+        .filter_map(|&i| at[i])
+        .chain(first..q.notes.len())
+        .collect();
+    if q.notes == p.notes {
+        return (q, sel);
+    }
+    let map = note_ops::settle_map(&mut q, &touched, kind);
+    let sel = sel.into_iter().filter_map(|i| map[i]).collect();
+    (q, sel)
+}
+
+fn ordered(a: u8, b: u8) -> (u8, u8) {
+    (a.min(b), a.max(b))
+}
+
+/// Randomize in scale: the visible scope's notes are replaced by new ones
+/// on the `snap` grid across the scope's span, one per grid line with a
+/// `density` % chance, pitched in `key` within the pitch range (any pitch
+/// when the key is Chromatic; the nearest in-key pitch when the range
+/// holds none) or a random instrument on drums, `len_min..=len_max` grid
+/// steps long (cut at the span end). The same seed gives the same notes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Randomize {
+    /// 10..=100 %.
+    pub density: u8,
+    pub pitch_lo: u8,
+    pub pitch_hi: u8,
+    /// Lengths in snap units.
+    pub len_min: u8,
+    pub len_max: u8,
+    pub seed: u64,
+}
+
+impl Default for Randomize {
+    fn default() -> Self {
+        Self {
+            density: 50,
+            pitch_lo: 48,
+            pitch_hi: 72,
+            len_min: 1,
+            len_max: 2,
+            seed: 1,
+        }
+    }
+}
+
+/// Returns the new notes' indices.
+pub fn randomize(
+    p: &NotePattern,
+    scope: &[usize],
+    params: &Randomize,
+    kind: LaneKind,
+    key: Key,
+    snap: Snap,
+) -> (NotePattern, Vec<usize>) {
+    let (_, edit) = split(p, scope);
+    let (lo, hi) = span(p, &edit);
+    let g = snap.ticks().max(1);
+    let density = params.density.min(100) as u64;
+    let (plo, phi) = ordered(params.pitch_lo.min(127), params.pitch_hi.min(127));
+    let (lmin, lmax) = ordered(params.len_min.max(1), params.len_max.max(1));
+    let pool: Vec<u8> = if kind == LaneKind::Drums {
+        (0..8).collect()
+    } else {
+        (plo..=phi).filter(|&x| key.contains(x)).collect()
+    };
+    let seed = params.seed;
+    let mut added = Vec::new();
+    for (k, t) in cells(lo, hi, g).enumerate() {
+        if roll(seed, k, 0) % 100 >= density {
+            continue;
+        }
+        let pitch = if pool.is_empty() {
+            key.snap(plo + (roll(seed, k, 1) % (phi - plo + 1) as u64) as u8)
+        } else {
+            pool[(roll(seed, k, 1) % pool.len() as u64) as usize]
+        };
+        let units = lmin as u64 + roll(seed, k, 2) % (lmax - lmin + 1) as u64;
+        let len = (units * g as u64).min((hi - t) as u64).max(1) as u16;
+        added.push(Note::new(t, len, pitch, 100));
+    }
+    let mut slots: Vec<Option<Note>> = p.notes.iter().copied().map(Some).collect();
+    for &i in &edit {
+        slots[i] = None;
+    }
+    rebuild(p, slots, added, &[], kind)
+}
+
+/// The order Arpeggiate walks a chord's pitches in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArpStyle {
+    #[default]
+    Up,
+    Down,
+    /// Up then down, not repeating the top and bottom.
+    UpDown,
+    /// A seeded random pitch each step.
+    Random,
+}
+
+/// Arpeggiate: visible scope notes sharing a start (a chord of two or
+/// more) become a sequence through the chord's pitches, one every `rate`
+/// from the chord's start to its last end, each `gate` % of `rate` long
+/// (at least 1 tick, cut at the chord's end) and copying the fields of the
+/// chord note it takes its pitch from. The chord's notes are reused in
+/// place for the first steps (unused ones are removed), further steps are
+/// appended. Single notes are unchanged. Melodic lanes only: drums are
+/// unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arp {
+    pub style: ArpStyle,
+    pub rate: Snap,
+    /// 10..=100 %.
+    pub gate: u8,
+    /// For `ArpStyle::Random`.
+    pub seed: u64,
+}
+
+impl Default for Arp {
+    fn default() -> Self {
+        Self {
+            style: ArpStyle::Up,
+            rate: Snap::Step,
+            gate: 50,
+            seed: 1,
+        }
+    }
+}
+
+pub fn arpeggiate(
+    p: &NotePattern,
+    scope: &[usize],
+    params: &Arp,
+    kind: LaneKind,
+) -> (NotePattern, Vec<usize>) {
+    let (scope, edit) = split(p, scope);
+    if kind == LaneKind::Drums {
+        return (p.clone(), scope);
+    }
+    let rate = params.rate.ticks().max(1);
+    let len = ((rate as u32 * params.gate.clamp(1, 100) as u32 / 100) as u16).max(1);
+    let ticks = p.ticks();
+    let mut slots: Vec<Option<Note>> = p.notes.iter().copied().map(Some).collect();
+    let mut added = Vec::new();
+    let mut starts: Vec<u16> = edit.iter().map(|&i| p.notes[i].start).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    for s in starts {
+        // In vector order: the notes reused for the steps.
+        let chord: Vec<usize> = edit
+            .iter()
+            .copied()
+            .filter(|&i| p.notes[i].start == s)
+            .collect();
+        let n = chord.len();
+        if n < 2 {
+            continue;
+        }
+        let mut by_pitch = chord.clone();
+        by_pitch.sort_by_key(|&i| (p.notes[i].pitch, i));
+        let chord_end = chord
+            .iter()
+            .map(|&i| end(&p.notes[i]))
+            .max()
+            .unwrap_or(s)
+            .min(ticks);
+        let mut k = 0;
+        let mut t = s;
+        while t < chord_end {
+            let j = match params.style {
+                ArpStyle::Up => k % n,
+                ArpStyle::Down => n - 1 - k % n,
+                ArpStyle::UpDown => {
+                    let period = 2 * n - 2;
+                    let m = k % period;
+                    if m < n { m } else { period - m }
+                }
+                ArpStyle::Random => (roll(params.seed ^ mix(s as u64), k, 3) % n as u64) as usize,
+            };
+            let mut note = p.notes[by_pitch[j]];
+            note.start = t;
+            note.len = len.min(chord_end - t);
+            if k < n {
+                slots[chord[k]] = Some(note);
+            } else {
+                added.push(note);
+            }
+            k += 1;
+            t += rate;
+        }
+        for &i in &chord[k.min(n)..] {
+            slots[i] = None;
+        }
+    }
+    rebuild(p, slots, added, &scope, kind)
+}
+
+/// Euclidean: `hits` notes spread as evenly as they go over `steps` grid
+/// cells of `snap` from the span's first grid line (Bjorklund: E(3,8) =
+/// x..x..x.), the pattern shifted `rotation` cells later, each one cell
+/// long, on `pitch` (drums: that row, 0..8). `steps` is capped at the
+/// cells the span holds. Visible scope notes on that pitch are replaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Euclid {
+    pub hits: u8,
+    /// 1..=64.
+    pub steps: u8,
+    pub rotation: u8,
+    /// A MIDI pitch, or the drum row.
+    pub pitch: u8,
+}
+
+impl Default for Euclid {
+    fn default() -> Self {
+        Self {
+            hits: 3,
+            steps: 8,
+            rotation: 0,
+            pitch: 60,
+        }
+    }
+}
+
+/// Bjorklund's even spread of `hits` onsets over `steps`.
+fn bjorklund(hits: usize, steps: usize) -> Vec<bool> {
+    if hits >= steps {
+        return vec![true; steps];
+    }
+    if hits == 0 {
+        return vec![false; steps];
+    }
+    let mut a: Vec<Vec<bool>> = vec![vec![true]; hits];
+    let mut b: Vec<Vec<bool>> = vec![vec![false]; steps - hits];
+    while b.len() > 1 {
+        let m = a.len().min(b.len());
+        let rest = if a.len() > m {
+            a[m..].to_vec()
+        } else {
+            b[m..].to_vec()
+        };
+        for (x, y) in a.iter_mut().zip(&b) {
+            x.extend(y);
+        }
+        a.truncate(m);
+        b = rest;
+    }
+    a.into_iter().chain(b).flatten().collect()
+}
+
+pub fn euclid(
+    p: &NotePattern,
+    scope: &[usize],
+    params: &Euclid,
+    kind: LaneKind,
+    snap: Snap,
+) -> (NotePattern, Vec<usize>) {
+    let (scope, edit) = split(p, scope);
+    let (lo, hi) = span(p, &edit);
+    let g = snap.ticks().max(1);
+    let cells: Vec<u16> = cells(lo, hi, g).collect();
+    let steps = (params.steps.clamp(1, 64) as usize).min(cells.len());
+    let pitch = if kind == LaneKind::Drums {
+        params.pitch.min(7)
+    } else {
+        params.pitch.min(127)
+    };
+    let mut added = Vec::new();
+    if steps > 0 {
+        let onsets = bjorklund(params.hits as usize, steps);
+        let rot = params.rotation as usize % steps;
+        for (c, &t) in cells.iter().take(steps).enumerate() {
+            if onsets[(c + steps - rot) % steps] {
+                added.push(Note::new(t, g.min(hi - t).max(1), pitch, 100));
+            }
+        }
+    }
+    let mut slots: Vec<Option<Note>> = p.notes.iter().copied().map(Some).collect();
+    for &i in &edit {
+        if p.notes[i].pitch == pitch {
+            slots[i] = None;
+        }
+    }
+    rebuild(p, slots, added, &scope, kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acid_engine::scale::Scale;
 
     fn pat(notes: &[(u16, u16, u8)]) -> NotePattern {
         NotePattern {
@@ -717,5 +1068,388 @@ mod tests {
         assert_eq!(strum(&d, &all(&d), &Strum::default(), LaneKind::Drums).0, d);
         let p = pat(&[(4, 2, 60)]);
         assert_eq!(strum(&p, &[0], &Strum::default(), LaneKind::Acid).0, p);
+    }
+
+    // --- randomize ---
+
+    fn c_minor() -> Key {
+        Key {
+            root: 0,
+            scale: Scale::Minor,
+            snap: false,
+        }
+    }
+
+    fn rnd(seed: u64) -> Randomize {
+        Randomize {
+            density: 60,
+            pitch_lo: 48,
+            pitch_hi: 72,
+            len_min: 1,
+            len_max: 3,
+            seed,
+        }
+    }
+
+    #[test]
+    fn randomize_is_the_same_for_the_same_seed() {
+        let p = pat(&[]);
+        let k = LaneKind::Poly;
+        let a = randomize(&p, &[], &rnd(5), k, c_minor(), Snap::Step);
+        assert!(!a.0.notes.is_empty());
+        assert_eq!(a, randomize(&p, &[], &rnd(5), k, c_minor(), Snap::Step));
+        let b = randomize(&p, &[], &rnd(6), k, c_minor(), Snap::Step);
+        assert_ne!(a.0, b.0);
+    }
+
+    #[test]
+    fn randomize_stays_in_the_key_the_range_and_the_grid() {
+        let p = pat(&[]);
+        for seed in 0..40 {
+            let (q, idx) = randomize(&p, &[], &rnd(seed), LaneKind::Poly, c_minor(), Snap::Step);
+            assert_eq!(idx, all(&q));
+            for n in &q.notes {
+                assert!(c_minor().contains(n.pitch), "{} out of key", n.pitch);
+                assert!((48..=72).contains(&n.pitch));
+                assert_eq!(n.start % 4, 0);
+                assert!(n.start < 64 && end(n) <= 64);
+            }
+        }
+    }
+
+    #[test]
+    fn randomize_chromatic_uses_any_pitch_in_the_range() {
+        let p = pat(&[]);
+        let mut seen = [false; 128];
+        for seed in 0..40 {
+            let (q, _) = randomize(
+                &p,
+                &[],
+                &rnd(seed),
+                LaneKind::Poly,
+                Key::default(),
+                Snap::Step,
+            );
+            for n in &q.notes {
+                assert!((48..=72).contains(&n.pitch));
+                seen[n.pitch as usize] = true;
+            }
+        }
+        assert!(
+            (48..=72)
+                .filter(|&p| !c_minor().contains(p))
+                .any(|p| seen[p as usize])
+        );
+    }
+
+    #[test]
+    fn randomize_replaces_the_scope_over_its_span() {
+        // Scope 0 and 1 spans 8..24 (four steps); note 2 stays.
+        let p = pat(&[(8, 4, 60), (20, 4, 62), (40, 4, 64)]);
+        let params = Randomize {
+            density: 100,
+            len_min: 1,
+            len_max: 1,
+            ..rnd(3)
+        };
+        let (q, idx) = randomize(&p, &[0, 1], &params, LaneKind::Poly, c_minor(), Snap::Step);
+        assert_eq!(q.notes.len(), 5);
+        assert_eq!(spans(&q)[0], (40, 4, 64));
+        let starts: Vec<u16> = q.notes[1..].iter().map(|n| n.start).collect();
+        assert_eq!(starts, vec![8, 12, 16, 20]);
+        assert!(q.notes[1..].iter().all(|n| n.len == 4));
+        assert_eq!(idx, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn randomize_lengths_stay_in_the_range_and_the_span() {
+        let p = pat(&[(0, 4, 60), (8, 6, 62)]);
+        let params = Randomize {
+            density: 100,
+            len_min: 2,
+            len_max: 3,
+            ..rnd(11)
+        };
+        let (q, _) = randomize(&p, &[0, 1], &params, LaneKind::Poly, c_minor(), Snap::Step);
+        // Span 0..14: cells 0, 4, 8 and 12, 8 or 12 ticks long, cut at 14
+        // (same-pitch overlaps merge into longer notes).
+        assert!(!q.notes.is_empty());
+        for n in &q.notes {
+            assert_eq!(n.start % 4, 0);
+            assert!(end(n) <= 14);
+            assert!(n.len >= 8 || end(n) == 14);
+        }
+    }
+
+    #[test]
+    fn randomize_drums_uses_instrument_rows() {
+        let p = pat(&[]);
+        let mut rows = [false; 8];
+        for seed in 0..20 {
+            let (q, _) = randomize(&p, &[], &rnd(seed), LaneKind::Drums, c_minor(), Snap::Step);
+            for n in &q.notes {
+                assert!(n.pitch < 8);
+                rows[n.pitch as usize] = true;
+            }
+        }
+        assert!(rows.iter().all(|&r| r));
+    }
+
+    #[test]
+    fn randomize_acid_is_one_note_at_a_time() {
+        let p = pat(&[]);
+        let params = Randomize {
+            density: 100,
+            len_min: 2,
+            len_max: 4,
+            ..rnd(9)
+        };
+        let (q, idx) = randomize(&p, &[], &params, LaneKind::Acid, c_minor(), Snap::Step);
+        assert_eq!(idx, all(&q));
+        let mut s = q.notes.clone();
+        s.sort_by_key(|n| n.start);
+        for w in s.windows(2) {
+            assert!(end(&w[0]) <= w[1].start);
+        }
+    }
+
+    #[test]
+    fn randomize_stops_at_the_note_cap() {
+        // Notes hidden past the end fill the pattern almost to the cap.
+        let mut p = pat(&[]);
+        p.notes = vec![Note::new(100, 1, 60, 100); MAX_NOTES - 2];
+        let params = Randomize {
+            density: 100,
+            len_min: 1,
+            len_max: 1,
+            ..rnd(1)
+        };
+        let (q, idx) = randomize(&p, &[], &params, LaneKind::Drums, c_minor(), Snap::Step);
+        assert_eq!(q.notes.len(), MAX_NOTES);
+        assert_eq!(idx, vec![MAX_NOTES - 2, MAX_NOTES - 1]);
+    }
+
+    #[test]
+    fn randomize_empty_scope_fills_the_pattern() {
+        let p = pat(&[]);
+        let params = Randomize {
+            density: 100,
+            len_min: 1,
+            len_max: 1,
+            ..rnd(2)
+        };
+        let (q, _) = randomize(&p, &[], &params, LaneKind::Poly, c_minor(), Snap::Quarter);
+        let starts: Vec<u16> = q.notes.iter().map(|n| n.start).collect();
+        assert_eq!(starts, vec![0, 16, 32, 48]);
+    }
+
+    // --- arpeggiate ---
+
+    fn arp(style: ArpStyle) -> Arp {
+        Arp {
+            style,
+            rate: Snap::Step,
+            gate: 50,
+            seed: 1,
+        }
+    }
+
+    #[test]
+    fn arp_up_runs_through_the_chord_in_place() {
+        let p = pat(&[(0, 16, 64), (0, 16, 60), (0, 16, 67), (16, 4, 62)]);
+        let (q, idx) = arpeggiate(&p, &all(&p), &arp(ArpStyle::Up), LaneKind::Poly);
+        assert_eq!(
+            spans(&q),
+            vec![(0, 2, 60), (4, 2, 64), (8, 2, 67), (16, 4, 62), (12, 2, 60)]
+        );
+        assert_eq!(idx, vec![0, 1, 2, 3, 4]);
+    }
+
+    fn pitches(q: &NotePattern) -> Vec<u8> {
+        let mut n = q.notes.clone();
+        n.sort_by_key(|n| n.start);
+        n.iter().map(|n| n.pitch).collect()
+    }
+
+    #[test]
+    fn arp_down_and_up_down() {
+        let p = pat(&[(0, 24, 60), (0, 24, 64), (0, 24, 67)]);
+        let k = LaneKind::Poly;
+        let down = arpeggiate(&p, &all(&p), &arp(ArpStyle::Down), k).0;
+        assert_eq!(pitches(&down), vec![67, 64, 60, 67, 64, 60]);
+        let ud = arpeggiate(&p, &all(&p), &arp(ArpStyle::UpDown), k).0;
+        assert_eq!(pitches(&ud), vec![60, 64, 67, 64, 60, 64]);
+    }
+
+    #[test]
+    fn arp_random_is_seeded_and_uses_chord_pitches() {
+        let p = pat(&[(0, 64, 60), (0, 64, 64), (0, 64, 67)]);
+        let k = LaneKind::Poly;
+        let a = arpeggiate(&p, &all(&p), &arp(ArpStyle::Random), k);
+        assert_eq!(a, arpeggiate(&p, &all(&p), &arp(ArpStyle::Random), k));
+        assert_eq!(a.0.notes.len(), 16);
+        assert!(a.0.notes.iter().all(|n| [60, 64, 67].contains(&n.pitch)));
+        let b = arpeggiate(
+            &p,
+            &all(&p),
+            &Arp {
+                seed: 2,
+                ..arp(ArpStyle::Random)
+            },
+            k,
+        );
+        assert_ne!(pitches(&a.0), pitches(&b.0));
+    }
+
+    #[test]
+    fn arp_short_chord_drops_unused_notes_and_keeps_fields() {
+        let mut p = pat(&[(0, 8, 64), (0, 8, 60), (0, 8, 67)]);
+        p.notes[1].vel = 50;
+        let params = Arp {
+            gate: 100,
+            ..arp(ArpStyle::Up)
+        };
+        let (q, idx) = arpeggiate(&p, &all(&p), &params, LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(0, 4, 60), (4, 4, 64)]);
+        assert_eq!(q.notes[0].vel, 50);
+        assert_eq!(q.notes[1].vel, 100);
+        assert_eq!(idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn arp_gate_keeps_a_tick_and_clips_to_the_chord() {
+        let p = pat(&[(0, 6, 60), (0, 6, 64)]);
+        let params = Arp {
+            gate: 10,
+            ..arp(ArpStyle::Up)
+        };
+        let (q, _) = arpeggiate(&p, &all(&p), &params, LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(0, 1, 60), (4, 1, 64)]);
+        let full = Arp {
+            gate: 100,
+            ..arp(ArpStyle::Up)
+        };
+        let (q, _) = arpeggiate(&p, &all(&p), &full, LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(0, 4, 60), (4, 2, 64)]);
+    }
+
+    #[test]
+    fn arp_leaves_drums_single_notes_and_empty_scopes() {
+        let d = pat(&[(0, 8, 0), (0, 8, 1)]);
+        let a = arp(ArpStyle::Up);
+        assert_eq!(arpeggiate(&d, &all(&d), &a, LaneKind::Drums).0, d);
+        let p = pat(&[(0, 8, 60), (8, 8, 64)]);
+        assert_eq!(arpeggiate(&p, &all(&p), &a, LaneKind::Poly).0, p);
+        let c = pat(&[(0, 8, 60), (0, 8, 64)]);
+        assert_eq!(arpeggiate(&c, &[], &a, LaneKind::Poly).0, c);
+    }
+
+    // --- euclid ---
+
+    fn eu(hits: u8, steps: u8, rotation: u8, pitch: u8) -> Euclid {
+        Euclid {
+            hits,
+            steps,
+            rotation,
+            pitch,
+        }
+    }
+
+    fn starts(q: &NotePattern) -> Vec<u16> {
+        q.notes.iter().map(|n| n.start).collect()
+    }
+
+    #[test]
+    fn euclid_three_in_eight() {
+        let p = pat(&[]);
+        let (q, idx) = euclid(&p, &[], &eu(3, 8, 0, 60), LaneKind::Poly, Snap::Step);
+        // x..x..x.
+        assert_eq!(spans(&q), vec![(0, 4, 60), (12, 4, 60), (24, 4, 60)]);
+        assert_eq!(idx, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn euclid_five_in_eight() {
+        let p = pat(&[]);
+        let (q, _) = euclid(&p, &[], &eu(5, 8, 0, 60), LaneKind::Poly, Snap::Step);
+        // x.xx.xx.
+        assert_eq!(starts(&q), vec![0, 8, 12, 20, 24]);
+    }
+
+    #[test]
+    fn euclid_rotation_shifts_later() {
+        let p = pat(&[]);
+        let (q, _) = euclid(&p, &[], &eu(3, 8, 1, 60), LaneKind::Poly, Snap::Step);
+        // .x..x..x
+        assert_eq!(starts(&q), vec![4, 16, 28]);
+        let (q, _) = euclid(&p, &[], &eu(3, 8, 9, 60), LaneKind::Poly, Snap::Step);
+        assert_eq!(starts(&q), vec![4, 16, 28]);
+    }
+
+    #[test]
+    fn euclid_drums_use_the_row() {
+        let p = pat(&[]);
+        let (q, _) = euclid(&p, &[], &eu(2, 4, 0, 3), LaneKind::Drums, Snap::Step);
+        assert_eq!(spans(&q), vec![(0, 4, 3), (8, 4, 3)]);
+        let (q, _) = euclid(&p, &[], &eu(1, 4, 0, 12), LaneKind::Drums, Snap::Step);
+        assert_eq!(q.notes[0].pitch, 7);
+    }
+
+    #[test]
+    fn euclid_replaces_only_that_pitch_in_the_span() {
+        // Span 0..12 (three steps); the 60s go, 62 and the outside note stay.
+        let p = pat(&[(0, 4, 60), (4, 4, 60), (8, 4, 62), (40, 4, 60)]);
+        let (q, idx) = euclid(&p, &[0, 1, 2], &eu(1, 3, 0, 60), LaneKind::Poly, Snap::Step);
+        assert_eq!(spans(&q), vec![(8, 4, 62), (40, 4, 60), (0, 4, 60)]);
+        assert_eq!(idx, vec![0, 2]);
+    }
+
+    #[test]
+    fn euclid_caps_steps_at_the_cells() {
+        let p = pat(&[(0, 4, 50), (12, 4, 50)]);
+        let (q, _) = euclid(&p, &[0, 1], &eu(8, 8, 0, 60), LaneKind::Poly, Snap::Step);
+        assert_eq!(starts(&q), vec![0, 12, 0, 4, 8, 12]);
+    }
+
+    #[test]
+    fn euclid_acid_settles_against_its_neighbours() {
+        let p = pat(&[(2, 8, 62)]);
+        let (q, idx) = euclid(&p, &[], &eu(2, 4, 0, 60), LaneKind::Acid, Snap::Quarter);
+        assert_eq!(spans(&q), vec![(0, 16, 60), (32, 16, 60)]);
+        assert_eq!(idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn euclid_no_hits_changes_nothing() {
+        let p = pat(&[(0, 4, 50)]);
+        assert_eq!(
+            euclid(&p, &[0], &eu(0, 8, 0, 60), LaneKind::Poly, Snap::Step),
+            (p.clone(), vec![0])
+        );
+    }
+
+    #[test]
+    fn generators_leave_hidden_selected_notes_alone() {
+        // Note 1 is past the end (64): it stays, and the span is note 0's.
+        let p = pat(&[(8, 8, 60), (70, 3, 60), (8, 8, 64)]);
+        let r = Randomize {
+            density: 100,
+            len_min: 1,
+            len_max: 1,
+            ..rnd(4)
+        };
+        let k = LaneKind::Poly;
+        let (q, _) = randomize(&p, &[0, 1, 2], &r, k, c_minor(), Snap::Step);
+        assert_eq!(q.notes[0], p.notes[1]);
+        assert_eq!(starts(&q), vec![70, 8, 12]);
+        let (q, idx) = arpeggiate(&p, &[0, 1, 2], &arp(ArpStyle::Up), k);
+        assert_eq!(q.notes[1], p.notes[1]);
+        assert_eq!(idx, vec![0, 1, 2]);
+        let (q, idx) = euclid(&p, &[0, 1, 2], &eu(2, 2, 0, 60), k, Snap::Step);
+        assert_eq!(
+            spans(&q),
+            vec![(70, 3, 60), (8, 8, 64), (8, 4, 60), (12, 4, 60)]
+        );
+        assert_eq!(idx, vec![0, 1, 2, 3]);
     }
 }
