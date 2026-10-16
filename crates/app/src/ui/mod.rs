@@ -123,9 +123,23 @@ impl Default for DockState {
     }
 }
 
+/// Notes copied from the dock's lanes, starts relative to the clip's
+/// origin: one lane (pastes into the focused lane) or every lane of a
+/// ruler range (pastes back into the same machines).
+#[derive(Clone, Debug)]
+pub(crate) struct NoteClip {
+    pub lanes: Vec<(
+        MachineUid,
+        key_entry::LaneKind,
+        Vec<acid_engine::project::Note>,
+    )>,
+}
+
 #[derive(Default)]
 pub struct ViewState {
     pub dock: DockState,
+    /// The dock's note clipboard (Ctrl+C/X with the dock focused).
+    pub(crate) note_clip: Option<NoteClip>,
     pub audio_window: audio_settings::AudioWindow,
     /// Machine that keyboard shortcuts act on; None (or a uid no longer in
     /// the rack) means the first machine (see `SidAcidApp::focused`).

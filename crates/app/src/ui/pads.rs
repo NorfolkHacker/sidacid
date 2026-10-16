@@ -52,6 +52,8 @@ impl SidAcidApp {
     pub(crate) fn select_pad(&mut self, uid: MachineUid, slot: u8) {
         let cmds = self.doc.select_pattern(uid, slot);
         self.send(cmds);
+        // A ruler range picked notes from the old patterns.
+        self.view.dock.range = None;
         self.view.focus = Some(uid);
         self.record_pattern_change(uid, slot);
     }

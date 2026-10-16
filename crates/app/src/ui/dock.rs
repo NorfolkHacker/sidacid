@@ -3,10 +3,14 @@
 //! every machine's lane stacked in rack order. Its height is a share of
 //! the window kept in the settings file.
 
+use super::key_entry::LaneKind;
 use super::lane_geom::{ZOOMS, follow_scroll, tick_w};
+use super::note_ops::PasteError;
 use super::poly_edit::Snap;
-use super::{SidAcidApp, theme};
-use acid_engine::project::TICKS_PER_STEP;
+use super::{NoteClip, SidAcidApp, theme};
+use crate::document::Edit;
+use acid_engine::machine::MachineUid;
+use acid_engine::project::{Note, NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 /// Height of the ruler above the lanes.
@@ -318,14 +322,22 @@ impl SidAcidApp {
 
 impl SidAcidApp {
     /// Apply one key press to the focused machine's selected pattern when
-    /// the dock has the keyboard. True when the key was used, even if it
-    /// only moved the cursor.
+    /// the dock has the keyboard: first as a selection key (when the lane
+    /// has a selection), else as keyboard entry. True when the key was
+    /// used, even if it only moved the cursor.
     pub(crate) fn dock_key(&mut self, key: egui::Key, mods: egui::Modifiers) -> bool {
         use super::key_entry::{apply_entry, entry_key};
         if !self.view.dock.keyboard {
             return false;
         }
-        let (Some(uid), Some(entry)) = (self.focused(), entry_key(key, mods)) else {
+        let Some(uid) = self.focused() else {
+            return false;
+        };
+        // Ahead of `entry_key`, which turns down Alt.
+        if let Some(used) = self.selection_key(uid, key, mods) {
+            return used;
+        }
+        let Some(entry) = entry_key(key, mods) else {
             return false;
         };
         let slot = self.selected(uid);
@@ -341,6 +353,280 @@ impl SidAcidApp {
             self.commit_poly(uid, slot, Some(pattern), false, true);
         }
         true
+    }
+
+    /// A key acting on `uid`'s selection: arrows move it (Alt: by ticks;
+    /// Shift+up/down: by octaves on melodic lanes), Delete/Backspace remove
+    /// it, Esc clears it and the ruler range. `None` when the key is not
+    /// one of these or there is nothing selected, so it goes on to entry.
+    fn selection_key(
+        &mut self,
+        uid: MachineUid,
+        key: egui::Key,
+        mods: egui::Modifiers,
+    ) -> Option<bool> {
+        use super::note_ops::{delete, settle, shift, values};
+        use egui::Key;
+        if mods.command || mods.ctrl {
+            return None;
+        }
+        let sel = self.selection(uid);
+        if key == Key::Escape {
+            if self.view.dock.range.take().is_some() {
+                for panel in self.view.panels.values_mut() {
+                    panel.selected.clear();
+                }
+            } else if sel.is_empty() {
+                return None;
+            }
+            self.set_selection(uid, Vec::new());
+            return Some(true);
+        }
+        if sel.is_empty() {
+            return None;
+        }
+        let kind = self.lane_kind(uid);
+        let step = if mods.alt {
+            1
+        } else {
+            self.view.dock.snap.ticks() as i32
+        };
+        let octave = if kind == LaneKind::Drums { 0 } else { 12 };
+        let pitch = if mods.shift { octave } else { 1 };
+        let (dt, dp) = match key {
+            Key::ArrowLeft => (-step, 0),
+            Key::ArrowRight => (step, 0),
+            Key::ArrowUp => (0, pitch),
+            Key::ArrowDown => (0, -pitch),
+            Key::Delete | Key::Backspace => (0, 0),
+            _ => return None,
+        };
+        let slot = self.selected(uid);
+        let mut pattern = self.doc.project.roll(uid, slot)?.clone();
+        if matches!(key, Key::Delete | Key::Backspace) {
+            delete(&mut pattern, &sel);
+            self.set_selection(uid, Vec::new());
+        } else if (dt, dp) != (0, 0) {
+            let moved = shift(&mut pattern, &sel, dt, dp, kind);
+            let kept = settle(&mut pattern, &moved, kind);
+            self.set_selection(uid, values(&pattern, &kept));
+        }
+        // The range no longer describes what is selected.
+        self.view.dock.range = None;
+        self.commit_poly(uid, slot, Some(pattern), false, true);
+        Some(true)
+    }
+
+    /// Applies one undo step of note pattern edits (a group when there
+    /// are several) and sends their commands.
+    fn apply_note_edits(&mut self, mut edits: Vec<(MachineUid, u8, NotePattern)>) {
+        let edit = |(uid, slot, p): (MachineUid, u8, NotePattern)| Edit::NotePattern {
+            uid,
+            slot,
+            pattern: Box::new(p),
+        };
+        let edit = match edits.len() {
+            0 => return,
+            1 => edit(edits.remove(0)),
+            _ => Edit::Group(edits.into_iter().map(edit).collect()),
+        };
+        let cmds = self.doc.apply(edit, false);
+        self.send(cmds);
+        self.doc.end_gesture();
+    }
+
+    /// Shows why a paste was refused.
+    fn paste_refused(&mut self, e: PasteError) {
+        self.view.message = Some(
+            match e {
+                PasteError::TooMany => "That paste would put more than 512 notes in the pattern",
+                PasteError::WrongKind => "Melodic notes can't be pasted onto drums",
+            }
+            .into(),
+        );
+    }
+
+    /// Copies to the note clipboard: with a ruler range, every lane's notes
+    /// starting in it (relative to its start); else the focused lane's
+    /// selection, or the whole lane when nothing is selected (relative to
+    /// the earliest start). With `cut` the copied notes are then removed,
+    /// in one undo step. Nothing to copy leaves the clipboard as it was.
+    pub(crate) fn copy_notes(&mut self, cut: bool) {
+        use super::note_ops::{copy, delete, in_range};
+        let mut lanes = Vec::new();
+        let mut edits = Vec::new();
+        let mut take = |app: &mut Self, uid: MachineUid, idx: Vec<usize>, origin: u16| {
+            let slot = app.selected(uid);
+            let Some(p) = app.doc.project.roll(uid, slot) else {
+                return;
+            };
+            lanes.push((uid, app.lane_kind(uid), copy(p, &idx, origin)));
+            if cut && !idx.is_empty() {
+                let mut p = p.clone();
+                delete(&mut p, &idx);
+                edits.push((uid, slot, p));
+                app.set_selection(uid, Vec::new());
+            }
+        };
+        if let Some((lo, hi)) = self.view.dock.range {
+            for uid in self.doc.project.rack_uids() {
+                let Some(p) = self.doc.project.roll(uid, self.selected(uid)) else {
+                    continue;
+                };
+                let idx = in_range(p, lo, hi);
+                take(self, uid, idx, lo);
+            }
+        } else {
+            let Some(uid) = self.focused() else {
+                return;
+            };
+            let Some(p) = self.doc.project.roll(uid, self.selected(uid)) else {
+                return;
+            };
+            let mut idx = self.selection(uid);
+            if idx.is_empty() {
+                idx = (0..p.notes.len()).collect();
+            }
+            let Some(origin) = idx.iter().map(|&i| p.notes[i].start).min() else {
+                return;
+            };
+            take(self, uid, idx, origin);
+        }
+        if lanes.iter().all(|(_, _, notes)| notes.is_empty()) {
+            return;
+        }
+        self.view.note_clip = Some(NoteClip { lanes });
+        self.apply_note_edits(edits);
+    }
+
+    /// Pastes the note clipboard at the focused lane's cursor: a one-lane
+    /// clip into the focused lane (melodic onto melodic, drums onto
+    /// drums), a range clip back into the machines it came from (those no
+    /// longer in the rack are skipped). One undo step; the pasted notes
+    /// become each lane's selection. A refused paste changes nothing.
+    pub(crate) fn paste_notes(&mut self) {
+        use super::note_ops::{paste, values};
+        let (Some(clip), Some(focus)) = (self.view.note_clip.clone(), self.focused()) else {
+            return;
+        };
+        let melodic = |k: LaneKind| k != LaneKind::Drums;
+        let at = self.view.panel(focus).cursor.tick;
+        let targets: Vec<(MachineUid, &Vec<Note>)> = if let [(_, kind, notes)] = &clip.lanes[..] {
+            let to = self.lane_kind(focus);
+            if melodic(*kind) != melodic(to) {
+                self.view.message = Some(
+                    if melodic(to) {
+                        "Drum notes can't be pasted onto a melodic part"
+                    } else {
+                        "Melodic notes can't be pasted onto drums"
+                    }
+                    .into(),
+                );
+                return;
+            }
+            vec![(focus, notes)]
+        } else {
+            clip.lanes
+                .iter()
+                .filter(|(uid, kind, _)| {
+                    self.doc.project.machine(*uid).is_some()
+                        && melodic(*kind) == melodic(self.lane_kind(*uid))
+                })
+                .map(|(uid, _, notes)| (*uid, notes))
+                .collect()
+        };
+        let mut edits = Vec::new();
+        let mut selections = Vec::new();
+        for (uid, notes) in targets {
+            let slot = self.selected(uid);
+            let Some(mut p) = self.doc.project.roll(uid, slot).cloned() else {
+                continue;
+            };
+            if notes.is_empty() {
+                continue;
+            }
+            match paste(&mut p, notes, at, self.lane_kind(uid)) {
+                Ok(idx) => {
+                    selections.push((uid, values(&p, &idx)));
+                    edits.push((uid, slot, p));
+                }
+                Err(e) => return self.paste_refused(e),
+            }
+        }
+        for (uid, notes) in selections {
+            self.set_selection(uid, notes);
+        }
+        self.view.dock.range = None;
+        self.apply_note_edits(edits);
+    }
+
+    /// Pastes a copy of the focused lane's selection right after it (its
+    /// span rounded up to the snap). With a ruler range, every lane's
+    /// notes in the range are repeated one range length later instead,
+    /// and the range moves onto the copies. One undo step.
+    pub(crate) fn duplicate_notes(&mut self) {
+        use super::note_ops::{copy, duplicate, in_range, paste, values};
+        let mut edits = Vec::new();
+        let mut selections = Vec::new();
+        if let Some((lo, hi)) = self.view.dock.range {
+            for uid in self.doc.project.rack_uids() {
+                let slot = self.selected(uid);
+                let Some(mut p) = self.doc.project.roll(uid, slot).cloned() else {
+                    continue;
+                };
+                let idx = in_range(&p, lo, hi);
+                if idx.is_empty() {
+                    continue;
+                }
+                let clip = copy(&p, &idx, lo);
+                match paste(&mut p, &clip, hi, self.lane_kind(uid)) {
+                    Ok(idx) => {
+                        selections.push((uid, values(&p, &idx)));
+                        edits.push((uid, slot, p));
+                    }
+                    Err(e) => return self.paste_refused(e),
+                }
+            }
+            self.view.dock.range = Some((hi, hi.saturating_add(hi - lo)));
+        } else {
+            let Some(uid) = self.focused() else {
+                return;
+            };
+            let sel = self.selection(uid);
+            let slot = self.selected(uid);
+            let Some(mut p) = self.doc.project.roll(uid, slot).cloned() else {
+                return;
+            };
+            if sel.is_empty() {
+                return;
+            }
+            let snap = self.view.dock.snap.ticks();
+            match duplicate(&mut p, &sel, snap, self.lane_kind(uid)) {
+                Ok(idx) => {
+                    selections.push((uid, values(&p, &idx)));
+                    edits.push((uid, slot, p));
+                }
+                Err(e) => return self.paste_refused(e),
+            }
+        }
+        for (uid, notes) in selections {
+            self.set_selection(uid, notes);
+        }
+        self.apply_note_edits(edits);
+    }
+
+    /// Selects every note of the focused lane's pattern (and drops the
+    /// ruler range).
+    pub(crate) fn select_all_notes(&mut self) {
+        let Some(uid) = self.focused() else {
+            return;
+        };
+        let Some(p) = self.doc.project.roll(uid, self.selected(uid)) else {
+            return;
+        };
+        let notes = p.notes.clone();
+        self.set_selection(uid, notes);
+        self.view.dock.range = None;
     }
 }
 
@@ -848,5 +1134,354 @@ mod tests {
         drag(&mut app, &ctx, pos2(640.0, rect.top() + 120.0), -30.0);
         assert_eq!(app.settings.ui.dock_frac, 0.45);
         assert!(!app.view.dock.resizing);
+    }
+
+    fn notes_of(app: &SidAcidApp, uid: acid_engine::machine::MachineUid) -> Vec<(u16, u16, u8)> {
+        app.doc
+            .project
+            .roll(uid, 0)
+            .unwrap()
+            .notes
+            .iter()
+            .map(|n| (n.start, n.len, n.pitch))
+            .collect()
+    }
+
+    /// The test rack with `notes` in `uid`'s first pattern, dock focus on
+    /// `uid`, and `sel` (indices) selected.
+    fn sel_app(
+        uid: acid_engine::machine::MachineUid,
+        notes: &[(u16, u16, u8)],
+        sel: &[usize],
+    ) -> SidAcidApp {
+        use acid_engine::project::Note;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let p = app.doc.project.roll_mut(uid, 0).unwrap();
+        p.length = 64;
+        p.notes = notes
+            .iter()
+            .map(|&(s, l, pi)| Note::new(s, l, pi, 100))
+            .collect();
+        let chosen = sel.iter().map(|&i| p.notes[i]).collect();
+        app.view.focus = Some(uid);
+        app.view.dock.keyboard = true;
+        app.set_selection(uid, chosen);
+        app
+    }
+
+    #[test]
+    fn arrows_alt_and_shift_move_and_transpose_the_selection() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(FM, &[(0, 4, 60), (16, 4, 62)], &[0]);
+        let before = app.doc.project.clone();
+        assert!(app.dock_key(Key::ArrowRight, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM)[0], (4, 4, 60), "one snap");
+        assert!(app.dock_key(Key::ArrowRight, Modifiers::ALT));
+        assert_eq!(notes_of(&app, FM)[0], (5, 4, 60), "Alt: one tick");
+        assert!(app.dock_key(Key::ArrowLeft, Modifiers::ALT));
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM)[0], (4, 4, 61), "a semitone");
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::SHIFT));
+        assert_eq!(notes_of(&app, FM)[0], (4, 4, 73), "an octave");
+        assert!(app.dock_key(Key::ArrowDown, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM)[0], (4, 4, 72));
+        assert_eq!(app.selection(FM), vec![0], "still selected");
+        assert_eq!(notes_of(&app, FM)[1], (16, 4, 62), "the other note stays");
+        assert_eq!(app.view.panel(FM).cursor.tick, 0, "the cursor stays");
+        for _ in 0..6 {
+            app.undo();
+        }
+        assert_eq!(app.doc.project, before, "one undo per key");
+    }
+
+    #[test]
+    fn shift_arrows_do_not_transpose_drums() {
+        use crate::test_rack::KIT808;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(KIT808, &[(0, 4, 2)], &[0]);
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::SHIFT));
+        assert_eq!(notes_of(&app, KIT808), [(0, 4, 2)]);
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, KIT808), [(0, 4, 3)], "one row up");
+    }
+
+    #[test]
+    fn delete_removes_the_selection_in_one_undo() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(FM, &[(0, 4, 60), (16, 4, 62), (32, 4, 64)], &[0, 2]);
+        assert!(app.dock_key(Key::Delete, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(16, 4, 62)]);
+        assert!(app.selection(FM).is_empty());
+        app.undo();
+        assert_eq!(notes_of(&app, FM).len(), 3);
+        app.set_selection(FM, vec![app.doc.project.roll(FM, 0).unwrap().notes[1]]);
+        assert!(app.dock_key(Key::Backspace, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (32, 4, 64)]);
+    }
+
+    #[test]
+    fn esc_clears_the_selection_and_the_range() {
+        use crate::test_rack::{FM, SYNTH1};
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        assert!(app.dock_key(Key::Escape, Modifiers::NONE));
+        assert!(app.selection(FM).is_empty());
+        assert!(
+            !app.dock_key(Key::Escape, Modifiers::NONE),
+            "nothing to clear"
+        );
+        // A range: every lane's selection goes with it.
+        app.view.dock.range = Some((0, 8));
+        app.select_range(0, 8);
+        assert_eq!(app.selection(FM), vec![0]);
+        assert!(app.dock_key(Key::Escape, Modifiers::NONE));
+        assert_eq!(app.view.dock.range, None);
+        assert!(app.selection(FM).is_empty() && app.selection(SYNTH1).is_empty());
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn without_a_selection_keys_still_enter_notes() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[]);
+        assert!(app.dock_key(Key::ArrowRight, Modifiers::NONE));
+        assert_eq!(app.view.panel(FM).cursor.tick, 4, "the cursor moved");
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60)]);
+        assert!(
+            !app.dock_key(Key::ArrowRight, Modifiers::ALT),
+            "Alt is not entry"
+        );
+    }
+
+    #[test]
+    fn a_frame_arrow_press_nudges_the_selection_and_is_stripped() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        let left = shortcut_frame(
+            &mut app,
+            vec![
+                key_event(egui::Key::ArrowRight, true, false, false),
+                key_event(egui::Key::ArrowRight, false, false, false),
+            ],
+        );
+        assert_eq!(notes_of(&app, FM), [(4, 4, 60)]);
+        assert_eq!(left.len(), 1, "the press is gone: {left:?}");
+    }
+
+    #[test]
+    fn frame_ctrl_c_then_ctrl_v_pastes_at_the_cursor() {
+        use crate::test_rack::FM;
+        use egui::Key;
+        let mut app = sel_app(FM, &[(4, 4, 60), (8, 2, 62), (40, 4, 64)], &[0, 1]);
+        shortcut_frame(&mut app, vec![key_event(Key::C, true, false, true)]);
+        assert!(app.view.clipboard.is_none(), "not the pattern clipboard");
+        app.view.panel(FM).cursor.tick = 20;
+        // A backend may send the key and a paste event for one press.
+        shortcut_frame(
+            &mut app,
+            vec![
+                key_event(Key::V, true, false, true),
+                egui::Event::Paste(String::new()),
+            ],
+        );
+        let notes = notes_of(&app, FM);
+        assert_eq!(notes.len(), 5, "pasted once: {notes:?}");
+        assert!(notes.contains(&(20, 4, 60)) && notes.contains(&(24, 2, 62)));
+        let sel: Vec<_> = app.selection(FM).iter().map(|&i| notes[i]).collect();
+        assert_eq!(sel, [(20, 4, 60), (24, 2, 62)], "the pasted notes selected");
+        app.undo();
+        assert_eq!(notes_of(&app, FM).len(), 3, "one undo");
+    }
+
+    #[test]
+    fn copy_without_a_selection_takes_the_whole_lane() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(4, 4, 60), (8, 2, 62)], &[]);
+        app.copy_notes(false);
+        let clip = app.view.note_clip.as_ref().unwrap();
+        assert_eq!(clip.lanes.len(), 1);
+        assert_eq!(
+            clip.lanes[0].2.iter().map(|n| n.start).collect::<Vec<_>>(),
+            [0, 4],
+            "relative to the earliest start"
+        );
+    }
+
+    #[test]
+    fn cut_is_one_undo() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(4, 4, 60), (8, 2, 62), (40, 4, 64)], &[0, 1]);
+        let before = app.doc.project.clone();
+        app.copy_notes(true);
+        assert_eq!(notes_of(&app, FM), [(40, 4, 64)]);
+        assert!(app.view.note_clip.is_some());
+        app.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn melodic_and_drum_notes_do_not_paste_onto_each_other() {
+        use crate::test_rack::{FM, KIT808, SYNTH1};
+        let mut app = sel_app(FM, &[(4, 4, 60)], &[0]);
+        app.copy_notes(false);
+        app.view.focus = Some(KIT808);
+        let before = app.doc.project.clone();
+        app.paste_notes();
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("Melodic notes can't be pasted onto drums")
+        );
+        assert_eq!(app.doc.project, before);
+        // Poly onto acid is melodic onto melodic.
+        app.view.message = None;
+        app.view.focus = Some(SYNTH1);
+        app.paste_notes();
+        assert!(app.view.message.is_none());
+        assert_eq!(notes_of(&app, SYNTH1).len(), 1);
+        // Drums onto a melodic part.
+        app.doc.project.roll_mut(KIT808, 0).unwrap().notes =
+            vec![acid_engine::project::Note::new(0, 4, 1, 100)];
+        app.view.focus = Some(KIT808);
+        app.select_all_notes();
+        app.copy_notes(false);
+        app.view.focus = Some(FM);
+        let before = app.doc.project.clone();
+        app.paste_notes();
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("Drum notes can't be pasted onto a melodic part")
+        );
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn a_range_copy_pastes_into_the_same_machines_in_one_undo() {
+        use crate::test_rack::{FM, KIT808, SYNTH1};
+        let mut app = range_app();
+        app.doc.project.roll_mut(KIT808, 0).unwrap().notes =
+            vec![acid_engine::project::Note::new(20, 1, 3, 100)];
+        app.view.dock.keyboard = true;
+        app.view.dock.range = Some((12, 32));
+        app.select_range(12, 32);
+        app.copy_notes(false);
+        assert!(app.view.note_clip.as_ref().unwrap().lanes.len() > 1);
+        app.view.focus = Some(FM);
+        app.view.panel(FM).cursor.tick = 48;
+        let before = app.doc.project.clone();
+        app.paste_notes();
+        for uid in [FM, SYNTH1] {
+            assert!(notes_of(&app, uid).contains(&(52, 4, 62)), "{uid:?}");
+            assert_eq!(notes_of(&app, uid).len(), 4, "{uid:?}");
+        }
+        assert!(notes_of(&app, KIT808).contains(&(56, 1, 3)), "the kit too");
+        assert_eq!(app.view.dock.range, None);
+        app.undo();
+        assert_eq!(app.doc.project, before, "one undo for every lane");
+    }
+
+    #[test]
+    fn a_range_cut_is_one_undo_across_lanes() {
+        use crate::test_rack::{FM, SYNTH1};
+        let mut app = range_app();
+        app.view.dock.range = Some((12, 32));
+        let before = app.doc.project.clone();
+        app.copy_notes(true);
+        for uid in [FM, SYNTH1] {
+            assert_eq!(notes_of(&app, uid), [(0, 4, 60), (40, 4, 64)]);
+        }
+        app.undo();
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn a_paste_past_the_note_cap_is_refused() {
+        use crate::test_rack::FM;
+        use acid_engine::project::{MAX_NOTES, Note};
+        let mut app = sel_app(FM, &[(4, 4, 60), (8, 2, 62)], &[0, 1]);
+        app.copy_notes(false);
+        app.doc.project.roll_mut(FM, 0).unwrap().notes = (0..MAX_NOTES - 1)
+            .map(|i| Note::new((i % 200) as u16, 1, 20 + (i / 200) as u8, 100))
+            .collect();
+        let before = app.doc.project.clone();
+        app.paste_notes();
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("That paste would put more than 512 notes in the pattern")
+        );
+        assert_eq!(app.doc.project, before);
+    }
+
+    #[test]
+    fn frame_ctrl_d_duplicates_after_the_selection() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (4, 2, 62)], &[0, 1]);
+        shortcut_frame(&mut app, vec![key_event(egui::Key::D, true, false, true)]);
+        let notes = notes_of(&app, FM);
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        assert!(notes.contains(&(8, 4, 60)) && notes.contains(&(12, 2, 62)));
+        let sel: Vec<_> = app.selection(FM).iter().map(|&i| notes[i]).collect();
+        assert_eq!(sel, [(8, 4, 60), (12, 2, 62)], "the copies selected");
+        app.undo();
+        assert_eq!(notes_of(&app, FM).len(), 2, "one undo");
+    }
+
+    #[test]
+    fn a_range_duplicate_repeats_every_lane_after_the_range() {
+        use crate::test_rack::{FM, SYNTH1};
+        let mut app = range_app();
+        app.view.dock.range = Some((12, 32));
+        app.duplicate_notes();
+        for uid in [FM, SYNTH1] {
+            assert!(notes_of(&app, uid).contains(&(36, 4, 62)), "{uid:?}");
+        }
+        assert_eq!(app.view.dock.range, Some((32, 52)), "the range moves on");
+        app.undo();
+        assert_eq!(notes_of(&app, FM).len(), 3);
+        assert_eq!(notes_of(&app, SYNTH1).len(), 3, "one undo");
+    }
+
+    #[test]
+    fn frame_ctrl_a_selects_the_whole_lane_and_clears_the_range() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (16, 4, 62)], &[]);
+        app.view.dock.range = Some((40, 48));
+        shortcut_frame(&mut app, vec![key_event(egui::Key::A, true, false, true)]);
+        assert_eq!(app.selection(FM), vec![0, 1]);
+        assert_eq!(app.view.dock.range, None);
+    }
+
+    #[test]
+    fn without_dock_focus_ctrl_c_copies_the_whole_pattern() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        app.view.dock.keyboard = false;
+        shortcut_frame(
+            &mut app,
+            vec![
+                key_event(egui::Key::C, true, false, true),
+                key_event(egui::Key::X, true, false, true),
+                key_event(egui::Key::D, true, false, true),
+            ],
+        );
+        assert!(app.view.clipboard.is_some(), "the pattern was copied");
+        assert!(app.view.note_clip.is_none());
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60)], "Ctrl+X/D do nothing");
+    }
+
+    #[test]
+    fn a_pattern_pad_or_a_load_clears_the_range() {
+        use crate::test_rack::FM;
+        let mut app = range_app();
+        app.view.dock.range = Some((0, 8));
+        app.select_pad(FM, 1);
+        assert_eq!(app.view.dock.range, None, "pad");
+        app.view.dock.range = Some((0, 8));
+        app.select_range(0, 8);
+        app.load_document(Document::new(Project::default()));
+        assert_eq!(app.view.dock.range, None, "load");
+        assert!(app.selection(FM).is_empty());
     }
 }

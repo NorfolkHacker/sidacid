@@ -14,6 +14,9 @@ pub enum Shortcut {
     Redo,
     Copy,
     Paste,
+    Cut,
+    Duplicate,
+    SelectAll,
 }
 
 pub fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
@@ -27,6 +30,9 @@ pub fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
             Key::Y => Some(Shortcut::Redo),
             Key::C => Some(Shortcut::Copy),
             Key::V => Some(Shortcut::Paste),
+            Key::X => Some(Shortcut::Cut),
+            Key::D => Some(Shortcut::Duplicate),
+            Key::A => Some(Shortcut::SelectAll),
             _ => None,
         };
     }
@@ -46,6 +52,7 @@ fn event_shortcut(e: &egui::Event) -> Option<Shortcut> {
         // Some platforms deliver Ctrl+C / Ctrl+V as clipboard events.
         egui::Event::Copy => Some(Shortcut::Copy),
         egui::Event::Paste(_) => Some(Shortcut::Paste),
+        egui::Event::Cut => Some(Shortcut::Cut),
         _ => None,
     }
 }
@@ -111,12 +118,15 @@ impl SidAcidApp {
             })
         });
         self.dock_keys(ctx);
-        let (mut copied, mut pasted) = (false, false);
+        let (mut copied, mut pasted, mut cut) = (false, false, false);
+        // With the dock focused the clipboard keys act on its notes.
+        let notes = self.view.dock.keyboard;
         for s in pressed {
             // Backends may send both a key and a clipboard event for one press.
             match s {
                 Shortcut::Copy if std::mem::replace(&mut copied, true) => continue,
                 Shortcut::Paste if std::mem::replace(&mut pasted, true) => continue,
+                Shortcut::Cut if std::mem::replace(&mut cut, true) => continue,
                 _ => {}
             }
             match s {
@@ -138,8 +148,14 @@ impl SidAcidApp {
                 Shortcut::Redo => {
                     self.redo();
                 }
+                Shortcut::Copy if notes => self.copy_notes(false),
+                Shortcut::Paste if notes => self.paste_notes(),
+                Shortcut::Cut if notes => self.copy_notes(true),
+                Shortcut::Duplicate if notes => self.duplicate_notes(),
+                Shortcut::SelectAll if notes => self.select_all_notes(),
                 Shortcut::Copy => self.copy_pattern(),
                 Shortcut::Paste => self.paste_pattern(),
+                Shortcut::Cut | Shortcut::Duplicate | Shortcut::SelectAll => {}
             }
         }
     }
@@ -164,6 +180,10 @@ mod tests {
         assert_eq!(shortcut(Key::Y, cmd), Some(Shortcut::Redo));
         assert_eq!(shortcut(Key::C, cmd), Some(Shortcut::Copy));
         assert_eq!(shortcut(Key::V, cmd), Some(Shortcut::Paste));
+        assert_eq!(shortcut(Key::X, cmd), Some(Shortcut::Cut));
+        assert_eq!(shortcut(Key::D, cmd), Some(Shortcut::Duplicate));
+        assert_eq!(shortcut(Key::A, cmd), Some(Shortcut::SelectAll));
+        assert_eq!(event_shortcut(&egui::Event::Cut), Some(Shortcut::Cut));
     }
 
     #[test]

@@ -222,6 +222,7 @@ impl SidAcidApp {
             panel.fm_browser = Default::default();
             panel.fm_voice_src = None;
         }
+        self.view.dock.range = None;
         self.view.knob_scroll = None;
         self.view.renaming = None;
         self.view.rack_action = None;
