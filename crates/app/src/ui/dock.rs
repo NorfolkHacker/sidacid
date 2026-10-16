@@ -342,7 +342,7 @@ impl SidAcidApp {
     }
 
     /// The Song-mode ruler: bar numbers every 16 steps, the loop along the
-    /// top, the song cursor and the playhead, over the same thumb strip as
+    /// top, the song's end, the song cursor and the playhead, over the same thumb strip as
     /// in Pattern mode. A click sets the song cursor (on a bar; Alt: on a
     /// step) and clears the range; a drag picks a range of whole bars and
     /// selects the blocks starting in it on every lane.
@@ -420,6 +420,23 @@ impl SidAcidApp {
                 pos2(g.x_of(b), rect.top() + 2.0),
             );
             painter.rect_filled(r, 0.0, theme::VIOLET);
+        }
+        // Where playback stops: the last block's end, or a converted
+        // song's own end or the loop's end when later.
+        let end = self.with_lens(|lens| song::song_end(&self.doc.project.song, lens));
+        if end > 0 {
+            let x = g.x_of(end);
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, bar.top())],
+                Stroke::new(1.0_f32, theme::ACCENT),
+            );
+            painter.text(
+                pos2(x - 2.0, rect.top() + 1.0),
+                Align2::RIGHT_TOP,
+                "End",
+                FontId::monospace(9.0),
+                theme::ACCENT,
+            );
         }
         if let Some((lo, hi)) = self.view.dock.range {
             let band = Rect::from_min_max(
@@ -1355,6 +1372,17 @@ mod tests {
         app.view.dock.zoom = 0;
         app.view.dock.follow = false;
         app
+    }
+
+    #[test]
+    fn the_song_ruler_draws_a_converted_songs_end() {
+        let mut app = song_app();
+        app.doc.project.song.end = Some(160);
+        app.doc.project.song.loop_range = Some((16, 192));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        app.doc.project.song = Default::default();
+        frame(&mut app, &ctx, 0.1, vec![]);
     }
 
     #[test]
