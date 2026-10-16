@@ -57,3 +57,13 @@ Commit: `feat(app): the Tools menu with live preview`.
 ### Task 4: Docs and a look
 
 README Tools bullets (no product names); brief cropped screenshot (delete any full capture); final gate. Commit `docs: note tools`.
+
+## Notes added before execution (from the phase 6 final review)
+
+- **Placement:** the Tools button goes first in the Pattern-mode inspector row (always present), drawn with or without a selection, so the header never changes height mid-gesture.
+- **Selection:** tools move, re-pitch, add or remove notes, so each tool returns its new selection explicitly (indices into the result); don't rely on `values(&p, &idx)` of the old indices. Acid lanes go through `settle`/`make_mono`.
+- **Order:** prefer tools that keep the notes vector's order (edit notes in place; append new notes) — the engine's poly played-record and the chance hash are keyed by note index, so reordering during playback can cut ringing notes or re-roll chance. Tools that must reorder (Reverse) edit `start` in place rather than reordering the vector.
+- **Preview:** keep the untouched pattern as the base; recompute tool(base) on every settings change and commit with `merge = true` inside one gesture; Cancel restores the base and leaves no undo step; while a session is open block keyboard ops, clipboard, mouse edits, inspector/strip edits and undo/redo on that lane (like `mouse_editing()`).
+- **Randomize in scale with Chromatic:** any pitch in the range.
+- **Snap to scale:** when snap is on, pitch-producing tools (Randomize, Arpeggiate keep chord pitches; Invert, Strum don't add pitches) snap new pitches via `note_ops::snap_pitches`.
+- **Pattern mode only:** Song mode has no Tools menu.
