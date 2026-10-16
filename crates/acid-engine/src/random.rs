@@ -71,6 +71,26 @@ fn groove_hits(groove: &DrumGrid, len: usize) -> Vec<bool> {
         .collect()
 }
 
+/// A rest has no pitch: each step the rest die turned on (`was_off`)
+/// takes the pitch of the nearest earlier step that still plays a note it
+/// had, wrapping within `len`; with none, it stays C.
+fn repeat_earlier_pitches(grid: &mut SynthGrid, was_off: &[bool], len: usize) {
+    let kept = |g: &SynthGrid, j: usize| !was_off[j] && g.steps[j].gate != Gate::Off;
+    for i in 0..len {
+        if !was_off[i] || grid.steps[i].gate == Gate::Off {
+            continue;
+        }
+        if let Some(j) = (1..len)
+            .map(|k| (i + len - k) % len)
+            .find(|&j| kept(grid, j))
+        {
+            let src = grid.steps[j];
+            grid.steps[i].note = src.note;
+            grid.steps[i].octave = src.octave;
+        }
+    }
+}
+
 pub fn randomise_synth(
     p: &SynthPattern,
     dice: Dice,
@@ -83,6 +103,10 @@ pub fn randomise_synth(
     let len = steps_of(p.roll.length);
     let hits = groove_hits(&groove, len);
     if dice.rest {
+        let was_off: Vec<bool> = grid.steps[..len]
+            .iter()
+            .map(|s| s.gate == Gate::Off)
+            .collect();
         for i in 0..len {
             let prob = if hits[i] { 0.85 } else { 0.5 };
             grid.steps[i].gate = if rng.gen_bool(prob) {
@@ -90,6 +114,9 @@ pub fn randomise_synth(
             } else {
                 Gate::Off
             };
+        }
+        if !dice.notes {
+            repeat_earlier_pitches(&mut grid, &was_off, len);
         }
     }
     if dice.notes {
@@ -954,27 +981,43 @@ mod tests {
             .patterns[0]
             .clone();
         let g = groove_four_on_floor();
-        let r = randomise_synth(
-            &base,
-            Dice {
-                rest: true,
-                ..Dice::default()
-            },
-            &g,
-            3,
-        );
-        // A rest has no note: only steps that play in both compare.
-        for (a, b) in sgrid(&base)
-            .steps
-            .iter()
-            .zip(&sgrid(&r).steps)
-            .filter(|(a, b)| a.gate != Gate::Off && b.gate != Gate::Off)
-        {
-            assert_eq!(
-                (a.note, a.octave, a.accent, a.slide),
-                (b.note, b.octave, b.accent, b.slide)
-            );
+        let (a, len) = (sgrid(&base), 16);
+        let mut newly_on = 0;
+        for seed in 0..20 {
+            let b = sgrid(&randomise_synth(
+                &base,
+                Dice {
+                    rest: true,
+                    ..Dice::default()
+                },
+                &g,
+                seed,
+            ));
+            assert_eq!(&a.steps[len..], &b.steps[len..], "past the length");
+            for i in 0..len {
+                let (x, y) = (a.steps[i], b.steps[i]);
+                match (x.gate != Gate::Off, y.gate != Gate::Off) {
+                    // Kept: only the gate may change (a rest has no note).
+                    (true, true) => assert_eq!(
+                        (x.note, x.octave, x.accent, x.slide),
+                        (y.note, y.octave, y.accent, y.slide),
+                        "seed {seed} step {i}"
+                    ),
+                    // New: unaccented, unslid, an earlier kept pitch.
+                    (false, true) => {
+                        newly_on += 1;
+                        assert!(!y.accent && !y.slide, "seed {seed} step {i}");
+                        let kept = (1..len).map(|k| (i + len - k) % len).find(|&j| {
+                            a.steps[j].gate != Gate::Off && b.steps[j].gate != Gate::Off
+                        });
+                        let want = kept.map_or((0, 0), |j| (b.steps[j].note, b.steps[j].octave));
+                        assert_eq!((y.note, y.octave), want, "seed {seed} step {i}");
+                    }
+                    _ => {}
+                }
+            }
         }
+        assert!(newly_on > 0);
         let r = randomise_synth(
             &base,
             Dice {
@@ -987,6 +1030,49 @@ mod tests {
         for (a, b) in sgrid(&base).steps.iter().zip(&sgrid(&r).steps) {
             assert_eq!((a.gate, a.accent, a.slide), (b.gate, b.accent, b.slide));
         }
+    }
+
+    #[test]
+    fn a_step_the_rest_die_turns_on_repeats_the_nearest_earlier_pitch() {
+        // One note, on step 3: a new step takes its pitch, also on steps
+        // 0..3 (found by wrapping); with step 3 resting, every new step is C.
+        let mut base = sgrid(&SynthPattern::default());
+        base.steps[3] = SynthStep {
+            note: 7,
+            octave: 1,
+            gate: Gate::On,
+            accent: true,
+            slide: false,
+        };
+        let base = SynthPattern {
+            roll: base.to_roll(),
+            ..SynthPattern::default()
+        };
+        let (mut kept, mut rested) = (false, false);
+        for seed in 0..100 {
+            let r = sgrid(&randomise_synth(
+                &base,
+                Dice {
+                    rest: true,
+                    ..Dice::default()
+                },
+                &groove_four_on_floor(),
+                seed,
+            ));
+            let want = if r.steps[3].gate != Gate::Off {
+                kept = true;
+                (7, 1)
+            } else {
+                rested = true;
+                (0, 0)
+            };
+            for (i, s) in r.steps[..16].iter().enumerate() {
+                if s.gate != Gate::Off {
+                    assert_eq!((s.note, s.octave), want, "seed {seed} step {i}");
+                }
+            }
+        }
+        assert!(kept && rested);
     }
 
     #[test]

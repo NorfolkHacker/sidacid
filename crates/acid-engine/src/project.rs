@@ -863,20 +863,25 @@ impl Project {
         let head: VersionOnly = ron::from_str(text).map_err(parse)?;
         // Each known version is matched explicitly, so bumping
         // PROJECT_VERSION without an upgrade path can't misread old files.
+        let v4 = |p: crate::migrate::ProjectV4| -> Result<Project, ProjectError> {
+            p.check_shapes()?;
+            Ok(p.upgrade())
+        };
         let p = match head.version {
-            0 | 1 => ron::from_str::<crate::migrate::ProjectV1>(text)
+            0 | 1 => v4(ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
                 .upgrade()
-                .upgrade()
-                .upgrade(),
-            2 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
-                .map_err(parse)?
-                .upgrade()
-                .upgrade(),
+                .upgrade())?,
+            2 => v4(
+                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
+                    .map_err(parse)?
+                    .upgrade(),
+            )?,
             // v4 only added the Mono machine: a v3 file reads as v4.
-            3 | 4 => with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV4>(text))
-                .map_err(parse)?
-                .upgrade(),
+            3 | 4 => v4(
+                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV4>(text))
+                    .map_err(parse)?,
+            )?,
             PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
@@ -1280,12 +1285,10 @@ mod tests {
     fn a_plan_4_project_still_loads() {
         let p = Project::from_ron(&plan4_project_text()).unwrap();
         assert_eq!((p.name.as_str(), p.bpm), ("Plan 4", 130.0));
-        assert!(
-            p.synth(MachineUid(1)).unwrap().patterns[0]
-                .roll
-                .notes
-                .iter()
-                .any(|n| n.start == 0)
+        // The file's one acid step: note 5, octave 0, On.
+        assert_eq!(
+            p.synth(MachineUid(1)).unwrap().patterns[0].roll.notes,
+            vec![Note::new(0, 4, 41, crate::steps::ACID_VEL)]
         );
         assert_eq!(p.fm(FM).unwrap().patterns[0].notes.len(), 1);
         assert_eq!(sampler(&p).patterns[1].notes[0].pitch, 36);

@@ -11,8 +11,8 @@ use crate::params::{
 };
 use crate::project::{
     AutoLane, Bar, Cell, DrumMachine, DrumPattern, FmMachine, MachineBody, MachineEntry,
-    MonoMachine, PATTERNS, PROJECT_VERSION, ParamLane, PatternRef, Project, STEPS, SamplerMachine,
-    Song, SynthMachine, SynthPattern,
+    MonoMachine, PATTERNS, PROJECT_VERSION, ParamLane, PatternRef, Project, ProjectError, STEPS,
+    SamplerMachine, Song, SynthMachine, SynthPattern,
 };
 use crate::steps::{DrumGrid, DrumHit, SynthGrid, SynthStep};
 use serde::{Deserialize, Serialize};
@@ -232,6 +232,30 @@ impl MachineBodyV4 {
 }
 
 impl ProjectV4 {
+    /// Rejects step lists the grid conversion can't read: every acid and
+    /// drum pattern holds exactly `STEPS` steps (the v4 `validate` rule;
+    /// lengths, lanes and pattern counts are checked after conversion).
+    pub(crate) fn check_shapes(&self) -> Result<(), ProjectError> {
+        for m in &self.machines {
+            let bad = match &m.body {
+                MachineBodyV4::Synth(s) => s.patterns.iter().position(|p| p.steps.len() != STEPS),
+                MachineBodyV4::Kit(k) => k.patterns.iter().position(|p| p.steps.len() != STEPS),
+                _ => None,
+            };
+            if let Some(j) = bad {
+                let label = match u8::try_from(j) {
+                    Ok(j) if (j as usize) < PATTERNS => PatternRef(j).label(),
+                    _ => (j + 1).to_string(),
+                };
+                return Err(ProjectError::Invalid(format!(
+                    "{}: pattern {label}",
+                    m.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// The v4 default project (as `Project::default()` was): the
     /// standard six machines, every param at its default.
     pub(crate) fn standard() -> Self {
@@ -542,6 +566,63 @@ impl ProjectV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn load(v4: &ProjectV4) -> Result<Project, ProjectError> {
+        Project::from_ron(&ron::ser::to_string(v4).unwrap())
+    }
+
+    #[test]
+    fn damaged_v4_step_lists_are_invalid_not_a_panic() {
+        for steps in [3, STEPS + 1] {
+            let mut v4 = ProjectV4::standard();
+            let MachineBodyV4::Synth(s) = &mut v4.machines[1].body else {
+                panic!("position 1 is Synth 2")
+            };
+            s.patterns[5].steps.resize(steps, SynthStep::default());
+            match load(&v4) {
+                Err(ProjectError::Invalid(e)) => assert_eq!(e, "Synth 2: pattern A06"),
+                other => panic!("{steps} synth steps: {other:?}"),
+            }
+            let mut v4 = ProjectV4::standard();
+            let MachineBodyV4::Kit(k) = &mut v4.machines[3].body else {
+                panic!("position 3 is the 909")
+            };
+            k.patterns[0]
+                .steps
+                .resize(steps, [DrumHit::Off; DRUM_INSTRUMENTS]);
+            match load(&v4) {
+                Err(ProjectError::Invalid(e)) => assert_eq!(e, "909: pattern A01"),
+                other => panic!("{steps} drum steps: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_v2_step_lists_are_invalid_not_a_panic() {
+        let mut v2 = ProjectV2 {
+            version: 2,
+            name: "Two".into(),
+            bpm: 120.0,
+            swing: 0.0,
+            synths: Default::default(),
+            drums: Default::default(),
+            fm: FmMachine::default(),
+            sampler: SamplerMachine::default(),
+            params: BTreeMap::new(),
+            selected: [0; 6],
+            song: SongV2 {
+                bars: Vec::new(),
+                loop_range: None,
+                automation: Vec::new(),
+            },
+        };
+        v2.synths[0].patterns[0].steps.truncate(3);
+        let text = ron::ser::to_string(&v2).unwrap();
+        assert!(matches!(
+            Project::from_ron(&text),
+            Err(ProjectError::Invalid(_))
+        ));
+    }
 
     #[test]
     fn v4_steps_upgrade_to_notes() {

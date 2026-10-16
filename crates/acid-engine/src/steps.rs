@@ -68,10 +68,20 @@ impl SynthGrid {
     /// engine wrapped there; steps past the length convert too (kept
     /// hidden, as the roll keeps notes past the end). Pitch and accent come
     /// from the run's first step, slide from its last.
+    ///
+    /// A `Tie` on step 0 after a playing last step continued the note
+    /// across the loop: the last run then slides into the first, which
+    /// takes its pitch (unaccented), so the gate holds over the wrap at
+    /// the same pitch. (After a bar line or a pattern switch the next
+    /// pattern isn't known here: such a Tie starts its own note.)
     pub fn to_roll(&self) -> NotePattern {
         let len = steps_of(self.length);
         let mut notes = Vec::new();
-        for (from, to) in [(0, len), (len, STEPS)] {
+        let mut in_length = 0;
+        for (k, (from, to)) in [(0, len), (len, STEPS)].into_iter().enumerate() {
+            if k == 1 {
+                in_length = notes.len();
+            }
             let mut i = from;
             while i < to {
                 let s = self.steps[i];
@@ -90,6 +100,14 @@ impl SynthGrid {
                 });
                 i = j;
             }
+        }
+        if self.steps[0].gate == Gate::Tie && self.steps[len - 1].gate != Gate::Off {
+            // Runs inside the length: the first starts at 0, the last ends at len.
+            let last: &mut Note = &mut notes[in_length - 1];
+            last.slide = true;
+            let pitch = last.pitch;
+            notes[0].pitch = pitch;
+            notes[0].accent = false;
         }
         NotePattern {
             notes,
@@ -237,6 +255,70 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_on_step_0_after_a_playing_last_step_continues_over_the_loop() {
+        let mut lead = step(9, 0, Gate::Tie);
+        lead.accent = true;
+        let mut last = step(5, 0, Gate::On);
+        last.accent = true;
+        let g = grid(
+            16,
+            &[
+                (0, lead),
+                (1, step(0, 0, Gate::Tie)),
+                (4, step(2, 0, Gate::On)),
+                (14, last),
+                (15, step(0, 0, Gate::Tie)),
+                (20, step(7, 0, Gate::Tie)), // past the length: untouched
+            ],
+        );
+        assert_eq!(
+            g.to_roll().notes,
+            vec![
+                Note::new(0, 8, 41, ACID_VEL), // the last run's pitch, unaccented
+                Note::new(16, 4, 38, ACID_VEL),
+                Note {
+                    accent: true,
+                    slide: true,
+                    ..Note::new(56, 8, 41, ACID_VEL)
+                },
+                Note::new(80, 4, 43, ACID_VEL),
+            ]
+        );
+        // A rest on the last step: the Tie is a note of its own.
+        let g = grid(16, &[(0, lead), (14, last)]);
+        assert_eq!(
+            g.to_roll().notes,
+            vec![
+                Note {
+                    accent: true,
+                    ..Note::new(0, 4, 45, ACID_VEL)
+                },
+                Note {
+                    accent: true,
+                    ..Note::new(56, 4, 41, ACID_VEL)
+                },
+            ]
+        );
+        // One run over the whole loop slides into itself.
+        let g = grid(
+            4,
+            &[
+                (0, lead),
+                (1, step(0, 0, Gate::Tie)),
+                (2, step(0, 0, Gate::Tie)),
+                (3, step(0, 0, Gate::Tie)),
+            ],
+        );
+        assert_eq!(
+            g.to_roll().notes,
+            vec![Note {
+                slide: true,
+                ..Note::new(0, 16, 45, ACID_VEL)
+            }]
+        );
+    }
+
+    #[test]
     fn an_on_and_its_ties_become_one_note() {
         let mut first = step(3, 0, Gate::On);
         first.accent = true;
@@ -267,11 +349,16 @@ mod tests {
             ],
         );
         let notes = g.to_roll().notes;
+        // Step 3 plays into step 0's Tie over the loop: it slides, and the
+        // Tie's note takes its pitch.
         assert_eq!(
             notes,
             vec![
-                Note::new(0, 4, 36, ACID_VEL),
-                Note::new(12, 4, 29, ACID_VEL),
+                Note::new(0, 4, 29, ACID_VEL),
+                Note {
+                    slide: true,
+                    ..Note::new(12, 4, 29, ACID_VEL)
+                },
                 Note::new(16, 4, 29, ACID_VEL),
                 Note::new(40, 4, 43, ACID_VEL),
             ]

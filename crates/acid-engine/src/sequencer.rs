@@ -90,7 +90,8 @@ struct Track {
     hold_dist: u16,
     /// Acid: ticks until a held gate must find a note (0 = none).
     hold_left: u16,
-    /// Acid: the sounding note's end tick (clipped to the pattern).
+    /// Acid: the sounding note's end tick, clipped to the pattern and
+    /// wrapped (0 when it ends at the pattern's end).
     cur_end: u16,
     /// Param whose lane value is overriding the knob on the current step.
     /// Each synth track keeps its own: if both lane the same shared param
@@ -660,7 +661,7 @@ impl Sequencer {
                 if t.gate_left == 0 {
                     // Looks at this pattern's own note at the end (the 303
                     // way): a held gate then runs into whatever plays next.
-                    if t.prev_slide && note_starting(roll, t.cur_end % ticks).is_some() {
+                    if t.prev_slide && note_starting(roll, t.cur_end).is_some() {
                         t.hold_left = t.hold_dist;
                         check_hold = t.hold_left == 0;
                     } else {
@@ -693,7 +694,8 @@ impl Sequencer {
             t.gate_left = gate;
             t.hold_dist = span - gate;
             t.hold_left = 0;
-            t.cur_end = end;
+            // Wrapped: a note ending at the pattern's end slides into tick 0.
+            t.cur_end = if end >= ticks { 0 } else { end };
         }
         if p.is_multiple_of(TICKS_PER_STEP) {
             let step = (p / TICKS_PER_STEP) as usize;
@@ -1733,7 +1735,8 @@ mod tests {
     #[test]
     fn a_song_ending_with_the_gate_open_sends_a_note_off() {
         let mut f = Fixture::new();
-        // A Tie on step 0 is a note of its own: step 15 slides into it.
+        // Step 0's Tie continues step 15 over the loop (see
+        // `SynthGrid::to_roll`), as the old step sequencer did.
         set_steps(
             &mut f.synths[0][0],
             16,
@@ -1745,13 +1748,7 @@ mod tests {
                         ..on(0)
                     },
                 ),
-                (
-                    15,
-                    SynthStep {
-                        slide: true,
-                        ..on(3)
-                    },
-                ),
+                (15, on(3)),
             ],
         );
         f.song.bars = vec![song_bar([Some(0), None, None, None])];
@@ -1761,7 +1758,7 @@ mod tests {
         assert_eq!(
             ev.last(),
             Some(&(88_200, SeqEvent::NoteOff { slot: 0 })),
-            "step 15 slides into the wrap, so only the song end closes it: {ev:?}"
+            "step 15 ties into the wrap, so only the song end closes it: {ev:?}"
         );
         assert!(!s.is_playing());
     }
@@ -1831,7 +1828,10 @@ mod tests {
 
     // Decision #5 (303-like): the hold on a bar's last step looks at the
     // current pattern's own wrap, and the held gate runs into whatever the
-    // next bar plays.
+    // next bar plays. Behaviour change in v5: a Tie after a bar line now
+    // starts its own note (the next bar's pattern isn't known when a v4
+    // pattern converts), so it slides in like any note instead of keeping
+    // the old pitch.
     #[test]
     fn a_slide_on_a_bars_last_step_runs_into_the_next_bar() {
         let note = |midi, legato| SeqEvent::Note {
@@ -1848,7 +1848,7 @@ mod tests {
         assert_eq!(
             slide_across_the_bar_line(song_bar([Some(2), None, None, None])),
             vec![(82_688, note(39, false)), (88_200, note(45, true))],
-            "a Tie in the next bar is a note: it slides in too"
+            "a Tie after the bar line starts its own note: it slides in too"
         );
         assert_eq!(
             slide_across_the_bar_line(song_bar([None; 4])),
@@ -1857,6 +1857,53 @@ mod tests {
                 (88_200, SeqEvent::NoteOff { slot: 0 })
             ],
             "a silent next bar cuts the note at its start, not mid-step"
+        );
+    }
+
+    #[test]
+    fn a_tie_on_step_0_continues_the_last_note_over_the_loop() {
+        let mut f = Fixture::new();
+        let tie = SynthStep {
+            gate: Gate::Tie,
+            ..on(0)
+        };
+        set_steps(
+            &mut f.synths[0][0],
+            16,
+            &[
+                (
+                    0,
+                    SynthStep {
+                        gate: Gate::Tie,
+                        ..on(9)
+                    },
+                ),
+                (12, on(3)),
+                (13, tie),
+                (14, tie),
+                (15, tie),
+            ],
+        );
+        let mut s = new_seq();
+        s.play();
+        let ev: Vec<_> = synth_events(&f.run(&mut s, 92_000))
+            .into_iter()
+            .filter(|(p, _)| *p >= 66_150)
+            .collect();
+        let note = |legato| SeqEvent::Note {
+            slot: 0,
+            midi: 39,
+            accent: false,
+            legato,
+        };
+        assert_eq!(
+            ev,
+            vec![
+                (66_150, note(false)),
+                (88_200, note(true)),
+                (90_957, SeqEvent::NoteOff { slot: 0 }),
+            ],
+            "held over the wrap: one legato note at the same pitch"
         );
     }
 
