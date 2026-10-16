@@ -68,23 +68,13 @@ fn busy_project() -> Project {
         for third in [0, 4, 7] {
             p.fm_mut(MachineUid(5)).unwrap().patterns[0]
                 .notes
-                .push(Note {
-                    start: i as u16 * 16,
-                    len: 14,
-                    pitch: root + third,
-                    vel: 100,
-                });
+                .push(Note::new(i as u16 * 16, 14, root + third, 100));
         }
     }
     for k in 0..32u16 {
         p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: k * 2,
-                len: 1,
-                pitch: 36 + (k % 12) as u8,
-                vel: 90,
-            });
+            .push(Note::new(k * 2, 1, 36 + (k % 12) as u8, 90));
     }
     let tone: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
     let slices: Vec<u32> = (0..12).map(|i| i * 3675).collect();
@@ -254,12 +244,7 @@ fn audition_and_pattern_swaps_do_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
     let mut replacement = NotePattern::default();
-    replacement.notes.push(Note {
-        start: 0,
-        len: 8,
-        pitch: 60,
-        vel: 100,
-    });
+    replacement.notes.push(Note::new(0, 8, 60, 100));
     let mut replacement = PatternData::Notes(replacement);
     e.play();
     let n = count_allocs(|| {
@@ -371,12 +356,7 @@ fn a_stepping_mono_arp_does_not_allocate() {
     if let MachineBody::Mono(mono) = &mut m.body {
         // Overlapping held notes, so the arp has a chord to step through.
         mono.patterns[0].notes = [(0, 36), (4, 40), (8, 43), (24, 47), (40, 38)]
-            .map(|(start, pitch)| Note {
-                start,
-                len: 24,
-                pitch,
-                vel: 100,
-            })
+            .map(|(start, pitch)| Note::new(start, 24, pitch, 100))
             .to_vec();
     }
     let uid = m.uid;
@@ -434,12 +414,7 @@ fn host_commands_and_rendering_do_not_allocate() {
     let (mut host, mut tx, mut rx) = host::channel(Engine::from_project(SR, &busy_project()));
     let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
     let mut replacement = NotePattern::default();
-    replacement.notes.push(Note {
-        start: 4,
-        len: 4,
-        pitch: 62,
-        vel: 90,
-    });
+    replacement.notes.push(Note::new(4, 4, 62, 90));
     let sample = Some(std::sync::Arc::new(
         acid_engine::sampler::sample::SampleData {
             sample_rate: 44_100,

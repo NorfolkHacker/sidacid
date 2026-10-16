@@ -1305,12 +1305,7 @@ mod tests {
         use acid_engine::project::{Note, NotePattern};
         let mut d = doc();
         let mut p = NotePattern::default();
-        p.notes.push(Note {
-            start: 2,
-            len: 3,
-            pitch: 64,
-            vel: 99,
-        });
+        p.notes.push(Note::new(2, 3, 64, 99));
         let cmds = d.apply(
             Edit::NotePattern {
                 uid: SAMPLER,

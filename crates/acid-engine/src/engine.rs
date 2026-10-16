@@ -995,12 +995,7 @@ mod tests {
                     let pat = &mut patterns[0];
                     pat.length = 1;
                     pat.notes = (0..MAX_NOTES)
-                        .map(|i| Note {
-                            start: 0,
-                            len: 4,
-                            pitch: (i % 128) as u8,
-                            vel: 100,
-                        })
+                        .map(|i| Note::new(0, 4, (i % 128) as u8, 100))
                         .collect();
                 }
             }
@@ -1481,12 +1476,7 @@ mod tests {
         )));
         p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 4,
-                pitch: 37,
-                vel: 120,
-            });
+            .push(Note::new(0, 4, 37, 120));
         p
     }
 
@@ -1566,20 +1556,10 @@ mod tests {
         let mut p = tone_slot_project();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 32,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 32, 60, 120));
         p.sampler_mut(MachineUid(6)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 32,
-                pitch: 72,
-                vel: 120,
-            });
+            .push(Note::new(0, 32, 72, 120));
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.5);
@@ -1611,12 +1591,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 64,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 64, 60, 120));
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.2);
@@ -1655,12 +1630,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 64,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 64, 60, 120));
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.2);
@@ -1679,12 +1649,7 @@ mod tests {
         p.fm_mut(MachineUid(5)).unwrap().patterns[0].length = 64;
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 8,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 8, 60, 120));
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.1);
@@ -1708,12 +1673,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 32,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 32, 60, 120));
         p.set_param(MachineUid(5).param(FmParam::Volume), 0.0);
         let mut e = Engine::from_project(SR, &p);
         e.play();
@@ -2244,12 +2204,7 @@ mod tests {
         use crate::project::Note;
         let mut e = demo_engine();
         let mut p = NotePattern::default();
-        p.notes.push(Note {
-            start: 0,
-            len: 4,
-            pitch: 60,
-            vel: 100,
-        });
+        p.notes.push(Note::new(0, 4, 60, 100));
         let mut p = PatternData::Notes(p);
         assert!(e.swap_pattern(pos_uid(4), 2, &mut p));
         assert!(
@@ -2274,12 +2229,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 4,
-                pitch: 60,
-                vel: 100,
-            });
+            .push(Note::new(0, 4, 60, 100));
         let mut held = Engine::from_project(SR, &p);
         held.play();
         held.note_on(pos_uid(4), 60, 100);
@@ -2301,12 +2251,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 32,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 32, 60, 120));
         p.set_param(
             MachineUid(5).param(MachineParam::FmOp(0, OpParam::Level)),
             0.0,
@@ -2327,12 +2272,7 @@ mod tests {
         let mut p = Project::default();
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 32,
-                pitch: 57,
-                vel: 120,
-            });
+            .push(Note::new(0, 32, 57, 120));
         p.set_param(
             MachineUid(5).param(MachineParam::FmOp(1, OpParam::Level)),
             0.9,
@@ -2424,12 +2364,7 @@ mod tests {
         p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::L4)), 1.0);
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 8,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(Note::new(0, 8, 60, 120));
         let mut bar = crate::project::Bar::default();
         bar.cell_mut(MachineUid(5)).pattern = Some(crate::project::PatternRef(0));
         p.song.bars = vec![bar];
@@ -2513,12 +2448,7 @@ mod tests {
             let pat = &mut mono.patterns[0];
             pat.length = 16;
             pat.notes = [48, 52, 55]
-                .map(|pitch| Note {
-                    start: 0,
-                    len: 64,
-                    pitch,
-                    vel: 100,
-                })
+                .map(|pitch| Note::new(0, 64, pitch, 100))
                 .to_vec();
         }
         let uid = m.uid;
@@ -2551,12 +2481,7 @@ mod tests {
             for (slot, length) in [(0, 6u8), (1, 16)] {
                 let pat = &mut mono.patterns[slot];
                 pat.length = length;
-                pat.notes = vec![Note {
-                    start: 0,
-                    len: length as u16 * 4,
-                    pitch: 48,
-                    vel: 100,
-                }];
+                pat.notes = vec![Note::new(0, length as u16 * 4, 48, 100)];
             }
         }
         let uid = m.uid;

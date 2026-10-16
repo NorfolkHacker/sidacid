@@ -85,12 +85,8 @@ pub fn add(p: &mut NotePattern, start: u16, len: u16, pitch: u8, vel: u8) -> Opt
         return None;
     }
     p.notes.retain(|n| !overlaps(n));
-    p.notes.push(Note {
-        start,
-        len,
-        pitch,
-        vel: vel.clamp(1, 127),
-    });
+    p.notes
+        .push(Note::new(start, len, pitch, vel.clamp(1, 127)));
     Some(p.notes.len() - 1)
 }
 
@@ -257,15 +253,7 @@ mod tests {
         assert_eq!(p.notes.len(), 3);
         let i = add(&mut p, 2, 4, 64, 80).unwrap();
         assert_eq!(p.notes.len(), 3, "the old 64 was replaced");
-        assert_eq!(
-            p.notes[i],
-            Note {
-                start: 2,
-                len: 4,
-                pitch: 64,
-                vel: 80
-            }
-        );
+        assert_eq!(p.notes[i], Note::new(2, 4, 64, 80));
         assert!(
             add(&mut p, 4, 4, 60, 100).is_some(),
             "touching, not overlapping"
@@ -292,12 +280,7 @@ mod tests {
             row_h: 1.0,
             ticks: 64,
         };
-        let n = Note {
-            start: u16::MAX,
-            len: 5,
-            pitch: 60,
-            vel: 1,
-        };
+        let n = Note::new(u16::MAX, 5, 60, 1);
         let _ = g.note_rect(&n);
     }
 
@@ -416,12 +399,7 @@ mod tests {
         assert_eq!(g.cell_at(30.0 + 6.0 * 64.0, 10.0), None, "past the end");
         assert_eq!(g.cell_at_clamped(0.0, 9999.0), (0, 0));
         assert_eq!(g.pitch_at(10.0 + 8.0 * 67.5), Some(60));
-        let n = Note {
-            start: 4,
-            len: 70,
-            pitch: 60,
-            vel: 1,
-        };
+        let n = Note::new(4, 70, 60, 1);
         let (x0, y0, x1, y1) = g.note_rect(&n);
         assert_eq!((x0, y0, y1), (54.0, g.row_top(60), g.row_top(60) + 8.0));
         assert_eq!(x1, 30.0 + 64.0 * 6.0, "drawn up to the pattern end");

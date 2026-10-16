@@ -1741,12 +1741,7 @@ mod tests {
     use crate::project::Note;
 
     fn note(start: u16, len: u16, pitch: u8) -> Note {
-        Note {
-            start,
-            len,
-            pitch,
-            vel: 100,
-        }
+        Note::new(start, len, pitch, 100)
     }
 
     fn poly(ev: &[(usize, SeqEvent)]) -> Vec<(usize, SeqEvent)> {

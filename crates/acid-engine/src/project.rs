@@ -121,13 +121,93 @@ impl Default for DrumPattern {
     }
 }
 
-/// One note of a poly note pattern, in ticks (`TICKS_PER_STEP` per step).
+/// When a note plays, beyond its chance (spec phase 6; stored from v5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cond {
+    #[default]
+    Always,
+    /// Plays on pass `a` of every `b` loops (1 <= a <= b <= 8).
+    Ratio(u8, u8),
+    First,
+    NotFirst,
+    Fill,
+    NotFill,
+    /// The lane's previous conditional note played.
+    Pre,
+    NotPre,
+}
+
+impl Cond {
+    pub fn is_valid(self) -> bool {
+        match self {
+            Cond::Ratio(a, b) => (1..=8).contains(&b) && (1..=b).contains(&a),
+            _ => true,
+        }
+    }
+
+    fn is_always(&self) -> bool {
+        *self == Cond::Always
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn full_chance() -> u8 {
+    100
+}
+
+fn is_full_chance(c: &u8) -> bool {
+    *c == 100
+}
+
+fn one(n: &u8) -> bool {
+    *n == 1
+}
+
+fn single() -> u8 {
+    1
+}
+
+/// One note of a note pattern, in ticks (`TICKS_PER_STEP` per step).
+/// Fields past `vel` are skipped when at their defaults, so a plain
+/// FM or sampler note saves as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Note {
     pub start: u16,
     pub len: u16,
     pub pitch: u8,
     pub vel: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accent: bool,
+    /// Acid: glide into a note starting where this one ends.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub slide: bool,
+    /// Play chance in percent, 0..=100.
+    #[serde(default = "full_chance", skip_serializing_if = "is_full_chance")]
+    pub chance: u8,
+    /// Even re-triggers within the note, 1..=8.
+    #[serde(default = "single", skip_serializing_if = "one")]
+    pub ratchet: u8,
+    #[serde(default, skip_serializing_if = "Cond::is_always")]
+    pub cond: Cond,
+}
+
+impl Note {
+    pub const fn new(start: u16, len: u16, pitch: u8, vel: u8) -> Self {
+        Self {
+            start,
+            len,
+            pitch,
+            vel,
+            accent: false,
+            slide: false,
+            chance: 100,
+            ratchet: 1,
+            cond: Cond::Always,
+        }
+    }
 }
 
 /// A polyphonic pattern for the FM synth and sampler. Notes are in no
@@ -151,7 +231,13 @@ impl NotePattern {
         (1..=STEPS as u8).contains(&self.length)
             && self.notes.len() <= MAX_NOTES
             && self.notes.iter().all(|n| {
-                n.len >= 1 && n.start < max_start && n.pitch <= 127 && (1..=127).contains(&n.vel)
+                n.len >= 1
+                    && n.start < max_start
+                    && n.pitch <= 127
+                    && (1..=127).contains(&n.vel)
+                    && n.chance <= 100
+                    && (1..=8).contains(&n.ratchet)
+                    && n.cond.is_valid()
             })
     }
 }
@@ -1340,12 +1426,9 @@ mod tests {
         bar.cell_mut(MachineUid(2)).transpose = 3;
         bar.cell_mut(MachineUid(6)).mute = true;
         p.song.bars.push(bar);
-        fm_mut(&mut p).patterns[9].notes.push(Note {
-            start: 3,
-            len: 6,
-            pitch: 64,
-            vel: 90,
-        });
+        fm_mut(&mut p).patterns[9]
+            .notes
+            .push(Note::new(3, 6, 64, 90));
         let text = p.to_ron();
         let back = Project::from_ron(&text).unwrap();
         assert_eq!(back, p);
@@ -1489,63 +1572,25 @@ mod tests {
         let mut p = NotePattern::default();
         assert!(p.is_well_formed());
         assert_eq!(p.ticks(), 16 * TICKS_PER_STEP);
-        p.notes.push(Note {
-            start: 0,
-            len: 4,
-            pitch: 60,
-            vel: 100,
-        });
+        p.notes.push(Note::new(0, 4, 60, 100));
         assert!(p.is_well_formed());
         p.length = 4;
-        p.notes.push(Note {
-            start: 200,
-            len: 1,
-            pitch: 60,
-            vel: 1,
-        });
+        p.notes.push(Note::new(200, 1, 60, 1));
         assert!(p.is_well_formed(), "notes past a shortened end are kept");
         let mut bad = p.clone();
-        bad.notes.push(Note {
-            start: 0,
-            len: 0,
-            pitch: 60,
-            vel: 100,
-        });
+        bad.notes.push(Note::new(0, 0, 60, 100));
         assert!(!bad.is_well_formed(), "zero length");
         let mut bad = p.clone();
-        bad.notes.push(Note {
-            start: 0,
-            len: 1,
-            pitch: 60,
-            vel: 0,
-        });
+        bad.notes.push(Note::new(0, 1, 60, 0));
         assert!(!bad.is_well_formed(), "zero velocity");
         let mut bad = p.clone();
-        bad.notes.push(Note {
-            start: 0,
-            len: 1,
-            pitch: 128,
-            vel: 1,
-        });
+        bad.notes.push(Note::new(0, 1, 128, 1));
         assert!(!bad.is_well_formed(), "pitch above 127");
         let mut bad = p.clone();
-        bad.notes.push(Note {
-            start: 256,
-            len: 1,
-            pitch: 1,
-            vel: 1,
-        });
+        bad.notes.push(Note::new(256, 1, 1, 1));
         assert!(!bad.is_well_formed(), "start past 64 steps");
         let mut bad = NotePattern::default();
-        bad.notes = vec![
-            Note {
-                start: 0,
-                len: 1,
-                pitch: 1,
-                vel: 1
-            };
-            MAX_NOTES + 1
-        ];
+        bad.notes = vec![Note::new(0, 1, 1, 1); MAX_NOTES + 1];
         assert!(!bad.is_well_formed(), "over the note cap");
     }
 
@@ -1559,12 +1604,9 @@ mod tests {
         p.note_patterns_mut(SAMPLER).unwrap()[3].length = 8;
         assert_eq!(sampler(&p).patterns[3].length, 8);
         assert_eq!(p.note_patterns(FM).unwrap().len(), PATTERNS);
-        fm_mut(&mut p).patterns[1].notes.push(Note {
-            start: 0,
-            len: 1,
-            pitch: 60,
-            vel: 0,
-        });
+        fm_mut(&mut p).patterns[1]
+            .notes
+            .push(Note::new(0, 1, 60, 0));
         assert!(matches!(p.validate(), Err(ProjectError::Invalid(_))));
     }
 
@@ -1647,5 +1689,61 @@ mod tests {
             .replace("version: 4", "version: 3");
         let p = Project::from_ron(&text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
+    }
+
+    #[test]
+    fn notes_save_without_default_fields_and_load_them_back() {
+        let n = Note::new(4, 4, 60, 100);
+        let text = ron::ser::to_string(&n).unwrap();
+        assert_eq!(text, "(start:4,len:4,pitch:60,vel:100)");
+        let back: Note = ron::from_str(&text).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(
+            (back.chance, back.ratchet, back.cond),
+            (100, 1, Cond::Always)
+        );
+        let flagged = Note {
+            accent: true,
+            slide: true,
+            chance: 50,
+            ratchet: 3,
+            cond: Cond::Ratio(1, 4),
+            ..n
+        };
+        let back: Note = ron::from_str(&ron::ser::to_string(&flagged).unwrap()).unwrap();
+        assert_eq!(back, flagged);
+    }
+
+    #[test]
+    fn note_fields_are_validated() {
+        let ok = |n: Note| {
+            NotePattern {
+                notes: vec![n],
+                length: 16,
+            }
+            .is_well_formed()
+        };
+        let n = Note::new(0, 4, 60, 100);
+        assert!(ok(n));
+        assert!(!ok(Note { chance: 101, ..n }));
+        assert!(!ok(Note { ratchet: 0, ..n }));
+        assert!(!ok(Note { ratchet: 9, ..n }));
+        assert!(ok(Note { ratchet: 8, ..n }));
+        assert!(!ok(Note {
+            cond: Cond::Ratio(0, 4),
+            ..n
+        }));
+        assert!(!ok(Note {
+            cond: Cond::Ratio(5, 4),
+            ..n
+        }));
+        assert!(!ok(Note {
+            cond: Cond::Ratio(1, 9),
+            ..n
+        }));
+        assert!(ok(Note {
+            cond: Cond::Ratio(4, 4),
+            ..n
+        }));
     }
 }

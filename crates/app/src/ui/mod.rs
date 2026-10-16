@@ -1290,20 +1290,10 @@ mod tests {
         let mut doc = Document::new(Project::default());
         doc.project.fm_mut(FM).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 8,
-                pitch: 60,
-                vel: 100,
-            });
+            .push(Note::new(0, 8, 60, 100));
         doc.project.sampler_mut(SAMPLER).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 4,
-                len: 300,
-                pitch: 36,
-                vel: 20,
-            });
+            .push(Note::new(4, 300, 36, 20));
         doc.project.sampler_mut(SAMPLER).unwrap().patterns[0].length = 4;
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 3);
@@ -1388,12 +1378,7 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.doc.project.fm_mut(FM).unwrap().patterns[0]
             .notes
-            .push(Note {
-                start: 0,
-                len: 4,
-                pitch: 60,
-                vel: 100,
-            });
+            .push(Note::new(0, 4, 60, 100));
         app.view.focus = Some(FM);
         app.copy_pattern();
         app.view.focus = Some(SAMPLER);

@@ -216,12 +216,7 @@ mod tests {
         };
         p.fm_mut(MachineUid(5)).unwrap().patterns[0]
             .notes
-            .push(crate::project::Note {
-                start: 0,
-                len: 8,
-                pitch: 60,
-                vel: 120,
-            });
+            .push(crate::project::Note::new(0, 8, 60, 120));
         // OP1 releases slowly: the note rings past the song's end.
         p.set_param(MachineUid(5).param(MachineParam::FmOp(0, OpParam::R4)), 0.3);
         let mut bar = crate::project::Bar::default();
