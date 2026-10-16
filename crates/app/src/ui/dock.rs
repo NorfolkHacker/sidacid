@@ -212,6 +212,31 @@ impl SidAcidApp {
             let x = self.view.dock.scroll_x + resp.drag_delta().x;
             self.view.dock.scroll_x = x.clamp(0.0, max_scroll);
         }
+        // Above the thumb strip: a drag picks a time range, a click clears it.
+        let numbers = Rect::from_min_max(strip.min, pos2(strip.right(), bar.top()));
+        let picker = ui.interact(
+            numbers,
+            ui.id().with("dock_ruler_range"),
+            Sense::click_and_drag(),
+        );
+        let tick_at = |x: f32, scroll_x: f32| {
+            (((x - left + scroll_x) / tw).max(0.0) as u32).min(u16::MAX as u32) as u16
+        };
+        if picker.clicked() {
+            self.view.dock.range = None;
+        } else if picker.dragged() {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            if let (Some(o), Some(p)) = (origin, picker.interact_pointer_pos()) {
+                let snap = self.view.dock.snap;
+                let scroll = self.view.dock.scroll_x;
+                let a = snap.floor(tick_at(o.x, scroll));
+                let b = snap.floor(tick_at(p.x, scroll));
+                let lo = a.min(b);
+                let hi = a.max(b).saturating_add(snap.ticks());
+                self.view.dock.range = Some((lo, hi));
+                self.select_range(lo, hi);
+            }
+        }
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, theme::GRID_DARK);
         let scroll_x = self.view.dock.scroll_x;
@@ -246,7 +271,27 @@ impl SidAcidApp {
                 ui.visuals().text_color(),
             );
         }
+        if let Some((lo, hi)) = self.view.dock.range {
+            let band = Rect::from_min_max(
+                pos2(left + lo as f32 * tw - scroll_x, rect.top()),
+                pos2(left + hi as f32 * tw - scroll_x, bar.top()),
+            );
+            painter.rect_filled(band, 0.0, theme::ACID.gamma_multiply(0.35));
+        }
         resp.on_hover_text("Drag to scroll the lanes");
+    }
+
+    /// Makes the notes starting in `[t0, t1)` every lane's selection.
+    fn select_range(&mut self, t0: u16, t1: u16) {
+        use super::note_ops::{in_range, values};
+        for uid in self.doc.project.rack_uids() {
+            let slot = self.selected(uid);
+            let Some(p) = self.doc.project.roll(uid, slot) else {
+                continue;
+            };
+            let notes = values(p, &in_range(p, t0, t1));
+            self.set_selection(uid, notes);
+        }
     }
 
     /// After the dock and the rack: a press anywhere outside the dock
@@ -626,6 +671,77 @@ mod tests {
         drag_by(&mut app, &ctx, thumb, vec2(60.0, 0.0), 4, 3.0);
         let x = app.view.dock.scroll_x;
         assert!((x - 60.0).abs() < 1.0, "the thumb scrolls: {x}");
+    }
+
+    fn range_app() -> SidAcidApp {
+        use crate::test_rack::{FM, SYNTH1};
+        use acid_engine::project::Note;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        for uid in [FM, SYNTH1] {
+            let p = app.doc.project.roll_mut(uid, 0).unwrap();
+            p.length = 64;
+            p.notes = vec![
+                Note::new(0, 4, 60, 100),
+                Note::new(16, 4, 62, 100),
+                Note::new(40, 4, 64, 100),
+            ];
+        }
+        app.view.dock.follow = false;
+        app
+    }
+
+    #[test]
+    fn a_ruler_drag_selects_the_range_in_every_lane() {
+        use crate::test_rack::{FM, SYNTH1};
+        let mut app = range_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let before = app.doc.project.clone();
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        // Ticks 14..30 (snap is a step of 4): press inside 12, release inside 28.
+        let from = pos2(left + 14.0 * tw, ruler.top() + 4.0);
+        drag_by(&mut app, &ctx, from, vec2(14.0 * tw, 0.0), 4, 1.0);
+        assert_eq!(app.view.dock.range, Some((12, 32)));
+        for uid in [FM, SYNTH1] {
+            assert_eq!(app.selection(uid), vec![1], "the note at 16 only");
+        }
+        assert_eq!(app.doc.project, before, "no edit to the project");
+    }
+
+    #[test]
+    fn a_ruler_click_clears_the_range() {
+        use crate::test_rack::FM;
+        let mut app = range_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        app.view.dock.range = Some((0, 8));
+        app.set_selection(FM, vec![acid_engine::project::Note::new(0, 4, 60, 100)]);
+        press(&mut app, &ctx, pos2(left + 30.0, ruler.top() + 4.0), 1.0);
+        assert_eq!(app.view.dock.range, None);
+        assert_eq!(app.selection(FM), vec![0], "the selection stays");
+        // A click in a lane grid clears a range too.
+        app.view.dock.range = Some((0, 8));
+        let lanes = app.view.dock.lanes.unwrap();
+        press(&mut app, &ctx, pos2(left + 200.0, lanes.top() + 50.0), 3.0);
+        assert_eq!(app.view.dock.range, None, "a lane click clears it");
+    }
+
+    #[test]
+    fn the_thumb_strip_still_scrolls() {
+        let mut app = range_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let thumb = pos2(left + 10.0, ruler.bottom() - 2.0);
+        drag_by(&mut app, &ctx, thumb, vec2(60.0, 0.0), 4, 1.0);
+        let x = app.view.dock.scroll_x;
+        assert!((x - 60.0).abs() < 1.0, "scrolled: {x}");
+        assert_eq!(app.view.dock.range, None, "no range from the strip");
     }
 
     fn press(app: &mut SidAcidApp, ctx: &egui::Context, at: egui::Pos2, time: f64) {

@@ -100,6 +100,8 @@ pub struct DockState {
     /// The lane stack's view this frame, and how far it is scrolled down.
     pub lanes: Option<egui::Rect>,
     pub lanes_offset: f32,
+    /// A time range picked on the ruler (ticks, end exclusive).
+    pub range: Option<(u16, u16)>,
 }
 
 impl Default for DockState {
@@ -116,6 +118,7 @@ impl Default for DockState {
             ruler: None,
             lanes: None,
             lanes_offset: 0.0,
+            range: None,
         }
     }
 }

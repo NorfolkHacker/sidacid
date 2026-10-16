@@ -404,6 +404,16 @@ impl SidAcidApp {
             );
         }
 
+        if let Some((lo, hi)) = self.view.dock.range {
+            let band = Rect::from_min_max(
+                pos2(geom.x_of(lo).max(geom.left), rect.top()),
+                pos2(geom.x_of(hi).min(rect.right()), rect.bottom()),
+            );
+            if band.width() > 0.0 {
+                grid.rect_filled(band, 0.0, theme::ACID.gamma_multiply(0.12));
+            }
+        }
+
         // Notes. A drum note whose pitch is not an instrument has no row.
         let drawn = |n: &acid_engine::project::Note| {
             n.start < ticks && (!drums || (n.pitch as usize) < DRUM_INSTRUMENTS)
@@ -489,6 +499,9 @@ impl SidAcidApp {
             // only the cursor's pitch.
             self.view.focus = Some(uid);
             self.view.dock.keyboard = true;
+            if p.x >= geom.left {
+                self.view.dock.range = None;
+            }
             let cursor = &mut self.view.panel(uid).cursor;
             cursor.pitch = geom.pitch_at_clamped(p.y);
             if p.x >= geom.left {
