@@ -89,6 +89,13 @@ pub struct DockState {
     pub resizing: bool,
     /// Where the dock was drawn this frame.
     pub rect: Option<egui::Rect>,
+    /// The window height the dock last matched its share to.
+    pub window_h: Option<f32>,
+    /// Where the ruler was drawn this frame.
+    pub ruler: Option<egui::Rect>,
+    /// The lane stack's view this frame, and how far it is scrolled down.
+    pub lanes: Option<egui::Rect>,
+    pub lanes_offset: f32,
 }
 
 impl Default for DockState {
@@ -101,6 +108,10 @@ impl Default for DockState {
             keyboard: false,
             resizing: false,
             rect: None,
+            window_h: None,
+            ruler: None,
+            lanes: None,
+            lanes_offset: 0.0,
         }
     }
 }

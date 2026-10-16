@@ -11,6 +11,8 @@ use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Stroke, pos2, ve
 
 /// Height of the ruler above the lanes.
 const RULER_H: f32 = 16.0;
+/// Height of the thumb strip along the ruler's bottom.
+const THUMB_H: f32 = 4.0;
 /// Gap between stacked lanes.
 const LANE_GAP: f32 = 2.0;
 
@@ -21,16 +23,33 @@ impl SidAcidApp {
         let window_h = ctx.screen_rect().height().max(0.0);
         let frac = self.settings.ui.clamped_dock_frac();
         self.latch_dock_resize(ctx);
-        let panel = egui::TopBottomPanel::bottom("dock")
+        let mut panel = egui::TopBottomPanel::bottom("dock")
             .resizable(true)
             .default_height(window_h * frac)
-            .height_range(window_h * 0.15..=window_h * 0.85)
-            .show(ctx, |ui| {
-                self.dock_header(ui);
-                self.dock_body(ui);
-            });
+            .height_range(window_h * 0.15..=window_h * 0.85);
+        if self.window_resized(window_h) {
+            // egui keeps the panel's height in points; put it back to its
+            // share of the new window for this one frame.
+            panel = panel.exact_height(window_h * frac);
+        }
+        let panel = panel.show(ctx, |ui| {
+            self.dock_header(ui);
+            self.dock_body(ui);
+        });
         let rect = panel.response.rect;
         self.track_dock_resize(ctx, rect, window_h, frac);
+    }
+
+    /// True on the frame the window's height changes, unless the dock's
+    /// edge is being dragged (that drag then sets the share itself; the
+    /// change is picked up on the frame after it).
+    fn window_resized(&mut self, window_h: f32) -> bool {
+        let dock = &mut self.view.dock;
+        if dock.resizing {
+            return false;
+        }
+        let last = dock.window_h.replace(window_h);
+        last.is_some_and(|h| (h - window_h).abs() > 0.5)
     }
 
     /// On the frame a press starts, before the panel is drawn: a press on
@@ -157,9 +176,14 @@ impl SidAcidApp {
         let max_scroll = (content_w - view_w).max(0.0);
         self.view.dock.scroll_x = self.view.dock.scroll_x.clamp(0.0, max_scroll);
         self.ruler(ui, key_w, tw, view_w, content_w);
-        egui::ScrollArea::vertical()
+        // A solid, always-shown bar, so a scrolled stack is plain to see.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        let out = egui::ScrollArea::vertical()
             .id_salt("dock_lanes")
             .auto_shrink(false)
+            // A drag on a header or gap would pan (and fling) the stack.
+            .drag_to_scroll(false)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
                 for uid in self.doc.project.rack_uids() {
                     let width = ui.available_width();
@@ -167,21 +191,27 @@ impl SidAcidApp {
                     ui.add_space(LANE_GAP);
                 }
             });
+        self.view.dock.lanes = Some(out.inner_rect);
+        self.view.dock.lanes_offset = out.state.offset.y;
     }
 
     /// Step numbers every 4 steps over the grids' columns, and a thumb
-    /// showing the visible part of the longest pattern; dragging on it
-    /// scrolls every lane.
+    /// strip along the bottom showing the visible part of the longest
+    /// pattern; dragging on the strip scrolls every lane. The rest of the
+    /// ruler is left for selecting a time range.
     fn ruler(&mut self, ui: &mut egui::Ui, key_w: f32, tw: f32, view_w: f32, content_w: f32) {
         let width = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, RULER_H), Sense::drag());
+        let (rect, _) = ui.allocate_exact_size(vec2(width, RULER_H), Sense::hover());
+        self.view.dock.ruler = Some(rect);
+        let left = rect.left() + key_w;
+        let strip = Rect::from_min_max(pos2(left, rect.top()), rect.max);
+        let bar = Rect::from_min_max(pos2(left, rect.bottom() - THUMB_H), rect.max);
+        let resp = ui.interact(bar, ui.id().with("dock_ruler_thumb"), Sense::drag());
         if resp.dragged() {
             let max_scroll = (content_w - view_w).max(0.0);
             let x = self.view.dock.scroll_x + resp.drag_delta().x;
             self.view.dock.scroll_x = x.clamp(0.0, max_scroll);
         }
-        let left = rect.left() + key_w;
-        let strip = Rect::from_min_max(pos2(left, rect.top()), rect.max);
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, theme::GRID_DARK);
         let scroll_x = self.view.dock.scroll_x;
@@ -189,7 +219,7 @@ impl SidAcidApp {
             let shown = (view_w / content_w).min(1.0);
             let x0 = left + (scroll_x / content_w).min(1.0) * view_w;
             let thumb = Rect::from_min_max(
-                pos2(x0, rect.bottom() - 4.0),
+                pos2(x0, bar.top()),
                 pos2((x0 + shown * view_w).min(strip.right()), rect.bottom()),
             );
             painter.rect_filled(thumb, 2.0, theme::KNOB_TRACK);
@@ -448,13 +478,154 @@ mod tests {
 
     /// One 1280x800 frame of the whole app at `time` with `events`.
     fn frame(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
+        frame_in(app, ctx, 800.0, time, events);
+    }
+
+    /// One frame of the whole app in a 1280 x `window_h` window.
+    fn frame_in(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        window_h: f32,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) {
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, window_h))),
             time: Some(time),
             events,
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| app.ui(ctx));
+    }
+
+    /// Presses at `from`, moves by `by` over `steps` frames, releases, then
+    /// lets a second of frames go by (for any fling to run out). All in a
+    /// 1280x800 window from egui time `time` on.
+    fn drag_by(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        from: egui::Pos2,
+        by: egui::Vec2,
+        steps: usize,
+        time: f64,
+    ) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut t = time;
+        let mut tick = |app: &mut SidAcidApp, events| {
+            frame(app, ctx, t, events);
+            t += 1.0 / 60.0;
+        };
+        tick(app, vec![egui::Event::PointerMoved(from)]);
+        tick(app, vec![button(from, true)]);
+        for i in 1..=steps {
+            let at = from + by * (i as f32 / steps as f32);
+            tick(app, vec![egui::Event::PointerMoved(at)]);
+        }
+        tick(app, vec![button(from + by, false)]);
+        for _ in 0..60 {
+            tick(app, vec![]);
+        }
+    }
+
+    #[test]
+    fn a_drag_on_a_lane_header_does_not_pan_the_lane_stack() {
+        use crate::test_rack::SYNTH1;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        assert_eq!(app.doc.project.rack_uids()[0], SYNTH1, "Synth 1 on top");
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let lanes = app.view.dock.lanes.expect("the lanes were drawn");
+        // Synth 1's header row, between its labels and its Strip toggle.
+        let from = pos2(
+            lanes.center().x,
+            lanes.top() + crate::ui::lane::HEADER_H / 2.0,
+        );
+        drag_by(&mut app, &ctx, from, vec2(0.0, -150.0), 6, 1.0);
+        assert_eq!(app.view.dock.lanes_offset, 0.0, "the stack did not move");
+    }
+
+    #[test]
+    fn the_dock_keeps_its_share_when_the_window_is_resized() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame_in(&mut app, &ctx, 800.0, 0.0, vec![]);
+        frame_in(&mut app, &ctx, 800.0, 0.1, vec![]);
+        frame_in(&mut app, &ctx, 1044.0, 0.2, vec![]);
+        frame_in(&mut app, &ctx, 1044.0, 0.3, vec![]);
+        let h = app.view.dock.rect.unwrap().height();
+        assert!((h - 0.45 * 1044.0).abs() < 2.0, "matched the share: {h}");
+        assert_eq!(app.settings.ui.dock_frac, 0.45, "nothing saved");
+        // Still resizable by hand afterwards.
+        let top = app.view.dock.rect.unwrap().top();
+        let to = pos2(640.0, top - 30.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let from = pos2(640.0, top);
+        frame_in(
+            &mut app,
+            &ctx,
+            1044.0,
+            1.0,
+            vec![egui::Event::PointerMoved(from)],
+        );
+        frame_in(&mut app, &ctx, 1044.0, 1.05, vec![button(from, true)]);
+        frame_in(
+            &mut app,
+            &ctx,
+            1044.0,
+            1.1,
+            vec![egui::Event::PointerMoved(to)],
+        );
+        frame_in(&mut app, &ctx, 1044.0, 1.15, vec![button(to, false)]);
+        frame_in(&mut app, &ctx, 1044.0, 1.2, vec![]);
+        let grown = app.view.dock.rect.unwrap().height();
+        assert!((grown - (h + 30.0)).abs() < 2.0, "dragged: {grown}");
+        let frac = app.settings.ui.dock_frac;
+        assert!((frac - grown / 1044.0).abs() < 1e-3, "kept: {frac}");
+    }
+
+    #[test]
+    fn the_lane_stack_shows_a_solid_scroll_bar() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let (lanes, ruler) = (app.view.dock.lanes.unwrap(), app.view.dock.ruler.unwrap());
+        // A floating bar takes no room; a solid one does.
+        assert!(
+            lanes.right() < ruler.right() - 5.0,
+            "room kept for the bar: {lanes:?} {ruler:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_ruler_thumb_strip_drags_the_lanes_sideways() {
+        use crate::test_rack::FM;
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.doc.project.roll_mut(FM, 0).unwrap().length = 64;
+        app.view.dock.follow = false;
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        // On the step numbers: nothing (kept for selecting a time range).
+        let numbers = pos2(left + 40.0, ruler.top() + 4.0);
+        drag_by(&mut app, &ctx, numbers, vec2(60.0, 0.0), 4, 1.0);
+        assert_eq!(app.view.dock.scroll_x, 0.0, "the numbers do not scroll");
+        // On the thumb strip along the bottom: scrolls.
+        let thumb = pos2(left + 10.0, ruler.bottom() - 2.0);
+        drag_by(&mut app, &ctx, thumb, vec2(60.0, 0.0), 4, 3.0);
+        let x = app.view.dock.scroll_x;
+        assert!((x - 60.0).abs() < 1.0, "the thumb scrolls: {x}");
     }
 
     fn press(app: &mut SidAcidApp, ctx: &egui::Context, at: egui::Pos2, time: f64) {
