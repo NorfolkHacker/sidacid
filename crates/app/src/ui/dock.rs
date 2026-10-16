@@ -241,6 +241,34 @@ impl SidAcidApp {
     }
 }
 
+impl SidAcidApp {
+    /// Apply one key press to the focused machine's selected pattern when
+    /// the dock has the keyboard. True when the key was used, even if it
+    /// only moved the cursor.
+    pub(crate) fn dock_key(&mut self, key: egui::Key, mods: egui::Modifiers) -> bool {
+        use super::key_entry::{apply_entry, entry_key};
+        if !self.view.dock.keyboard {
+            return false;
+        }
+        let (Some(uid), Some(entry)) = (self.focused(), entry_key(key, mods)) else {
+            return false;
+        };
+        let slot = self.selected(uid);
+        let Some(mut pattern) = self.doc.project.roll(uid, slot).cloned() else {
+            return false;
+        };
+        let kind = self.lane_kind(uid);
+        let snap = self.view.dock.snap;
+        let mut cursor = self.view.panel(uid).cursor;
+        let changed = apply_entry(&mut pattern, &mut cursor, entry, kind, snap);
+        self.view.panel(uid).cursor = cursor;
+        if changed {
+            self.commit_poly(uid, slot, Some(pattern), false, true);
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +288,52 @@ mod tests {
                 "{uid:?} lane drawn"
             );
         }
+    }
+
+    #[test]
+    fn note_keys_write_into_the_focused_lane_only_with_dock_focus() {
+        use crate::test_rack::FM;
+        use eframe::egui::{Key, Modifiers};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.focus = Some(FM);
+        app.view.panel(FM).cursor = crate::ui::key_entry::Cursor { tick: 0, pitch: 60 };
+        assert!(!app.dock_key(Key::Z, Modifiers::NONE), "no dock focus");
+        assert!(app.doc.project.roll(FM, 0).unwrap().notes.is_empty());
+        app.view.dock.keyboard = true;
+        assert!(app.dock_key(Key::Z, Modifiers::NONE));
+        assert!(app.dock_key(Key::X, Modifiers::NONE));
+        let notes = &app.doc.project.roll(FM, 0).unwrap().notes;
+        assert_eq!(
+            notes.iter().map(|n| (n.start, n.pitch)).collect::<Vec<_>>(),
+            [(0, 60), (4, 62)]
+        );
+        assert!(
+            !app.dock_key(Key::Z, Modifiers::COMMAND),
+            "Ctrl+Z is not a note"
+        );
+        app.undo();
+        assert_eq!(
+            app.doc.project.roll(FM, 0).unwrap().notes.len(),
+            1,
+            "one undo per key"
+        );
+    }
+
+    #[test]
+    fn arrows_move_the_cursor_without_editing() {
+        use crate::test_rack::KIT808;
+        use eframe::egui::{Key, Modifiers};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.focus = Some(KIT808);
+        app.view.dock.keyboard = true;
+        assert!(app.dock_key(Key::ArrowRight, Modifiers::NONE));
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(
+            app.view.panel(KIT808).cursor,
+            crate::ui::key_entry::Cursor { tick: 4, pitch: 1 }
+        );
+        assert!(app.doc.project.roll(KIT808, 0).unwrap().notes.is_empty());
+        assert!(!app.doc.is_dirty());
     }
 
     #[test]

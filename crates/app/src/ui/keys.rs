@@ -59,6 +59,40 @@ fn typing(ctx: &egui::Context) -> bool {
 }
 
 impl SidAcidApp {
+    /// Feed the frame's key presses (repeats too) to the dock and take the
+    /// used ones out of the frame so focused widgets don't act on them.
+    fn dock_keys(&mut self, ctx: &egui::Context) {
+        if !self.view.dock.keyboard {
+            return;
+        }
+        let keys: Vec<(Key, Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let used: Vec<bool> = keys.iter().map(|&(k, m)| self.dock_key(k, m)).collect();
+        let mut n = 0;
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                if matches!(e, egui::Event::Key { pressed: true, .. }) {
+                    n += 1;
+                    !used[n - 1]
+                } else {
+                    true
+                }
+            })
+        });
+    }
+
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if typing(ctx) || self.view.confirm.is_some() || self.view.message.is_some() {
             return;
@@ -74,6 +108,7 @@ impl SidAcidApp {
                     if !modifiers.command)
             })
         });
+        self.dock_keys(ctx);
         let (mut copied, mut pasted) = (false, false);
         for s in pressed {
             // Backends may send both a key and a clipboard event for one press.

@@ -10,7 +10,6 @@ mod drum_panel;
 mod files;
 mod fm_panel;
 mod fm_voices;
-#[allow(dead_code)] // used by the dock (phase 2, task 6)
 mod key_entry;
 mod keys;
 pub mod knob;
