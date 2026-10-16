@@ -59,13 +59,23 @@ fn roll(seed: u32, pos: usize, loops: u32, index: usize) -> u64 {
     mix(x) % 100
 }
 
-/// The sub-hits of a note as `(start, len)` ticks: `ratchet` hits at
-/// `start + k*len/n`, each `max(1, len/n)` long.
-pub fn sub_hits(n: &Note) -> impl Iterator<Item = (u16, u16)> {
-    let count = n.ratchet.clamp(1, 8) as u32;
-    let (start, len) = (n.start as u32, n.len as u32);
-    let sub = (len / count).max(1) as u16;
-    (0..count).map(move |k| ((start + k * len / count) as u16, sub))
+/// Sub-ticks per tick: a ratchet's hits (1 to 8 over a whole number of
+/// ticks) all land exactly on one, as 840 is divisible by 1 to 8.
+pub const FINE: u32 = 840;
+
+/// A note's ratchet: how many hits it splits into (1 to 8).
+pub fn ratchet_count(n: &Note) -> u32 {
+    n.ratchet.clamp(1, 8) as u32
+}
+
+/// The sub-hits of a note as `(start, len)` in sub-ticks (`FINE` per
+/// tick): `ratchet` hits at exactly `start + k*len/n`, each `len/n` long
+/// (a note shorter than a tick counts as one tick long).
+pub fn sub_hits(n: &Note) -> impl Iterator<Item = (u32, u32)> + use<> {
+    let count = ratchet_count(n);
+    let start = n.start as u32 * FINE;
+    let sub = n.len.max(1) as u32 * FINE / count;
+    (0..count).map(move |k| (start + k * sub, sub))
 }
 
 #[cfg(test)]
@@ -173,7 +183,7 @@ mod tests {
         assert!(!p && !t.pre);
     }
 
-    fn hits(ratchet: u8, start: u16, len: u16) -> Vec<(u16, u16)> {
+    fn hits(ratchet: u8, start: u16, len: u16) -> Vec<(u32, u32)> {
         sub_hits(&Note {
             ratchet,
             start,
@@ -185,24 +195,26 @@ mod tests {
 
     #[test]
     fn ratchet_split() {
-        assert_eq!(hits(1, 10, 24), [(10, 24)]);
-        assert_eq!(hits(3, 10, 24), [(10, 8), (18, 8), (26, 8)]);
-        assert_eq!(hits(3, 0, 10), [(0, 3), (3, 3), (6, 3)]);
-        assert_eq!(hits(8, 0, 24).len(), 8);
-        // len < ratchet: starts collapse, sub length stays >= 1.
-        assert_eq!(hits(8, 4, 3).iter().map(|h| h.1).min(), Some(1));
+        const F: u32 = FINE;
+        assert_eq!(hits(1, 10, 24), [(10 * F, 24 * F)]);
         assert_eq!(
-            hits(8, 4, 3),
-            [
-                (4, 1),
-                (4, 1),
-                (4, 1),
-                (5, 1),
-                (5, 1),
-                (5, 1),
-                (6, 1),
-                (6, 1)
-            ]
+            hits(3, 10, 24),
+            [(10 * F, 8 * F), (18 * F, 8 * F), (26 * F, 8 * F)]
         );
+        // Exact fractions of a tick, not snapped to the grid.
+        assert_eq!(hits(3, 0, 4), [(0, 1120), (1120, 1120), (2240, 1120)]);
+        let eight: Vec<u32> = hits(8, 0, 4).iter().map(|h| h.0).collect();
+        assert_eq!(eight, (0..8).map(|k| k * F / 2).collect::<Vec<_>>());
+        // Shorter than the ratchet: still 8 distinct, even hits.
+        assert_eq!(hits(8, 4, 3).iter().map(|h| h.1).min(), Some(3 * F / 8));
+        assert_eq!(hits(8, 4, 3)[7].0, 4 * F + 7 * 3 * F / 8);
+        // Every ratchet divides every length exactly.
+        for r in 1..=8u8 {
+            for len in 1..=64u16 {
+                let h = hits(r, 0, len);
+                assert_eq!(h.len(), r as usize);
+                assert_eq!(h.last().unwrap().0 + h[0].1, len as u32 * F, "{r} {len}");
+            }
+        }
     }
 }

@@ -52,6 +52,9 @@ fn event_reserve(param_count: usize) -> usize {
     param_count + MAX_MACHINES * SLOT_EVENTS
 }
 
+// Held-back events come out of the same buffer, a batch at a time.
+const _: () = assert!(crate::sequencer::PENDING <= MAX_MACHINES * SLOT_EVENTS);
+
 /// The most params any rack can have: `MAX_MACHINES` of the type with the
 /// most knobs, plus the globals. The event buffer is reserved for it so a
 /// rack edit never needs a bigger one. Allocates (construction only).
@@ -801,6 +804,18 @@ impl Engine {
         let mut pos = 0;
         let mut ticks_here = 0;
         while pos < n {
+            // Hits a tick held back (ratchets between ticks) go at their
+            // own sample, before a tick on the same one.
+            let due = self.seq.samples_to_due();
+            if due == 0 {
+                self.events.clear();
+                self.seq.take_due(&mut self.events);
+                for i in 0..self.events.len() {
+                    let ev = self.events[i];
+                    self.handle_event(ev);
+                }
+                continue;
+            }
             let until = self.seq.samples_to_next_tick();
             if until == 0 && ticks_here < MAX_TICKS_PER_POSITION {
                 ticks_here += 1;
@@ -831,7 +846,8 @@ impl Engine {
                 n - pos
             } else {
                 until.min(n - pos)
-            };
+            }
+            .min(due);
             for (s, ns) in self.slots.iter_mut().zip(self.slot_ns.iter_mut()) {
                 let start = Instant::now();
                 s.render(pos..pos + run);
@@ -2542,6 +2558,30 @@ mod tests {
             (bar_two..=bar_two + 2).contains(&third),
             "third step at {third}, bar two at {bar_two}"
         );
+    }
+
+    #[test]
+    fn a_ratchet_hit_between_ticks_sounds_on_its_own_sample() {
+        // A x2 one-tick kick: its second hit is half a tick in. Until then
+        // it renders as the plain kick; from that sample on it doesn't.
+        let kick = |ratchet: u8| {
+            let mut p = Project::default();
+            p.bpm = 120.0;
+            p.swing = 0.0;
+            let roll = p.roll_mut(MachineUid(3), 0).unwrap();
+            roll.notes.clear();
+            roll.notes.push(crate::project::Note {
+                ratchet,
+                ..crate::project::Note::new(0, 1, 0, 100)
+            });
+            let mut e = Engine::from_project(SR, &p);
+            e.play();
+            render(&mut e, 0.1).0
+        };
+        let (plain, twice) = (kick(1), kick(2));
+        let half_tick = 60.0 / 120.0 / 16.0 * SR as f64 / 2.0;
+        let first = plain.iter().zip(&twice).position(|(a, b)| a != b);
+        assert_eq!(first, Some(half_tick.ceil() as usize));
     }
 
     #[test]

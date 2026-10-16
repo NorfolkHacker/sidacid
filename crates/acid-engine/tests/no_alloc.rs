@@ -279,6 +279,32 @@ fn chance_ratchets_conditions_and_fill_do_not_allocate() {
 }
 
 #[test]
+fn sub_tick_ratchets_do_not_allocate() {
+    // The densest case: one-tick x8 ratchets (hits an eighth of a tick
+    // apart), more of them stacked on a tick than a track follows, on
+    // every kind of machine, at the fastest tempo.
+    let mut p = busy_project();
+    p.bpm = 300.0;
+    for uid in 1..=6 {
+        let roll = p.roll_mut(MachineUid(uid), 0).unwrap();
+        roll.notes.clear();
+        for start in [0u16, 1, 5, 9] {
+            for k in 0..20u8 {
+                roll.notes.push(Note {
+                    ratchet: 8 - k % 2,
+                    ..Note::new(start, 1 + (k % 3) as u16, 40 + k, 100)
+                });
+            }
+        }
+    }
+    let mut e = Engine::from_project(SR, &p);
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    e.play();
+    let n = count_allocs(|| render_seconds(&mut e, &mut l, &mut r, 3.0));
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);

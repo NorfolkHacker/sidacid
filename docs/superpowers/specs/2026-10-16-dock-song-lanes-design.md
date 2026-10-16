@@ -59,7 +59,7 @@ that are skipped when saving so FM, sampler and Mono files barely change:
 | `accent` | `bool` | false | Accent (acid, drums) |
 | `slide` | `bool` | false | Glide into the next note, holding the envelope (acid) |
 | `chance` | `u8` | 100 | Play chance in percent (phase 6) |
-| `ratchet` | `u8` | 1 | Re-triggers within the note, on the 1/64 grid (phase 6) |
+| `ratchet` | `u8` | 1 | Re-triggers within the note, evenly (phase 6; between ticks since phase 8) |
 | `cond` | `Cond` | `Always` | Trig condition (phase 6) |
 
 Fields land in phase 1 so the file format changes once; phase 6 makes the
@@ -298,10 +298,11 @@ engine act on `chance`, `ratchet` and `cond`.
   position, the track's loop count and the note index, so playback,
   re-render and WAV export are repeatable. No allocation on the audio
   thread (covered by `tests/no_alloc.rs`).
-- **Ratchet:** 1–8 re-triggers inside the note's length, spaced as
-  evenly as the 1/64 grid allows: each hit snaps to the grid (4 ticks
-  per step) and hits on the same tick play once, so a one-step note
-  re-triggers at most 4 times. On acid each is a fresh gate.
+- **Ratchet:** 1–8 re-triggers inside the note's length, evenly
+  spaced at exact fractions (`start + k·len/n`), not snapped to the
+  1/64 grid: a hit between ticks is sent that many samples into its
+  tick, so a one-step note with ratchet 8 plays 8 hits. On acid each is
+  a fresh gate.
 - **Conditions** (`Cond`): `Always`, `Ratio(a, b)` (plays on pass a of
   every b, b ≤ 8), `First`, `NotFirst`, `Fill`, `NotFill`, `Pre`,
   `NotPre` (whether the lane's previous conditional note played). Each

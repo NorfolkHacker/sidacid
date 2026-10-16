@@ -12,6 +12,8 @@
 //! gaps and muted blocks are silent. A note's chance and condition are
 //! decided once, at its start tick (see `trig`), against the track's loop
 //! count; a note that plays with a ratchet then sounds each sub-hit.
+//! A sub-hit between ticks is held back and sent at its own sample
+//! (`samples_to_due`, `take_due`), so ratchets land on exact fractions.
 
 use crate::machine::MAX_MACHINES;
 use crate::params::{DRUM_INSTRUMENTS, ParamId};
@@ -22,7 +24,7 @@ use crate::rack::{CompiledSong, RackMap};
 use crate::song::{
     Bank, Banks, compiled_block_at, compiled_block_end, compiled_song_end, value_at,
 };
-use crate::trig::{self, TrackTrig};
+use crate::trig::{self, FINE, TrackTrig};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -84,6 +86,83 @@ const _: () = assert!(TICKS_PER_STEP == SUBS as u16);
 /// Ratcheted notes a track follows at once (more play their first hit only).
 const RATCHETS: usize = 16;
 
+/// Most events the ticks can hold back at once: per track, `RATCHETS`
+/// ratcheting notes with at most 7 hits each after a tick's start (hits
+/// are at least 1/8 tick apart), each a release and a start (an acid
+/// track's one note needs fewer: its hits and their gate-offs).
+pub(crate) const PENDING: usize = MAX_MACHINES * RATCHETS * 7 * 2;
+
+/// Events a tick holds back to send later inside it (ratchet hits
+/// between ticks), each with the samples left until it is due, kept in
+/// the order sent. Reserved up front; never grows.
+struct Pending {
+    evs: Vec<(f64, SeqEvent)>,
+    /// The running tick's time from now and its length, in samples.
+    base: f64,
+    quarter: f64,
+}
+
+impl Pending {
+    /// Allocates (construction only).
+    fn new() -> Self {
+        Self {
+            evs: Vec::with_capacity(PENDING),
+            base: 0.0,
+            quarter: 0.0,
+        }
+    }
+
+    /// Holds `ev` back to `at` sub-ticks into the running tick (dropped
+    /// should the reserve ever be full, which the bound above rules out).
+    fn push(&mut self, at: u32, ev: SeqEvent) {
+        debug_assert!(self.evs.len() < PENDING, "PENDING is too small");
+        if self.evs.len() < PENDING.min(self.evs.capacity()) {
+            let time = self.base + at as f64 / FINE as f64 * self.quarter;
+            self.evs.push((time, ev));
+        }
+    }
+
+    fn advance(&mut self, n: usize) {
+        for e in &mut self.evs {
+            e.0 -= n as f64;
+        }
+    }
+
+    /// Samples to the next held event (on the next whole sample, as a
+    /// tick is), or `usize::MAX` for none.
+    fn samples_to_due(&self) -> usize {
+        self.evs
+            .iter()
+            .map(|e| e.0.max(0.0).ceil() as usize)
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Moves the events due now to `out`, in the order they were sent.
+    fn take_due(&mut self, out: &mut Vec<SeqEvent>) {
+        let mut k = 0;
+        for j in 0..self.evs.len() {
+            let e = self.evs[j];
+            if e.0.max(0.0).ceil() as usize == 0 {
+                out.push(e.1);
+            } else {
+                self.evs[k] = e;
+                k += 1;
+            }
+        }
+        self.evs.truncate(k);
+    }
+}
+
+/// Sends `ev` `at` sub-ticks into the tick: on it, or held back.
+fn emit(out: &mut Vec<SeqEvent>, later: &mut Pending, at: u32, ev: SeqEvent) {
+    if at == 0 {
+        out.push(ev);
+    } else {
+        later.push(at, ev);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Track {
     step: usize,
@@ -93,11 +172,12 @@ struct Track {
     gate_open: bool,
     /// Acid: the sounding note slides into a note starting at its end.
     prev_slide: bool,
-    /// Acid: ticks until the sounding note's gate-off check (0 = none).
-    gate_left: u16,
-    /// Acid: ticks from that check to the note's end, where a held gate
-    /// must find the next note.
-    hold_dist: u16,
+    /// Acid: sub-ticks from the current tick's start to the sounding
+    /// hit's gate-off check (none pending: `None`).
+    gate_due: Option<u32>,
+    /// Acid: sub-ticks from that check to the note's end, where a held
+    /// gate must find the next note.
+    hold_dist: u32,
     /// Acid: ticks until a held gate must find a note (0 = none).
     hold_left: u16,
     /// Acid: the sounding note's end tick, clipped to the pattern and
@@ -177,7 +257,7 @@ impl Track {
             let i = self.rat[j];
             if notes
                 .get(i as usize)
-                .is_some_and(|n| !ratchet_at(n, p, ticks).1)
+                .is_some_and(|n| hits_after(n, p, ticks))
             {
                 self.rat[k] = i;
                 k += 1;
@@ -187,17 +267,32 @@ impl Track {
     }
 }
 
-/// Where tick `p` falls among ratcheted note `n`'s sub-hits in a pattern
-/// of `ticks`: whether one after its first starts at `p` (sub-hits
-/// collapsed onto one tick count once), and whether none starts after `p`
-/// (sub-hits at or past the pattern's end never play, so don't count).
-fn ratchet_at(n: &Note, p: u16, ticks: u16) -> (bool, bool) {
-    let (mut fires, mut last) = (false, n.start);
-    for (s, _) in trig::sub_hits(n).take_while(|&(s, _)| s < ticks) {
-        fires |= s == p && s != n.start;
-        last = s;
-    }
-    (fires, p >= last)
+/// The sub-hits of note `n`, from hit `from` on, that start inside tick
+/// `p` of a pattern of `ticks`, as `(at, last)`: sub-ticks into the tick,
+/// and whether no hit follows it (hits at or past the pattern's end never
+/// play, so don't count).
+fn hits_in(n: &Note, from: usize, p: u16, ticks: u16) -> impl Iterator<Item = (u32, bool)> + use<> {
+    let (lo, end) = (p as u32 * FINE, ticks as u32 * FINE);
+    let count = trig::ratchet_count(n) as usize;
+    trig::sub_hits(n)
+        .enumerate()
+        .skip(from)
+        .filter(move |&(_, (s, _))| s >= lo && s < lo + FINE && s < end)
+        .map(move |(k, (s, sub))| (s - lo, k + 1 == count || s + sub >= end))
+}
+
+/// Whether ratcheted note `n` has a hit after tick `p` that plays.
+fn hits_after(n: &Note, p: u16, ticks: u16) -> bool {
+    let (next, end) = ((p as u32 + 1) * FINE, ticks as u32 * FINE);
+    trig::sub_hits(n).any(|(s, _)| s >= next && s < end)
+}
+
+/// Whether ratcheted note `n` has a hit after its first right at tick
+/// `p`'s start.
+fn hit_on_tick(n: &Note, p: u16, ticks: u16) -> bool {
+    hits_in(n, 1, p, ticks)
+        .next()
+        .is_some_and(|(at, _)| at == 0)
 }
 
 pub struct Sequencer {
@@ -236,6 +331,8 @@ pub struct Sequencer {
     /// playback (which overrides the tracks' patterns) is left.
     chosen: [u8; MAX_MACHINES],
     ended: bool,
+    /// Events held back to their sample inside the tick that sent them.
+    pending: Pending,
 }
 
 fn transposed(pitch: u8, add: i8) -> u8 {
@@ -271,11 +368,11 @@ fn advance(t: &mut Track, ticks: u16) {
 /// A note cut by a block line: the hold check closes the gate on the
 /// line's first tick unless a note starts there (the bar-line cut of v4).
 fn cut_gate(t: &mut Track) {
-    if t.gate_open && (t.gate_left > 0 || t.hold_left > 0) {
-        if t.gate_left > 0 {
+    if t.gate_open && (t.gate_due.is_some() || t.hold_left > 0) {
+        if t.gate_due.is_some() {
             t.prev_slide = false;
         }
-        t.gate_left = 0;
+        t.gate_due = None;
         t.hold_left = 1;
     }
 }
@@ -332,6 +429,7 @@ impl Sequencer {
             seed: 0,
             chosen: [0; MAX_MACHINES],
             ended: false,
+            pending: Pending::new(),
         }
     }
 
@@ -392,6 +490,7 @@ impl Sequencer {
 
     pub fn play(&mut self) {
         self.playing = true;
+        self.pending.evs.clear();
         self.global_step = 0;
         self.sub = 0;
         self.samples_to_next = 0.0;
@@ -405,7 +504,7 @@ impl Sequencer {
             t.step = 0;
             t.gate_open = false;
             t.prev_slide = false;
-            t.gate_left = 0;
+            t.gate_due = None;
             t.hold_left = 0;
             t.lane_override = None;
             t.silent = false;
@@ -425,12 +524,13 @@ impl Sequencer {
 
     pub fn stop(&mut self) {
         self.playing = false;
+        self.pending.evs.clear();
         self.resync_pending = false;
         for t in &mut self.tracks {
             t.step = 0;
             t.gate_open = false;
             t.prev_slide = false;
-            t.gate_left = 0;
+            t.gate_due = None;
             t.hold_left = 0;
             t.lane_override = None;
             t.silent = false;
@@ -786,9 +886,25 @@ impl Sequencer {
         }
     }
 
+    /// Samples until the next event a tick held back (a ratchet hit
+    /// between ticks) is due, or `usize::MAX` for none. One due on a
+    /// tick's sample goes before that tick.
+    pub fn samples_to_due(&self) -> usize {
+        if !self.playing {
+            return usize::MAX;
+        }
+        self.pending.samples_to_due()
+    }
+
+    /// Sends the held-back events due now, in order.
+    pub fn take_due(&mut self, out: &mut Vec<SeqEvent>) {
+        self.pending.take_due(out);
+    }
+
     pub fn advance(&mut self, n: usize) {
         if self.playing {
             self.samples_to_next -= n as f64;
+            self.pending.advance(n);
         }
     }
 
@@ -803,6 +919,10 @@ impl Sequencer {
             return;
         }
         self.set_clocks(quarter);
+        // Where a hit between ticks lands: this tick's exact time (now or
+        // just past) plus its share of the tick.
+        self.pending.base = self.samples_to_next;
+        self.pending.quarter = quarter;
         for pos in 0..MAX_MACHINES {
             if let Some(Bank::Synth(bank)) = banks.slots[pos] {
                 self.synth_tick(pos, bank, out);
@@ -832,6 +952,7 @@ impl Sequencer {
     /// tick the param lane.
     fn synth_tick(&mut self, pos: usize, bank: &[SynthPattern], out: &mut Vec<SeqEvent>) {
         let (seed, fill) = (self.seed, self.fill);
+        let later = &mut self.pending;
         let t = &mut self.tracks[pos];
         let Some(pat) = bank.get(t.pattern as usize) else {
             return;
@@ -851,7 +972,7 @@ impl Sequencer {
                 t.gate_open = false;
             }
             t.prev_slide = false;
-            t.gate_left = 0;
+            t.gate_due = None;
             t.hold_left = 0;
             t.rat_n = 0;
             if let Some(id) = t.lane_override.take() {
@@ -860,30 +981,36 @@ impl Sequencer {
             advance(t, ticks);
             return;
         }
+        // The gate-off check `at` sub-ticks into this tick: the gate holds
+        // when the hit slides into a note at its end that will play (in
+        // ticks from this one's start to that end; true when that is now),
+        // else closes. Looks at this pattern's own note at the end (the
+        // 303 way): a held gate then runs into whatever plays next.
+        let check = |t: &mut Track, at: u32, out: &mut Vec<SeqEvent>, later: &mut Pending| {
+            t.gate_due = None;
+            if t.prev_slide && next_plays(roll, t, p, pos, seed, fill) {
+                t.hold_left = ((at + t.hold_dist) / FINE) as u16;
+                t.hold_left == 0
+            } else {
+                emit(out, later, at, SeqEvent::NoteOff { slot: pos });
+                t.gate_open = false;
+                false
+            }
+        };
         let mut check_hold = false;
         if t.gate_open {
-            if t.gate_left > 0 {
-                t.gate_left -= 1;
-                if t.gate_left == 0 {
-                    // Looks at this pattern's own note at the end (the 303
-                    // way): a held gate then runs into whatever plays next.
-                    if t.prev_slide && next_plays(roll, t, p, pos, seed, fill) {
-                        t.hold_left = t.hold_dist;
-                        check_hold = t.hold_left == 0;
-                    } else {
-                        out.push(SeqEvent::NoteOff { slot: pos });
-                        t.gate_open = false;
-                    }
-                }
-            } else if t.hold_left > 0 {
+            if t.gate_due == Some(0) {
+                check_hold = check(t, 0, out, later);
+            } else if t.gate_due.is_none() && t.hold_left > 0 {
                 t.hold_left -= 1;
                 check_hold = t.hold_left == 0;
             }
         }
         // What sounds now: a note starting here that plays (decided once,
-        // at its start; it may be legato), else a ratchet sub-hit of the
-        // note playing (never legato). `last`: no sub-hit follows.
-        let mut hit = None;
+        // at its start; it may be legato), with its hits inside this tick,
+        // else the ratchet hits of the note playing that fall in this tick
+        // (never legato).
+        let mut playing = None;
         if let Some((i, n)) = note_starting(roll, p)
             && trig::plays(n, i, pos, seed, fill, &mut t.trig)
         {
@@ -891,39 +1018,71 @@ impl Sequencer {
             if n.ratchet > 1 {
                 t.push_ratchet(i);
             }
-            hit = Some((n, true, ratchet_at(n, p, ticks).1));
+            playing = Some((n, 0));
         } else if t.rat_n > 0
             && let Some(n) = roll.notes.get(t.rat[0] as usize)
-            && let (true, last) = ratchet_at(n, p, ticks)
         {
-            hit = Some((n, false, last));
+            playing = Some((n, 1));
         }
         t.retire_ratchets(&roll.notes, p, ticks);
-        if check_hold && hit.is_none() {
+        let on_tick = playing.is_some_and(|(n, from)| {
+            hits_in(n, from, p, ticks)
+                .next()
+                .is_some_and(|(at, _)| at == 0)
+        });
+        if check_hold && !on_tick {
             out.push(SeqEvent::NoteOff { slot: pos });
             t.gate_open = false;
         }
-        if let Some((n, may_legato, last)) = hit {
-            let legato = may_legato && t.prev_slide && t.gate_open;
-            out.push(SeqEvent::Note {
-                slot: pos,
-                midi: transposed(n.pitch, pat.transpose.saturating_add(t.transpose_add)),
-                accent: n.accent,
-                legato,
-            });
-            // Each hit closes 2 ticks before its own end; only the last
-            // may slide, holding to the note's end.
-            let sub = trig::sub_hits(n).next().map_or(1, |h| h.1);
-            let end = n.start.saturating_add(n.len.max(1)).min(ticks);
-            let span = p.saturating_add(sub).min(ticks) - p;
-            let gate = span.saturating_sub(2).max(1);
-            t.gate_open = true;
-            t.prev_slide = last && n.slide;
-            t.gate_left = gate;
-            t.hold_dist = (end - p).saturating_sub(gate);
-            t.hold_left = 0;
-            // Wrapped: a note ending at the pattern's end slides into tick 0.
-            t.cur_end = if end >= ticks { 0 } else { end };
+        if let Some((n, from)) = playing {
+            let end_tick = ticks as u32 * FINE;
+            // Each hit closes 2 ticks before its own end (a hit a tick or
+            // less long, at its end); only the last may slide, holding to
+            // the note's end.
+            let sub = trig::sub_hits(n).next().map_or(FINE, |h| h.1);
+            let end = n.start.saturating_add(n.len.max(1)).min(ticks) as u32 * FINE;
+            for (at, last) in hits_in(n, from, p, ticks) {
+                if t.gate_open
+                    && let Some(g) = t.gate_due
+                    && g <= at
+                {
+                    check(t, g, out, later);
+                }
+                let legato = from == 0 && at == 0 && t.prev_slide && t.gate_open;
+                emit(
+                    out,
+                    later,
+                    at,
+                    SeqEvent::Note {
+                        slot: pos,
+                        midi: transposed(n.pitch, pat.transpose.saturating_add(t.transpose_add)),
+                        accent: n.accent,
+                        legato,
+                    },
+                );
+                let abs = p as u32 * FINE + at;
+                let span = (abs + sub).min(end_tick) - abs;
+                let gate = span.saturating_sub(2 * FINE).max(span.min(FINE));
+                t.gate_open = true;
+                t.prev_slide = last && n.slide;
+                t.gate_due = Some(at + gate);
+                t.hold_dist = end.saturating_sub(abs + gate);
+                t.hold_left = 0;
+                // Wrapped: a note ending at the pattern's end slides into tick 0.
+                t.cur_end = if end >= end_tick {
+                    0
+                } else {
+                    (end / FINE) as u16
+                };
+            }
+        }
+        // A gate-off check later inside this tick (after a hit a tick or
+        // less long); a hold it starts ends on a later tick.
+        if t.gate_open
+            && let Some(g) = t.gate_due
+            && g < FINE
+        {
+            check(t, g, out, later);
         }
         if p.is_multiple_of(TICKS_PER_STEP) {
             let step = (p / TICKS_PER_STEP) as usize;
@@ -951,6 +1110,10 @@ impl Sequencer {
                 }
             }
         }
+        // On to the next tick's start (a check left is a tick or more off).
+        if let Some(g) = &mut t.gate_due {
+            *g = g.saturating_sub(FINE);
+        }
         advance(t, ticks);
     }
 
@@ -959,6 +1122,7 @@ impl Sequencer {
     /// the choke works as before), each instrument at most once.
     fn drum_tick(&mut self, pos: usize, bank: &[DrumPattern], out: &mut Vec<SeqEvent>) {
         let (seed, fill) = (self.seed, self.fill);
+        let later = &mut self.pending;
         let t = &mut self.tracks[pos];
         let Some(pat) = bank.get(t.pattern as usize) else {
             return;
@@ -976,21 +1140,41 @@ impl Sequencer {
         } else {
             let p = t.pos;
             let (mut on, mut accent) = (0u8, 0u8);
-            // Hits starting now that play, then the ratchet sub-hits due.
+            // Hits starting now that play, then the ratchet sub-hits due:
+            // on the tick in instrument order, between ticks held back.
             for (i, n) in roll.notes.iter().enumerate() {
-                let now = if n.start == p {
-                    let ok = trig::plays(n, i, pos, seed, fill, &mut t.trig);
-                    if ok && n.ratchet > 1 {
+                let (from, all) = if n.start == p {
+                    if !trig::plays(n, i, pos, seed, fill, &mut t.trig) {
+                        continue;
+                    }
+                    if n.ratchet > 1 {
                         t.push_ratchet(i);
                     }
-                    ok
+                    (0, t.ratcheting(i))
+                } else if t.ratcheting(i) {
+                    (1, true)
                 } else {
-                    t.ratcheting(i) && ratchet_at(n, p, ticks).0
+                    continue;
                 };
-                if now && (n.pitch as usize) < DRUM_INSTRUMENTS {
-                    on |= 1 << n.pitch;
-                    if n.accent {
-                        accent |= 1 << n.pitch;
+                if (n.pitch as usize) >= DRUM_INSTRUMENTS {
+                    continue;
+                }
+                let take = if all { usize::MAX } else { 1 };
+                for (at, _) in hits_in(n, from, p, ticks).take(take) {
+                    if at == 0 {
+                        on |= 1 << n.pitch;
+                        if n.accent {
+                            accent |= 1 << n.pitch;
+                        }
+                    } else {
+                        later.push(
+                            at,
+                            SeqEvent::Drum {
+                                slot: pos,
+                                inst: n.pitch as usize,
+                                accent: n.accent,
+                            },
+                        );
                     }
                 }
             }
@@ -1015,6 +1199,7 @@ impl Sequencer {
                 continue;
             };
             let (seed, fill) = (self.seed, self.fill);
+            let later = &mut self.pending;
             let t = &mut self.tracks[m];
             if t.silent {
                 release_all(t, m, out);
@@ -1048,7 +1233,7 @@ impl Sequencer {
                     if n.start < p
                         && p < end
                         && t.has_played(i)
-                        && !(t.ratcheting(i) && ratchet_at(n, p, ticks).0)
+                        && !(t.ratcheting(i) && hit_on_tick(n, p, ticks))
                     {
                         want |= 1u128 << transposed(n.pitch, t.transpose_add);
                     }
@@ -1061,27 +1246,38 @@ impl Sequencer {
                     out.push(SeqEvent::PolyOff { slot: m, pitch });
                 }
             }
+            // Starts and ratchet hits: on the tick (released above), or
+            // between ticks, held back as a release and a start.
             for (i, n) in pat.notes.iter().enumerate() {
-                let now = if n.start == p {
-                    let ok = trig::plays(n, i, m, seed, fill, &mut t.trig);
-                    if ok {
-                        t.mark_played(i);
-                        if n.ratchet > 1 {
-                            t.push_ratchet(i);
-                        }
+                let (from, all) = if n.start == p {
+                    if !trig::plays(n, i, m, seed, fill, &mut t.trig) {
+                        continue;
                     }
-                    ok
+                    t.mark_played(i);
+                    if n.ratchet > 1 {
+                        t.push_ratchet(i);
+                    }
+                    (0, t.ratcheting(i))
+                } else if t.ratcheting(i) {
+                    (1, true)
                 } else {
-                    t.ratcheting(i) && ratchet_at(n, p, ticks).0
+                    continue;
                 };
-                if now {
-                    let pitch = transposed(n.pitch, t.transpose_add);
-                    t.held |= 1u128 << pitch;
-                    out.push(SeqEvent::PolyOn {
-                        slot: m,
-                        pitch,
-                        vel: n.vel,
-                    });
+                let pitch = transposed(n.pitch, t.transpose_add);
+                let on = SeqEvent::PolyOn {
+                    slot: m,
+                    pitch,
+                    vel: n.vel,
+                };
+                let take = if all { usize::MAX } else { 1 };
+                for (at, _) in hits_in(n, from, p, ticks).take(take) {
+                    if at == 0 {
+                        t.held |= 1u128 << pitch;
+                        out.push(on);
+                    } else {
+                        later.push(at, SeqEvent::PolyOff { slot: m, pitch });
+                        later.push(at, on);
+                    }
                 }
             }
             t.retire_ratchets(&pat.notes, p, ticks);
@@ -1229,10 +1425,16 @@ mod tests {
             let mut buf = Vec::with_capacity(64);
             let mut out = Vec::new();
             while pos < total {
-                let n = seq.samples_to_next_tick().min(total - pos);
+                // As the engine does: held-back hits before a tick.
+                let due = seq.samples_to_due();
+                let n = seq.samples_to_next_tick().min(due).min(total - pos);
                 if n == 0 {
                     buf.clear();
-                    seq.tick(self.banks(), &song, &mut buf);
+                    if due == 0 {
+                        seq.take_due(&mut buf);
+                    } else {
+                        seq.tick(self.banks(), &song, &mut buf);
+                    }
                     out.extend(buf.iter().map(|e| (pos, *e)));
                     continue;
                 }
@@ -2659,7 +2861,8 @@ mod tests {
 
     use crate::project::Cond;
 
-    /// Runs the next `n` ticks; events by tick, counted from the first.
+    /// Runs the next `n` ticks; events by tick, counted from the first
+    /// (a hit held back to later in a tick counts as that tick's).
     fn run_ticks(f: &Fixture, s: &mut Sequencer, n: u64) -> Vec<(u64, SeqEvent)> {
         let uids: Vec<_> = standard_rack().iter().map(|m| m.0).collect();
         let song = CompiledSong::compile(&f.song, &uids);
@@ -2669,6 +2872,11 @@ mod tests {
             s.advance(s.samples_to_next_tick());
             buf.clear();
             s.tick(f.banks(), &song, &mut buf);
+            while s.samples_to_due() != usize::MAX && s.samples_to_due() <= s.samples_to_next_tick()
+            {
+                s.advance(s.samples_to_due());
+                s.take_due(&mut buf);
+            }
             out.extend(buf.iter().map(|e| (k, *e)));
         }
         out
@@ -2858,6 +3066,158 @@ mod tests {
         };
         assert_eq!(run(1), [(0, 'N'), (2, 'O'), (4, 'N'), (8, 'L'), (10, 'O')]);
         assert_eq!(run(3), run(1));
+    }
+
+    /// The sample `ticks` ticks after Play at 120 BPM (a tick is 1378.125
+    /// samples), on the next whole sample as events land.
+    fn at_ticks(ticks: f64) -> usize {
+        (ticks * 1378.125).ceil() as usize
+    }
+
+    /// Events by sample: the acid track at 0 as `acid` marks them.
+    fn acid_at(ev: &[(usize, SeqEvent)]) -> Vec<(usize, char)> {
+        let ev: Vec<_> = ev.iter().map(|&(t, e)| (t as u64, e)).collect();
+        acid(&ev)
+            .into_iter()
+            .map(|(t, c)| (t as usize, c))
+            .collect()
+    }
+
+    #[test]
+    fn a_ratchet_8_on_one_step_lands_8_even_hits_on_every_machine() {
+        let hits: Vec<usize> = (0..8).map(|k| at_ticks(k as f64 * 0.5)).collect();
+        assert_eq!(hits, [0, 690, 1379, 2068, 2757, 3446, 4135, 4824]);
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(ratcheted(0, 4, 1, 8));
+        f.notes[0][0].notes.push(ratcheted(0, 4, 60, 8));
+        f.synths[0][0].roll.notes.push(ratcheted(0, 4, 48, 8));
+        let mut s = new_seq();
+        s.play();
+        let ev = f.run(&mut s, 6000);
+        let drums: Vec<usize> = ev
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    SeqEvent::Drum {
+                        slot: 2,
+                        inst: 1,
+                        ..
+                    }
+                )
+            })
+            .map(|&(t, _)| t)
+            .collect();
+        assert_eq!(drums, hits);
+        // Poly: each later hit releases and retriggers; the end releases.
+        let mut want = vec![(0, true)];
+        for &h in &hits[1..] {
+            want.extend([(h, false), (h, true)]);
+        }
+        want.push((at_ticks(4.0), false));
+        let fm: Vec<(usize, bool)> = ev
+            .iter()
+            .filter_map(|&(t, e)| match e {
+                SeqEvent::PolyOn { slot: 4, .. } => Some((t, true)),
+                SeqEvent::PolyOff { slot: 4, .. } => Some((t, false)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fm, want);
+        // Acid: each hit a fresh gate, closed right at the next hit (a
+        // hit under a tick long gates for all of it).
+        let mut want = vec![(0, 'N')];
+        for &h in &hits[1..] {
+            want.extend([(h, 'O'), (h, 'N')]);
+        }
+        want.push((at_ticks(4.0), 'O'));
+        assert_eq!(acid_at(&ev), want);
+    }
+
+    #[test]
+    fn a_ratchet_3_on_one_step_is_spaced_four_thirds_of_a_tick() {
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(ratcheted(0, 4, 1, 3));
+        f.synths[0][0].roll.notes.push(ratcheted(0, 4, 48, 3));
+        let mut s = new_seq();
+        s.play();
+        let ev = f.run(&mut s, 6000);
+        let drums: Vec<usize> = ev
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Drum { slot: 2, .. }))
+            .map(|&(t, _)| t)
+            .collect();
+        assert_eq!(drums, [0, 1838, 3675]);
+        // Gates a tick long, 2/3 tick ahead of the next hit.
+        let third = |k: f64| at_ticks(k / 3.0);
+        assert_eq!(
+            acid_at(&ev),
+            [
+                (0, 'N'),
+                (third(3.0), 'O'),
+                (third(4.0), 'N'),
+                (third(7.0), 'O'),
+                (third(8.0), 'N'),
+                (third(11.0), 'O')
+            ]
+        );
+    }
+
+    #[test]
+    fn whole_tick_ratchets_keep_their_samples() {
+        // x3 over 12 ticks hits on ticks 0, 4 and 8, as before.
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(ratcheted(0, 12, 1, 3));
+        let mut s = new_seq();
+        s.play();
+        let drums: Vec<usize> = f
+            .run(&mut s, 12_000)
+            .iter()
+            .filter(|(_, e)| matches!(e, SeqEvent::Drum { slot: 2, .. }))
+            .map(|&(t, _)| t)
+            .collect();
+        assert_eq!(drums, [0, at_ticks(4.0), at_ticks(8.0)]);
+        assert_eq!(s.samples_to_due(), usize::MAX, "nothing held back");
+    }
+
+    #[test]
+    fn a_sub_tick_ratchet_slides_after_its_last_hit() {
+        // A sliding x2 on a one-tick note: hits at 0 and half a tick; the
+        // second holds into the note at tick 1, which plays legato.
+        let mut f = Fixture::new();
+        let roll = &mut f.synths[0][0].roll;
+        roll.notes.push(Note {
+            slide: true,
+            ..ratcheted(0, 1, 48, 2)
+        });
+        roll.notes.push(note(1, 4, 50));
+        let mut s = new_seq();
+        s.play();
+        let half = at_ticks(0.5);
+        assert_eq!(
+            acid_at(&f.run(&mut s, 5000)),
+            [
+                (0, 'N'),
+                (half, 'O'),
+                (half, 'N'),
+                (at_ticks(1.0), 'L'),
+                (at_ticks(3.0), 'O')
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_drops_held_back_hits() {
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(ratcheted(0, 4, 1, 8));
+        let mut s = new_seq();
+        s.play();
+        f.run(&mut s, 1);
+        assert!(s.samples_to_due() < usize::MAX);
+        s.stop();
+        assert_eq!(s.samples_to_due(), usize::MAX);
+        s.play();
+        assert_eq!(s.samples_to_due(), usize::MAX);
     }
 
     #[test]

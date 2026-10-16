@@ -54,7 +54,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - The rack above keeps the knobs, pads, Len/Trans and dice.
 - **Chance, ratchet and conditions** (every note, on every machine):
   - **Chance** (0–100 %): how likely the note is to play on each pass. The dice are fixed by the project's seed, so a project plays, re-renders and exports the same every time until you Reroll.
-  - **Ratchet** (1–8): the note re-triggers that many times inside its length, as evenly as the 1/64 grid allows: each hit snaps to the grid (four ticks per step) and hits landing on the same tick play once, so a one-step note re-triggers at most 4 times. On the bass synths each hit is a fresh gate, and a slide applies after the last hit.
+  - **Ratchet** (1–8): the note re-triggers that many times inside its length, evenly spaced: each hit lands at its exact fraction of the note, between the 1/64 ticks if need be, so a one-step note with ratchet 8 plays 8 hits a 1/128 note apart. On the bass synths each hit is a fresh gate, and a slide applies after the last hit.
   - **Conditions:** Always; 1:2 … 8:8 (a:b plays on pass a of every b passes of its pattern); First and Not first (the first pass or every other); Fill and Not fill (while Fill is on, or off); Pre and Not pre (whether the lane's previous conditional note played). A note's condition is checked first, then its chance.
   - Each lane counts the passes of its pattern from Play, from the start of its song block, and from a queued pattern switch.
   - **Fill:** the transport's Fill button is on while held; Shift-click latches it on or off. It lights while on.
