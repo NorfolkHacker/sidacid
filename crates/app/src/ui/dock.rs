@@ -624,7 +624,7 @@ impl SidAcidApp {
             .is_some_and(|m| m.lane.fold && !m.lane.collapsed);
         if let Some(up) = up
             && fold
-            && let super::lane_geom::Rows::Folded(rows) = self.lane_rows(uid, true)
+            && let super::lane_geom::Rows::Folded(rows) = self.lane_rows(uid, true, &pattern)
         {
             cursor.pitch = rows.step(from, up);
         }

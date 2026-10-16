@@ -186,7 +186,11 @@ impl LaneGeom {
     }
 
     pub fn note_rect(&self, n: &Note) -> Rect {
-        let row = self.row_of(n.pitch).unwrap_or(0);
+        // A pitch with no row (folded away under a drag) draws on the row
+        // it would sit on.
+        let row = self
+            .row_of(n.pitch)
+            .unwrap_or_else(|| self.rows.row_near(n.pitch));
         let y0 = self.row_top(row);
         let end = n.start.saturating_add(n.len).min(self.ticks);
         Rect::from_min_max(

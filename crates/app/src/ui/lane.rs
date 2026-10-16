@@ -123,15 +123,12 @@ impl SidAcidApp {
     }
 
     /// The rows of `uid`'s lane: one per instrument on drums, else one per
-    /// pitch, or with `fold` only those of `FoldRows` for the selected
-    /// pattern and the project key.
-    pub(crate) fn lane_rows(&self, uid: MachineUid, fold: bool) -> Rows {
-        if self.lane_kind(uid) == LaneKind::Drums {
-            return Rows::Drums;
-        }
-        let pattern = self.doc.project.roll(uid, self.selected(uid));
-        match pattern {
-            Some(p) if fold => Rows::Folded(FoldRows::new(self.doc.project.key, p)),
+    /// pitch, or with `fold` only those of `FoldRows` for `pattern` and the
+    /// project key.
+    pub(crate) fn lane_rows(&self, uid: MachineUid, fold: bool, pattern: &NotePattern) -> Rows {
+        match self.lane_kind(uid) {
+            LaneKind::Drums => Rows::Drums,
+            _ if fold => Rows::Folded(FoldRows::new(self.doc.project.key, pattern)),
             _ => Rows::Pitches,
         }
     }
@@ -140,9 +137,15 @@ impl SidAcidApp {
     /// in the middle.
     fn toggle_fold(&mut self, uid: MachineUid, view: LaneView) {
         let height = view.clamped_height() as f32;
+        let pattern = self
+            .doc
+            .project
+            .roll(uid, self.selected(uid))
+            .cloned()
+            .unwrap_or_default();
         let (old, new) = (
-            self.lane_rows(uid, view.fold),
-            self.lane_rows(uid, !view.fold),
+            self.lane_rows(uid, view.fold, &pattern),
+            self.lane_rows(uid, !view.fold, &pattern),
         );
         if let Some(y) = self.view.panel(uid).lane_scroll_y {
             let middle = ((y + height / 2.0) / ROW_H).floor().max(0.0) as usize;
@@ -312,7 +315,25 @@ impl SidAcidApp {
         let tw = tick_w(ZOOMS[self.view.dock.zoom.min(ZOOMS.len() - 1)]);
         let playhead = self.playhead(uid, slot);
         // Drum rows shrink to fit a short lane, so all 8 always show.
-        let rows = self.lane_rows(uid, view.fold);
+        // Under a move or resize the rows stay those of the drag's start:
+        // rows coming and going with the dragged notes would move the
+        // pitch under the pointer. They are rebuilt once it is dropped.
+        let key = self.doc.project.key;
+        let frozen = match &self.view.panel(uid).drag {
+            Some(
+                LaneDrag::Move {
+                    origin, slot: s, ..
+                }
+                | LaneDrag::Resize {
+                    origin, slot: s, ..
+                },
+            ) if *s == slot => Some(FoldRows::new(key, origin)),
+            _ => None,
+        };
+        let rows = match self.lane_rows(uid, view.fold, &pattern) {
+            Rows::Folded(_) if let Some(f) = frozen => Rows::Folded(f),
+            rows => rows,
+        };
         let row_h = if drums {
             DRUM_ROW_H.min(height / DRUM_INSTRUMENTS as f32)
         } else {
@@ -562,7 +583,12 @@ impl SidAcidApp {
         // The keyboard-entry cursor, one snap wide.
         if self.view.dock.keyboard && self.focused() == Some(uid) {
             let c = self.view.panel(uid).cursor;
-            if let Some(r) = geom.row_of(c.pitch) {
+            // On a folded lane a hidden pitch shows on the row below it.
+            let row = match geom.rows {
+                Rows::Folded(_) => Some(geom.rows.row_near(c.pitch)),
+                _ => geom.row_of(c.pitch),
+            };
+            if let Some(r) = row {
                 let cell = Rect::from_min_size(
                     pos2(geom.x_of(c.tick), geom.row_top(r)),
                     vec2(snap.ticks() as f32 * tw, row_h),
@@ -2369,5 +2395,71 @@ mod tests {
         // Unfolded, the cursor moves by semitones again.
         app.doc.project.machine_mut(FM).unwrap().lane.fold = false;
         assert_eq!(up(&mut app, true), 63);
+    }
+
+    #[test]
+    fn a_group_drag_on_a_folded_lane_is_stable() {
+        // D4 and E4 selected, D4 grabbed and dragged onto E4's row: +2, so
+        // E4 lands on the hidden F#4. The rows stay those of the drag's
+        // start until it is dropped, so the pointer keeps meaning E4.
+        let mut app = app_with(FM, &[(0, 4, 62), (8, 4, 64)]);
+        fold_c_major(&mut app, FM, 30);
+        let mut m = Mouse::new(&mut app, FM, 0);
+        fold_c_major(&mut app, FM, 30);
+        let (d, e) = (
+            folded_at(&mut app, &m, 1.5, 62),
+            folded_at(&mut app, &m, 9.5, 64),
+        );
+        m.click(&mut app, d, NONE);
+        m.click(&mut app, e, egui::Modifiers::SHIFT);
+        let to = folded_at(&mut app, &m, 1.5, 64);
+        let primary = egui::PointerButton::Primary;
+        m.frame(&mut app, vec![egui::Event::PointerMoved(d)], NONE);
+        m.frame(&mut app, vec![Mouse::button(d, primary, true, NONE)], NONE);
+        for k in 1..=4 {
+            let p = d + (to - d) * (k as f32 / 4.0);
+            m.frame(&mut app, vec![egui::Event::PointerMoved(p)], NONE);
+        }
+        for _ in 0..4 {
+            m.frame(&mut app, vec![egui::Event::PointerMoved(to)], NONE);
+            assert_eq!(notes_of(&app, FM), [(0, 4, 64), (8, 4, 66)]);
+        }
+        m.frame(
+            &mut app,
+            vec![Mouse::button(to, primary, false, NONE)],
+            NONE,
+        );
+        m.frame(&mut app, vec![], NONE);
+        m.frame(&mut app, vec![], NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 64), (8, 4, 66)]);
+        // Dropped: F#4 now holds a note, so it has a row.
+        let rows = FoldRows::new(app.doc.project.key, app.doc.project.roll(FM, 0).unwrap());
+        assert!(rows.row_of(66).is_some());
+    }
+
+    #[test]
+    fn the_cursor_on_a_folded_away_pitch_is_drawn_on_the_row_below() {
+        let mut app = app_with(FM, &[]);
+        fold_c_major(&mut app, FM, 30);
+        let m = Mouse::new(&mut app, FM, 0);
+        fold_c_major(&mut app, FM, 30);
+        app.view.focus = Some(FM);
+        app.view.dock.keyboard = true;
+        app.view.panel(FM).cursor = crate::ui::key_entry::Cursor { tick: 0, pitch: 63 };
+        // D#4 is folded away: the cursor shows on D4's row.
+        let want = folded_at(&mut app, &m, 0.0, 62).y - ROW_H / 2.0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.lane(ui, FM, 800.0));
+        });
+        let cursor = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Rect(r) if r.stroke.color == Color32::WHITE => Some(r.rect.top()),
+            _ => None,
+        });
+        assert_eq!(cursor, Some(want));
     }
 }
