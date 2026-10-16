@@ -333,6 +333,12 @@ impl SidAcidApp {
         let Some(uid) = self.focused() else {
             return false;
         };
+        // A mouse move or resize redoes its edit every frame; a key's edit
+        // would be overwritten and split the undo step. Used, so no widget
+        // acts on it either.
+        if self.mouse_editing() {
+            return true;
+        }
         // Ahead of `entry_key`, which turns down Alt.
         if let Some(used) = self.selection_key(uid, key, mods) {
             return used;
@@ -353,6 +359,18 @@ impl SidAcidApp {
             self.commit_poly(uid, slot, Some(pattern), false, true);
         }
         true
+    }
+
+    /// A lane's mouse move or resize is in progress: keyboard and
+    /// clipboard edits wait until it is dropped.
+    pub(crate) fn mouse_editing(&self) -> bool {
+        use super::poly_edit::LaneDrag;
+        self.view.panels.values().any(|p| {
+            matches!(
+                p.drag,
+                Some(LaneDrag::Move { .. } | LaneDrag::Resize { .. })
+            )
+        })
     }
 
     /// Forgets the ruler range and the selections it made in the other
@@ -475,6 +493,9 @@ impl SidAcidApp {
     /// range does nothing. Nothing to copy leaves the clipboard as it was.
     pub(crate) fn copy_notes(&mut self, cut: bool) {
         use super::note_ops::{copy, delete, in_range};
+        if self.mouse_editing() {
+            return;
+        }
         let mut lanes = Vec::new();
         let mut edits = Vec::new();
         let mut take = |app: &mut Self, uid: MachineUid, idx: Vec<usize>, origin: u16| {
@@ -542,6 +563,9 @@ impl SidAcidApp {
     /// become each lane's selection. A refused paste changes nothing.
     pub(crate) fn paste_notes(&mut self) {
         use super::note_ops::{paste, values};
+        if self.mouse_editing() {
+            return;
+        }
         let (Some(clip), Some(focus)) = (self.view.note_clip.clone(), self.focused()) else {
             return;
         };
@@ -607,6 +631,9 @@ impl SidAcidApp {
     /// and the range moves onto the copies. One undo step.
     pub(crate) fn duplicate_notes(&mut self) {
         use super::note_ops::{copy, duplicate, in_range, paste, values};
+        if self.mouse_editing() {
+            return;
+        }
         let mut edits = Vec::new();
         let mut selections = Vec::new();
         if let Some((lo, hi)) = self.view.dock.range {
@@ -659,6 +686,9 @@ impl SidAcidApp {
     /// Selects every note of the focused lane's pattern that starts inside
     /// it (and drops the ruler range).
     pub(crate) fn select_all_notes(&mut self) {
+        if self.mouse_editing() {
+            return;
+        }
         let Some(uid) = self.focused() else {
             return;
         };

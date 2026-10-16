@@ -1187,6 +1187,22 @@ mod tests {
             lane_frame_mods(app, &self.ctx, self.uid, self.time, events, mods);
         }
 
+        /// Like `frame`, with the app's shortcuts run first (as `ui` does).
+        fn frame_keys(&mut self, app: &mut SidAcidApp, events: Vec<egui::Event>) {
+            self.time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let uid = self.uid;
+            let _ = self.ctx.run(input, |ctx| {
+                app.handle_shortcuts(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| app.lane(ui, uid, 800.0));
+            });
+        }
+
         fn button(
             at: egui::Pos2,
             button: egui::PointerButton,
@@ -1438,6 +1454,54 @@ mod tests {
             "each note is cut by the next, none removed"
         );
         assert_eq!(app.selection(SYNTH1), [0, 1, 2]);
+    }
+
+    fn key(key: egui::Key, mods: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        }
+    }
+
+    #[test]
+    fn keys_during_a_mouse_drag_do_nothing() {
+        let cmd = egui::Modifiers::COMMAND;
+        let mut app = app_with(FM, &[(0, 4, 60), (40, 4, 62)]);
+        app.view.dock.keyboard = true;
+        app.view.focus = Some(FM);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (from, to) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 17.5, 60));
+        let primary = egui::PointerButton::Primary;
+        m.frame_keys(&mut app, vec![egui::Event::PointerMoved(from)]);
+        m.frame_keys(&mut app, vec![Mouse::button(from, primary, true, NONE)]);
+        let mid = |k: f32| from + (to - from) * k;
+        m.frame_keys(&mut app, vec![egui::Event::PointerMoved(mid(0.25))]);
+        m.frame_keys(&mut app, vec![egui::Event::PointerMoved(mid(0.5))]);
+        assert!(matches!(
+            app.view.panel(FM).drag,
+            Some(LaneDrag::Move { .. })
+        ));
+        for k in [
+            key(egui::Key::Delete, NONE),
+            key(egui::Key::Z, NONE),
+            key(egui::Key::ArrowUp, NONE),
+            key(egui::Key::Z, cmd),
+            key(egui::Key::X, cmd),
+            key(egui::Key::D, cmd),
+            key(egui::Key::A, cmd),
+            key(egui::Key::V, cmd),
+        ] {
+            m.frame_keys(&mut app, vec![egui::Event::PointerMoved(mid(0.75)), k]);
+        }
+        m.frame_keys(&mut app, vec![egui::Event::PointerMoved(to)]);
+        m.frame_keys(&mut app, vec![Mouse::button(to, primary, false, NONE)]);
+        m.frame_keys(&mut app, vec![]);
+        assert_eq!(notes_of(&app, FM), [(16, 4, 60), (40, 4, 62)], "dropped");
+        assert_eq!(app.doc.undo_depth(), 1, "one undo step");
+        assert!(app.view.note_clip.is_none(), "nothing cut");
     }
 
     #[test]

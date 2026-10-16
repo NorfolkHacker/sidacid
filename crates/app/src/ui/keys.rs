@@ -142,6 +142,9 @@ impl SidAcidApp {
                 }
                 Shortcut::Open => self.request(Pending::Open),
                 Shortcut::New => self.request(Pending::New),
+                // Not under a lane's live mouse move or resize, whose next
+                // frame would redo its edit on top.
+                Shortcut::Undo | Shortcut::Redo if self.mouse_editing() => {}
                 Shortcut::Undo => {
                     self.undo();
                 }
