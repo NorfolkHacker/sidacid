@@ -2104,6 +2104,94 @@ mod tests {
     }
 
     #[test]
+    fn frame_divide_by_16_makes_16_equal_slices() {
+        use acid_engine::sampler::slicing::equal_slices;
+        use egui::{pos2, vec2};
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        // Clicks every quarter second: detection finds about 36 slices.
+        app.load_sample_bytes(SAMPLER, 0, "Break", Some("wav"), &test_wav(9.0));
+        fn app_meta(app: &SidAcidApp) -> acid_engine::sampler::slot::SlotMeta {
+            app.doc.project.sampler(SAMPLER).unwrap().slots[0]
+                .as_ref()
+                .expect("loaded")
+                .meta
+                .clone()
+        }
+        let detected = app_meta(&app).slices.len();
+        assert!(detected > 16, "{detected} slices detected");
+        let frames = app.doc.project.sampler(SAMPLER).unwrap().slots[0]
+            .as_ref()
+            .unwrap()
+            .frames();
+        let ctx = egui::Context::default();
+        let (w, h) = (1280.0, 800.0);
+        let mut time = 0.0;
+        let mut frame = |app: &mut SidAcidApp, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            for c in ctx.run(input, |ctx| app.ui(ctx)).shapes {
+                fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+                    match s {
+                        egui::Shape::Text(t) => {
+                            out.push((t.galley.text().to_string(), t.visual_bounding_rect()))
+                        }
+                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                        _ => {}
+                    }
+                }
+                walk(&c.shape, &mut out);
+            }
+            out
+        };
+        let find = |drawn: &[(String, egui::Rect)], want: &str| {
+            drawn.iter().find(|(t, _)| t == want).map(|(_, r)| *r)
+        };
+        let keys = |n: usize| format!("Keys C1–{}", sampler_ui::key_name(24 + n as u8 - 1));
+        // Scroll the rack until the slice buttons are on screen.
+        let mut button = None;
+        for _ in 0..400 {
+            let drawn = frame(&mut app, vec![]);
+            if let Some(r) = find(&drawn, "÷16").filter(|r| r.top() >= 0.0 && r.bottom() <= h) {
+                assert!(find(&drawn, &keys(detected)).is_some(), "the zone label");
+                button = Some(r.center());
+                break;
+            }
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos2(12.0, h * 0.25)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -20.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let at = button.expect("the ÷16 button came on screen");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(at)]);
+        frame(&mut app, vec![press(true)]);
+        frame(&mut app, vec![press(false)]);
+        let drawn = frame(&mut app, vec![]);
+        assert_eq!(app_meta(&app).slices, equal_slices(frames, 16));
+        assert_eq!(keys(16), "Keys C1–D#2");
+        assert!(find(&drawn, &keys(16)).is_some(), "the zone label follows");
+        assert_eq!(app.view.message, None);
+    }
+
+    #[test]
     fn a_sample_rate_the_project_cannot_reopen_is_refused() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         let before = app.doc.project.clone();
