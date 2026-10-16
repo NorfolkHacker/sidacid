@@ -102,11 +102,16 @@ impl SidAcidApp {
                 used.push(true);
                 continue;
             }
+            let song = self.view.mode == acid_engine::sequencer::Mode::Song;
             let had = erase(k)
                 && !m.command
-                && self
-                    .focused()
-                    .is_some_and(|uid| !self.selection(uid).is_empty());
+                && self.focused().is_some_and(|uid| {
+                    if song {
+                        !self.block_selection(uid).is_empty()
+                    } else {
+                        !self.selection(uid).is_empty()
+                    }
+                });
             let u = self.dock_key(k, m);
             if erase(k) && !repeat {
                 self.view.dock.delete_held = had && u;
@@ -148,11 +153,11 @@ impl SidAcidApp {
         });
         self.dock_keys(ctx);
         let (mut copied, mut pasted, mut cut) = (false, false, false);
-        // With the dock focused the clipboard keys act on its notes.
-        let notes = self.view.dock.keyboard;
-        // Song mode's dock has blocks, not notes: its clipboard keys do
-        // nothing (the ruler range there is in steps, not ticks).
-        let song_dock = notes && self.view.mode == acid_engine::sequencer::Mode::Song;
+        // With the dock focused the clipboard keys act on its notes, or in
+        // Song mode on its blocks (a clipboard of their own).
+        let song_dock =
+            self.view.dock.keyboard && self.view.mode == acid_engine::sequencer::Mode::Song;
+        let notes = self.view.dock.keyboard && !song_dock;
         for s in pressed {
             // Backends may send both a key and a clipboard event for one press.
             match s {
@@ -183,12 +188,11 @@ impl SidAcidApp {
                 Shortcut::Redo => {
                     self.redo();
                 }
-                Shortcut::Copy
-                | Shortcut::Paste
-                | Shortcut::Cut
-                | Shortcut::Duplicate
-                | Shortcut::SelectAll
-                    if song_dock => {}
+                Shortcut::Copy if song_dock => self.copy_blocks(false),
+                Shortcut::Paste if song_dock => self.paste_blocks(),
+                Shortcut::Cut if song_dock => self.copy_blocks(true),
+                Shortcut::Duplicate if song_dock => self.duplicate_blocks(),
+                Shortcut::SelectAll if song_dock => self.select_all_blocks(),
                 Shortcut::Copy if notes => self.copy_notes(false),
                 Shortcut::Paste if notes => self.paste_notes(),
                 Shortcut::Cut if notes => self.copy_notes(true),

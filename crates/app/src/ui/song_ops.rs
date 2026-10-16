@@ -99,7 +99,7 @@ pub fn group_offset(lanes: &[GroupLane<'_>], want: i64, unit: u32, lens: Lens<'_
 
 /// `rest` with `moved` added `d` steps later (they must fit there): the
 /// lane, sorted, and the moved blocks' indices in it.
-fn with_moved(rest: &[Block], moved: &[Block], d: i64) -> (Vec<Block>, Vec<usize>) {
+pub fn with_moved(rest: &[Block], moved: &[Block], d: i64) -> (Vec<Block>, Vec<usize>) {
     let placed: Vec<Block> = moved
         .iter()
         .map(|b| Block {
@@ -226,7 +226,6 @@ pub fn paste(
 /// Pastes a copy of the blocks at `idx` right after them: one span (last
 /// end - first start) later, rounded up to whole bars (or the nearest
 /// whole-bar offset where it fits).
-#[cfg_attr(not(test), allow(dead_code))] // Ctrl+D
 pub fn duplicate(
     blocks: &mut Vec<Block>,
     uid: MachineUid,

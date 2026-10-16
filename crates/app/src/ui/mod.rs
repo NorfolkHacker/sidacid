@@ -34,6 +34,7 @@ mod scroll;
 mod song_lane;
 mod song_ops;
 mod song_panel;
+mod song_tools;
 mod synth_panel;
 pub mod theme;
 mod transport;
@@ -116,6 +117,9 @@ pub struct DockState {
     /// The tick (Song mode: step) a ruler range drag was pressed on, fixed
     /// at the press so the start holds while the lanes scroll under it.
     pub range_from: Option<u16>,
+    /// Tests only: where each Song-mode header tool was drawn this frame.
+    #[cfg(test)]
+    pub tool_rects: Vec<(String, egui::Rect)>,
 }
 
 impl Default for DockState {
@@ -135,6 +139,8 @@ impl Default for DockState {
             range: None,
             delete_held: false,
             range_from: None,
+            #[cfg(test)]
+            tool_rects: Vec::new(),
         }
     }
 }
@@ -156,6 +162,8 @@ pub struct ViewState {
     pub dock: DockState,
     /// The dock's note clipboard (Ctrl+C/X with the dock focused).
     pub(crate) note_clip: Option<NoteClip>,
+    /// The dock's block clipboard (Song mode), apart from the notes'.
+    pub(crate) block_clip: Option<song_tools::BlockClip>,
     pub audio_window: audio_settings::AudioWindow,
     /// Machine that keyboard shortcuts act on; None (or a uid no longer in
     /// the rack) means the first machine (see `SidAcidApp::focused`).

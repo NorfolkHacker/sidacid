@@ -115,17 +115,24 @@ impl SidAcidApp {
         dock.zoom = new;
     }
 
-    /// Snap choices, zoom buttons and the follow toggle.
+    /// Snap choices (Pattern mode), zoom buttons and the follow toggle;
+    /// in Song mode then the song tools (`song_tools`).
     fn dock_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Snap").small().color(theme::ACID));
-            for snap in Snap::ALL {
-                let on = self.view.dock.snap == snap;
-                if ui.selectable_label(on, snap.label()).clicked() {
-                    self.view.dock.snap = snap;
+        #[cfg(test)]
+        self.view.dock.tool_rects.clear();
+        let song = self.view.mode == Mode::Song;
+        ui.horizontal_wrapped(|ui| {
+            // Song mode moves by bars (Alt: steps); the note snap is idle.
+            if !song {
+                ui.label(RichText::new("Snap").small().color(theme::ACID));
+                for snap in Snap::ALL {
+                    let on = self.view.dock.snap == snap;
+                    if ui.selectable_label(on, snap.label()).clicked() {
+                        self.view.dock.snap = snap;
+                    }
                 }
+                ui.separator();
             }
-            ui.separator();
             ui.label(RichText::new("Zoom").small().color(theme::ACID));
             let zoom = self.view.dock.zoom.min(ZOOMS.len() - 1);
             if ui
@@ -151,6 +158,10 @@ impl SidAcidApp {
                 .clicked()
             {
                 self.view.dock.follow = !follow;
+            }
+            if song {
+                ui.separator();
+                self.song_tools(ui);
             }
         });
     }
@@ -499,8 +510,7 @@ impl SidAcidApp {
     /// used, even if it only moved the cursor.
     pub(crate) fn dock_key(&mut self, key: egui::Key, mods: egui::Modifiers) -> bool {
         use super::key_entry::{apply_entry, entry_key};
-        // Song mode's lanes hold blocks: no note keys there.
-        if !self.view.dock.keyboard || self.view.mode != Mode::Pattern {
+        if !self.view.dock.keyboard {
             return false;
         }
         let Some(uid) = self.focused() else {
@@ -511,6 +521,10 @@ impl SidAcidApp {
         // acts on it either.
         if self.mouse_editing() {
             return true;
+        }
+        // Song mode's lanes hold blocks: block keys, no note entry.
+        if self.view.mode == Mode::Song {
+            return self.song_key(uid, key, mods);
         }
         // Ahead of `entry_key`, which turns down Alt.
         if let Some(used) = self.selection_key(uid, key, mods) {
@@ -1397,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn note_keys_do_nothing_in_song_mode() {
+    fn note_keys_and_note_entry_do_nothing_in_song_mode() {
         use crate::test_rack::{FM, SYNTH1};
         use acid_engine::project::Note;
         let mut app = song_app();
@@ -1439,8 +1453,12 @@ mod tests {
         {
             frame(&mut app, &ctx, 3.0 + t as f64, vec![ev]);
         }
-        assert_eq!(app.doc.project, before, "no pattern changed");
+        assert_eq!(
+            app.doc.project.machines, before.machines,
+            "no pattern changed"
+        );
         assert!(app.view.note_clip.is_none());
+        assert!(app.view.block_clip.is_some(), "the blocks were cut instead");
     }
 
     #[test]
@@ -2033,5 +2051,493 @@ mod tests {
         app.load_document(Document::new(Project::default()));
         assert_eq!(app.view.dock.range, None, "load");
         assert!(app.selection(FM).is_empty());
+    }
+
+    // Song mode's header tools, block keys and block clipboard.
+
+    /// `song_app`'s SYNTH1 lane as (start, pattern, len).
+    fn synth1(app: &SidAcidApp) -> Vec<(u32, u8, Option<u16>)> {
+        song_lane_of(app, crate::test_rack::SYNTH1)
+    }
+
+    fn song_lane_of(
+        app: &SidAcidApp,
+        uid: acid_engine::machine::MachineUid,
+    ) -> Vec<(u32, u8, Option<u16>)> {
+        app.doc
+            .project
+            .song
+            .lane(uid)
+            .iter()
+            .map(|b| (b.start, b.pattern.0, b.len))
+            .collect()
+    }
+
+    /// Starts of `uid`'s selected blocks.
+    fn picked(app: &SidAcidApp, uid: acid_engine::machine::MachineUid) -> Vec<u32> {
+        let lane = app.doc.project.song.lane(uid);
+        app.block_selection(uid)
+            .iter()
+            .map(|&i| lane[i].start)
+            .collect()
+    }
+
+    /// Selects `uid`'s blocks starting at `starts`.
+    fn pick(app: &mut SidAcidApp, uid: acid_engine::machine::MachineUid, starts: &[u32]) {
+        let lane = app.doc.project.song.lane(uid).to_vec();
+        app.view.panel(uid).song_sel = lane
+            .into_iter()
+            .filter(|b| starts.contains(&b.start))
+            .collect();
+    }
+
+    /// Where header tool `name` was drawn last frame.
+    fn tool(app: &SidAcidApp, name: &str) -> Option<Rect> {
+        app.view
+            .dock
+            .tool_rects
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| *r)
+    }
+
+    /// Draws a frame, then clicks header tool `name` (which must be there).
+    fn click_tool(app: &mut SidAcidApp, ctx: &egui::Context, name: &str, time: f64) {
+        frame(app, ctx, time, vec![]);
+        let r = tool(app, name).unwrap_or_else(|| panic!("no {name} tool"));
+        press(app, ctx, r.center(), time + 0.1);
+    }
+
+    /// One shortcut frame of a key press with `mods`.
+    fn key_with(app: &mut SidAcidApp, key: egui::Key, mods: egui::Modifiers) {
+        shortcut_frame(
+            app,
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            }],
+        );
+    }
+
+    /// `song_app` with the dock focused on SYNTH1.
+    fn song_keys_app() -> SidAcidApp {
+        let mut app = song_app();
+        app.view.dock.keyboard = true;
+        app.view.focus = Some(crate::test_rack::SYNTH1);
+        app
+    }
+
+    #[test]
+    fn capture_places_every_machines_selected_pattern_at_the_cursor() {
+        use crate::test_rack::*;
+        let mut app = song_app();
+        app.doc.project.machine_mut(SYNTH2).unwrap().selected = 3;
+        app.view.song_cursor = 64;
+        let before = app.doc.project.song.clone();
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Capture", 0.0);
+        for m in &app.doc.project.machines {
+            let lane = app.doc.project.song.lane(m.uid);
+            assert!(
+                lane.iter()
+                    .any(|b| b.start == 64 && b.pattern.0 == m.selected),
+                "{:?} captured",
+                m.uid
+            );
+            assert_eq!(picked(&app, m.uid), [64], "the new blocks are selected");
+        }
+        assert_eq!(synth1(&app).len(), 4);
+        app.undo();
+        assert_eq!(app.doc.project.song, before, "one undo step");
+    }
+
+    #[test]
+    fn capture_lands_on_the_nearest_free_start_or_is_refused_whole() {
+        use crate::test_rack::*;
+        let mut app = song_app();
+        // SYNTH1 is taken at 16..32; the next free start is 32.
+        app.view.song_cursor = 20;
+        app.capture();
+        assert!(synth1(&app).contains(&(32, 0, None)));
+        assert_eq!(song_lane_of(&app, FM), [(20, 0, None)]);
+        // A full FM lane: nothing is placed anywhere.
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let full: Vec<_> = (0..max / 16)
+            .map(|i| acid_engine::project::Block::new(i * 16, acid_engine::project::PatternRef(0)))
+            .collect();
+        *app.doc.project.song.lane_mut(FM) = full;
+        let before = app.doc.project.song.clone();
+        app.view.song_cursor = 96;
+        app.capture();
+        assert_eq!(app.doc.project.song, before);
+        assert!(app.view.message.is_some(), "the refusal is explained");
+    }
+
+    #[test]
+    fn range_tools_are_disabled_without_a_range() {
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Loop", 0.0);
+        click_tool(&mut app, &ctx, "Insert time", 1.0);
+        click_tool(&mut app, &ctx, "Delete time", 2.0);
+        assert_eq!(app.doc.project.song.loop_range, None);
+        assert!(!app.doc.can_undo(), "nothing happened");
+        assert!(tool(&app, "Clear loop").is_none(), "no loop to clear");
+    }
+
+    #[test]
+    fn loop_and_clear_loop_from_the_header() {
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        app.view.dock.range = Some((16, 48));
+        click_tool(&mut app, &ctx, "Loop", 0.0);
+        assert_eq!(app.doc.project.song.loop_range, Some((16, 48)));
+        click_tool(&mut app, &ctx, "Clear loop", 1.0);
+        assert_eq!(app.doc.project.song.loop_range, None);
+        app.undo();
+        assert_eq!(app.doc.project.song.loop_range, Some((16, 48)));
+        app.undo();
+        assert_eq!(app.doc.project.song.loop_range, None, "one step each");
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn insert_time_pushes_everything_from_the_range_start_right() {
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        app.view.dock.range = Some((16, 32));
+        app.select_song_range(16, 32);
+        let before = app.doc.project.song.clone();
+        click_tool(&mut app, &ctx, "Insert time", 0.0);
+        assert_eq!(synth1(&app), [(0, 0, None), (32, 1, None), (64, 2, None)]);
+        assert_eq!(app.view.dock.range, Some((16, 32)), "the range stays");
+        assert!(picked(&app, crate::test_rack::SYNTH1).is_empty());
+        app.undo();
+        assert_eq!(app.doc.project.song, before, "one undo step");
+    }
+
+    #[test]
+    fn delete_time_removes_the_range_and_closes_the_gap() {
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        app.view.dock.range = Some((16, 32));
+        let before = app.doc.project.song.clone();
+        click_tool(&mut app, &ctx, "Delete time", 0.0);
+        assert_eq!(synth1(&app), [(0, 0, None), (32, 2, None)]);
+        assert_eq!(app.view.dock.range, None);
+        app.undo();
+        assert_eq!(app.doc.project.song, before, "one undo step");
+    }
+
+    #[test]
+    fn block_tools_show_only_for_exactly_one_selected_block() {
+        use crate::test_rack::*;
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        assert!(tool(&app, "Mute").is_none(), "nothing selected");
+        pick(&mut app, SYNTH1, &[0, 16]);
+        frame(&mut app, &ctx, 0.5, vec![]);
+        assert!(tool(&app, "Mute").is_none(), "two selected");
+        pick(&mut app, SYNTH1, &[16]);
+        frame(&mut app, &ctx, 1.0, vec![]);
+        assert!(tool(&app, "Mute").is_some());
+        assert!(tool(&app, "Trans +").is_some(), "the synth transposes");
+        // A drum machine's block: no transpose.
+        app.doc
+            .project
+            .song
+            .lane_mut(KIT808)
+            .push(acid_engine::project::Block::new(
+                0,
+                acid_engine::project::PatternRef(0),
+            ));
+        app.view.panel(SYNTH1).song_sel.clear();
+        pick(&mut app, KIT808, &[0]);
+        frame(&mut app, &ctx, 1.5, vec![]);
+        assert!(tool(&app, "Mute").is_some());
+        assert!(tool(&app, "Trans +").is_none(), "drums don't transpose");
+    }
+
+    #[test]
+    fn mute_and_transpose_edit_the_selected_block() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_app();
+        let ctx = egui::Context::default();
+        pick(&mut app, SYNTH1, &[16]);
+        click_tool(&mut app, &ctx, "Mute", 0.0);
+        click_tool(&mut app, &ctx, "Trans +", 1.0);
+        click_tool(&mut app, &ctx, "Trans +", 2.0);
+        click_tool(&mut app, &ctx, "Trans -", 3.0);
+        let b = app.doc.project.song.lane(SYNTH1)[1];
+        assert!(b.mute);
+        assert_eq!(b.transpose, 1);
+        assert_eq!(picked(&app, SYNTH1), [16], "still selected");
+        app.undo();
+        assert_eq!(app.doc.project.song.lane(SYNTH1)[1].transpose, 2);
+        app.undo();
+        app.undo();
+        let b = app.doc.project.song.lane(SYNTH1)[1];
+        assert_eq!((b.mute, b.transpose), (true, 0), "one step per click");
+        app.view.panel(SYNTH1).song_sel = vec![b];
+        for _ in 0..20 {
+            app.transpose_block(1);
+        }
+        assert_eq!(app.doc.project.song.lane(SYNTH1)[1].transpose, 12, "held");
+    }
+
+    #[test]
+    fn the_pattern_pickers_switch_the_blocks_pattern_and_cut_it_to_fit() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_app();
+        // Pattern 5 lasts 32 steps; the block at 0 has a neighbour at 16.
+        app.doc.project.roll_mut(SYNTH1, 5).unwrap().length = 32;
+        let ctx = egui::Context::default();
+        pick(&mut app, SYNTH1, &[0]);
+        click_tool(&mut app, &ctx, "number", 0.0);
+        frame(&mut app, &ctx, 0.5, vec![]);
+        let item = tool(&app, "number 6").expect("the number list is open");
+        press(&mut app, &ctx, item.center(), 0.6);
+        assert_eq!(
+            synth1(&app),
+            [(0, 5, Some(16)), (16, 1, None), (48, 2, None)],
+            "same start, cut to end at the next block"
+        );
+        click_tool(&mut app, &ctx, "bank", 2.0);
+        frame(&mut app, &ctx, 2.5, vec![]);
+        let item = tool(&app, "bank C").expect("the bank list is open");
+        press(&mut app, &ctx, item.center(), 2.6);
+        assert_eq!(synth1(&app)[0], (0, 37, Some(16)), "C06, number kept");
+        // The block at 16 has room up to 48: a 32-step pattern fits whole.
+        app.view.panel(SYNTH1).song_sel.clear();
+        pick(&mut app, SYNTH1, &[16]);
+        app.set_block_pattern(5);
+        assert_eq!(synth1(&app)[1], (16, 5, None));
+        app.undo();
+        app.undo();
+        app.undo();
+        assert_eq!(synth1(&app)[0], (0, 0, None), "one undo step each");
+    }
+
+    #[test]
+    fn arrows_move_the_block_selection_by_bars_or_alt_steps() {
+        use crate::test_rack::SYNTH1;
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        pick(&mut app, SYNTH1, &[48]);
+        key_with(&mut app, Key::ArrowRight, Modifiers::NONE);
+        assert_eq!(synth1(&app)[2].0, 64);
+        key_with(&mut app, Key::ArrowRight, Modifiers::ALT);
+        assert_eq!(synth1(&app)[2].0, 65);
+        key_with(&mut app, Key::ArrowLeft, Modifiers::NONE);
+        assert_eq!(synth1(&app)[2].0, 49);
+        assert_eq!(picked(&app, SYNTH1), [49], "the selection follows");
+        app.undo();
+        assert_eq!(synth1(&app)[2].0, 65, "one undo step per key");
+        // Onto a taken bar: the nearest free one on the bar grid.
+        pick(&mut app, SYNTH1, &[0]);
+        key_with(&mut app, Key::ArrowRight, Modifiers::NONE);
+        assert_eq!(synth1(&app)[1], (32, 0, None), "over the block at 16");
+    }
+
+    #[test]
+    fn a_held_block_makes_no_undo_step() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_keys_app();
+        pick(&mut app, SYNTH1, &[0]);
+        key_with(&mut app, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert_eq!(synth1(&app)[0].0, 0);
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn delete_and_esc_on_blocks() {
+        use crate::test_rack::SYNTH1;
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        pick(&mut app, SYNTH1, &[0, 48]);
+        key_with(&mut app, Key::Delete, Modifiers::NONE);
+        assert_eq!(synth1(&app), [(16, 1, None)]);
+        assert!(picked(&app, SYNTH1).is_empty());
+        app.undo();
+        assert_eq!(synth1(&app).len(), 3, "one undo step");
+        pick(&mut app, SYNTH1, &[16]);
+        key_with(&mut app, Key::Backspace, Modifiers::NONE);
+        assert_eq!(synth1(&app).len(), 2);
+        // Esc: the range and every lane's selection go; no edit.
+        app.view.dock.range = Some((0, 64));
+        app.select_song_range(0, 64);
+        let undo_before = app.doc.edit_serial();
+        key_with(&mut app, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.view.dock.range, None);
+        assert!(picked(&app, SYNTH1).is_empty());
+        assert_eq!(app.doc.edit_serial(), undo_before);
+    }
+
+    #[test]
+    fn ctrl_c_and_ctrl_v_paste_blocks_at_the_song_cursor() {
+        use crate::test_rack::{FM, SYNTH1};
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        pick(&mut app, SYNTH1, &[16]);
+        key_with(&mut app, Key::C, Modifiers::COMMAND);
+        assert!(app.view.note_clip.is_none(), "the note clipboard is apart");
+        app.view.song_cursor = 96;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert_eq!(synth1(&app)[3], (96, 1, None));
+        assert_eq!(picked(&app, SYNTH1), [96], "the paste is selected");
+        // Onto taken steps: the nearest bar where it fits (32 is free).
+        app.view.song_cursor = 16;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert!(synth1(&app).contains(&(32, 1, None)));
+        // A one-lane clip pastes into the focused lane.
+        app.view.focus = Some(FM);
+        app.view.song_cursor = 0;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert_eq!(song_lane_of(&app, FM), [(0, 1, None)]);
+        app.undo();
+        assert!(song_lane_of(&app, FM).is_empty(), "one undo step");
+    }
+
+    #[test]
+    fn ctrl_x_cuts_blocks_in_one_undo_step() {
+        use crate::test_rack::SYNTH1;
+        let mut app = song_keys_app();
+        let before = app.doc.project.song.clone();
+        pick(&mut app, SYNTH1, &[0, 16]);
+        key_with(&mut app, egui::Key::X, egui::Modifiers::COMMAND);
+        assert_eq!(synth1(&app), [(48, 2, None)]);
+        let clip = &app.view.block_clip.as_ref().unwrap().lanes;
+        assert_eq!(clip.len(), 1);
+        assert_eq!(
+            clip[0].1.iter().map(|b| b.start).collect::<Vec<_>>(),
+            [0, 16]
+        );
+        app.undo();
+        assert_eq!(app.doc.project.song, before);
+        // Nothing selected: nothing is cut or copied.
+        app.view.block_clip = None;
+        key_with(&mut app, egui::Key::X, egui::Modifiers::COMMAND);
+        assert!(app.view.block_clip.is_none());
+        assert_eq!(app.doc.project.song, before);
+        assert!(app.doc.can_redo(), "no edit was made");
+    }
+
+    #[test]
+    fn ctrl_d_duplicates_and_ctrl_a_selects_the_lane() {
+        use crate::test_rack::SYNTH1;
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        key_with(&mut app, Key::A, Modifiers::COMMAND);
+        assert_eq!(picked(&app, SYNTH1), [0, 16, 48]);
+        assert!(!app.doc.can_undo(), "selecting is no edit");
+        pick(&mut app, SYNTH1, &[48]);
+        key_with(&mut app, Key::D, Modifiers::COMMAND);
+        assert_eq!(synth1(&app)[3], (64, 2, None));
+        assert_eq!(picked(&app, SYNTH1), [64]);
+        app.undo();
+        assert_eq!(synth1(&app).len(), 3, "one undo step");
+    }
+
+    /// `song_app` with SYNTH2 blocks too, and a range over bars 1–2.
+    fn two_lane_app() -> SidAcidApp {
+        use crate::test_rack::SYNTH2;
+        use acid_engine::project::{Block, PatternRef};
+        let mut app = song_keys_app();
+        app.doc
+            .project
+            .song
+            .lane_mut(SYNTH2)
+            .extend([Block::new(0, PatternRef(4)), Block::new(64, PatternRef(5))]);
+        app.view.dock.range = Some((0, 32));
+        app.select_song_range(0, 32);
+        app
+    }
+
+    #[test]
+    fn a_range_clip_pastes_back_into_the_same_machines_in_one_undo_step() {
+        use crate::test_rack::{FM, SYNTH1, SYNTH2};
+        use egui::{Key, Modifiers};
+        let mut app = two_lane_app();
+        let before = app.doc.project.song.clone();
+        key_with(&mut app, Key::C, Modifiers::COMMAND);
+        app.view.focus = Some(FM);
+        app.view.song_cursor = 96;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert!(synth1(&app).ends_with(&[(96, 0, None), (112, 1, None)]));
+        assert!(song_lane_of(&app, SYNTH2).ends_with(&[(96, 4, None)]));
+        assert!(song_lane_of(&app, FM).is_empty(), "not the focused lane");
+        assert_eq!(app.view.dock.range, None);
+        assert_eq!(picked(&app, SYNTH1), [96, 112]);
+        app.undo();
+        assert_eq!(app.doc.project.song, before, "one undo step");
+        // Every lane goes by one offset: at 48 SYNTH1 is taken, at 64
+        // SYNTH2 is, so both land at 80.
+        app.view.song_cursor = 48;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert!(synth1(&app).ends_with(&[(80, 0, None), (96, 1, None)]));
+        assert!(song_lane_of(&app, SYNTH2).ends_with(&[(64, 5, None), (80, 4, None)]));
+    }
+
+    #[test]
+    fn a_range_cut_and_duplicate_act_on_every_lane() {
+        use crate::test_rack::{SYNTH1, SYNTH2};
+        use egui::{Key, Modifiers};
+        let mut app = two_lane_app();
+        let before = app.doc.project.song.clone();
+        // Right after the range is free on SYNTH2 but not on SYNTH1 (its
+        // block at 48), and 64 is taken on SYNTH2: both go to 80.
+        key_with(&mut app, Key::D, Modifiers::COMMAND);
+        assert!(synth1(&app).ends_with(&[(80, 0, None), (96, 1, None)]));
+        assert!(song_lane_of(&app, SYNTH2).ends_with(&[(80, 4, None)]));
+        assert_eq!(app.view.dock.range, Some((80, 112)), "onto the copies");
+        assert_eq!(picked(&app, SYNTH1), [80, 96]);
+        app.undo();
+        assert_eq!(app.doc.project.song, before);
+        app.view.dock.range = Some((0, 32));
+        key_with(&mut app, Key::X, Modifiers::COMMAND);
+        assert_eq!(synth1(&app), [(48, 2, None)]);
+        assert_eq!(song_lane_of(&app, SYNTH2), [(64, 5, None)]);
+        assert_eq!(app.view.dock.range, None);
+        app.undo();
+        assert_eq!(app.doc.project.song, before, "one undo step");
+    }
+
+    #[test]
+    fn pasted_song_blocks_drop_lanes_of_machines_not_in_the_rack() {
+        use crate::test_rack::SYNTH2;
+        use egui::{Key, Modifiers};
+        let mut app = two_lane_app();
+        key_with(&mut app, Key::C, Modifiers::COMMAND);
+        app.remove_machine(SYNTH2);
+        app.view.song_cursor = 96;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert!(synth1(&app).contains(&(96, 0, None)));
+        assert!(
+            app.doc.project.song.lanes.iter().all(|(u, _)| *u != SYNTH2),
+            "no lane for the removed machine"
+        );
+        assert!(app.doc.project.validate().is_ok());
+    }
+
+    #[test]
+    fn a_paste_that_fits_nowhere_is_refused() {
+        use crate::test_rack::SYNTH1;
+        use acid_engine::project::{Block, PatternRef};
+        let mut app = song_keys_app();
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        *app.doc.project.song.lane_mut(SYNTH1) = (0..max / 16)
+            .map(|i| Block::new(i * 16, PatternRef(0)))
+            .collect();
+        app.view.block_clip = Some(crate::ui::song_tools::BlockClip {
+            lanes: vec![(SYNTH1, vec![Block::new(0, PatternRef(1))])],
+        });
+        let before = app.doc.project.song.clone();
+        app.paste_blocks();
+        assert_eq!(app.doc.project.song, before);
+        assert!(app.view.message.is_some());
     }
 }
