@@ -114,10 +114,12 @@ impl SidAcidApp {
             .add(egui::Button::new("Fill").selected(was))
             .on_hover_text("Hold to play fill notes; Shift-click to latch");
         self.view.fill_rect = Some(r.rect);
+        // A release missed while the window was unfocused or the pointer
+        // gone (left it, a touch ended) still lets go.
         let (pressed, down, shift) = ui.input(|i| {
             (
                 i.pointer.primary_pressed(),
-                i.pointer.primary_down(),
+                i.pointer.primary_down() && i.focused && i.pointer.has_pointer(),
                 i.modifiers.shift,
             )
         });
@@ -173,6 +175,16 @@ mod tests {
     }
 
     fn frame(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
+        frame_focused(app, ctx, time, events, true);
+    }
+
+    fn frame_focused(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+        focused: bool,
+    ) {
         // Held modifiers come from the events' own state.
         let modifiers = events.iter().find_map(|e| match e {
             egui::Event::PointerButton { modifiers, .. } => Some(*modifiers),
@@ -186,6 +198,7 @@ mod tests {
             )),
             time: Some(time),
             events,
+            focused,
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| app.ui(ctx));
@@ -220,6 +233,49 @@ mod tests {
         frame(app, ctx, time + 0.15, vec![button(false)]);
         frame(app, ctx, time + 0.2, vec![]);
         (down, fills(&app.flushed))
+    }
+
+    /// Presses Fill and runs a frame held down.
+    fn hold_fill(app: &mut SidAcidApp, ctx: &egui::Context, time: f64) {
+        let at = app.view.fill_rect.expect("Fill was drawn").center();
+        frame(app, ctx, time, vec![egui::Event::PointerMoved(at)]);
+        frame(
+            app,
+            ctx,
+            time + 0.05,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(app, ctx, time + 0.1, vec![]);
+        assert!(app.fill_on());
+    }
+
+    #[test]
+    fn a_held_fill_lets_go_when_the_window_loses_focus() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        hold_fill(&mut app, &ctx, 1.0);
+        app.flushed.clear();
+        frame_focused(&mut app, &ctx, 1.2, vec![], false);
+        assert_eq!(fills(&app.flushed), [false]);
+        assert!(!app.fill_on());
+    }
+
+    #[test]
+    fn a_held_fill_lets_go_when_the_pointer_is_gone() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        hold_fill(&mut app, &ctx, 1.0);
+        app.flushed.clear();
+        frame(&mut app, &ctx, 1.2, vec![egui::Event::PointerGone]);
+        assert_eq!(fills(&app.flushed), [false]);
+        assert!(!app.fill_on());
     }
 
     #[test]
