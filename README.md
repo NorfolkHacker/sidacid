@@ -1,6 +1,6 @@
 # SidAcid
 
-An acid groovebox built on a C64 SID-style sound engine. It runs as a native desktop app and is laid out for the Steam Deck screen.
+An acid groovebox built on a sound engine modelled on a classic 8-bit home-computer sound chip. It runs as a native desktop app and is laid out for a 1280×800 handheld screen.
 
 ![SidAcid](docs/images/screenshot.png)
 
@@ -11,13 +11,13 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
 
 ## What's in the box
 
-- **Two SID bass synths with classic acid-bass controls:**
+- **Two 8-bit chip bass synths with classic acid-bass controls:**
   - Tune, Cutoff, Resonance, Env Mod, Decay and Accent.
   - Saw or pulse wave, LP/BP/HP filter, hard sync.
   - Accent sweep that builds over consecutive accents, and slide/tie.
   - 3-voice detuned **unison** with stereo spread.
-- **Two SID drum machines:**
-  - An 808-flavoured and a 909-flavoured kit: BD, SD, LT, HT, CP, RS, CH and OH.
+- **Two 8-bit chip drum machines:**
+  - Two kits in the style of classic analog drum machines: BD, SD, LT, HT, CP, RS, CH and OH.
   - Tune, Decay, Tone and Level per instrument.
   - Closed hat chokes open hat.
 - **FM synth** in the style of classic 6-operator FM synths:
@@ -129,7 +129,7 @@ Pick the driver and device under **File → Audio Settings…**.
 
 | Crate | What it is |
 |---|---|
-| `crates/sid-core` | The SID chip: oscillators, envelopes, filter and 3-voice chip. No dependencies. |
+| `crates/sid-core` | The 8-bit sound chip: oscillators, envelopes, filter and 3-voice chip. No dependencies. |
 | `crates/acid-engine` | The engine: synths, drums, effects, mixer, sequencer, song mode, randomisers, project files and offline render. It has no GUI or audio-device dependencies. |
 | `crates/app` | The `sidacid` binary: egui UI and cpal live audio, with a lock-free command/event bridge to the audio thread. |
 
@@ -137,6 +137,6 @@ Design specs and implementation plans are in `docs/superpowers/`.
 
 ## Credits
 
-The SID engine is derived from the synthesiser in [Acid OS](https://github.com/NorfolkHacker/Acid-OS-V3), MIT licensed. See `THIRD_PARTY_NOTICES.md`.
+The sound-chip engine is derived from the synthesiser in [Acid OS](https://github.com/NorfolkHacker/Acid-OS-V3), MIT licensed. See `THIRD_PARTY_NOTICES.md`.
 
 SidAcid is MIT licensed; see `LICENSE`.
