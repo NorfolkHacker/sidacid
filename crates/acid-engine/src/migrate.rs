@@ -302,6 +302,7 @@ impl ProjectV4 {
                     selected: m.selected,
                     params: m.params,
                     body: m.body.upgrade(),
+                    lane: Default::default(),
                 })
                 .collect(),
             next_uid: self.next_uid,

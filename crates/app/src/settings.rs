@@ -13,6 +13,8 @@ pub struct Settings {
     pub version: u32,
     #[serde(default)]
     pub audio: AudioSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
 }
 
 impl Default for Settings {
@@ -20,6 +22,32 @@ impl Default for Settings {
         Settings {
             version: SETTINGS_VERSION,
             audio: AudioSettings::default(),
+            ui: UiSettings::default(),
+        }
+    }
+}
+
+/// Window layout kept per machine, not per project.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct UiSettings {
+    /// Share of the window height the editor dock takes.
+    pub dock_frac: f32,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        UiSettings { dock_frac: 0.45 }
+    }
+}
+
+impl UiSettings {
+    #[allow(dead_code)] // used by the dock (phase 2, task 6)
+    /// `dock_frac` held to 0.15..=0.85; anything non-finite is the default.
+    pub fn clamped_dock_frac(&self) -> f32 {
+        if self.dock_frac.is_finite() {
+            self.dock_frac.clamp(0.15, 0.85)
+        } else {
+            UiSettings::default().dock_frac
         }
     }
 }
@@ -107,6 +135,28 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn the_dock_size_round_trips_and_defaults() {
+        let dir = scratch("dock");
+        let path = dir.join("settings.ron");
+        let mut s = Settings::default();
+        assert_eq!(s.ui.dock_frac, 0.45);
+        s.ui.dock_frac = 0.6;
+        save(&path, &s).unwrap();
+        assert_eq!(load(&path).0.ui.dock_frac, 0.6);
+        std::fs::write(&path, "(version: 1)").unwrap();
+        assert_eq!(load(&path).0.ui, UiSettings::default(), "older files");
+        assert_eq!(UiSettings { dock_frac: 2.0 }.clamped_dock_frac(), 0.85);
+        assert_eq!(
+            UiSettings {
+                dock_frac: f32::NAN
+            }
+            .clamped_dock_frac(),
+            0.45
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir =

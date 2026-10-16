@@ -1,7 +1,6 @@
 //! The note-pattern row (pads, length, snap) shared by the FM and Sampler panels.
 
 use super::SidAcidApp;
-use super::poly_edit::Snap;
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use eframe::egui;
@@ -38,14 +37,6 @@ impl SidAcidApp {
                     }
                     if r.drag_stopped() || r.lost_focus() {
                         self.doc.end_gesture();
-                    }
-                    ui.separator();
-                    ui.label("Snap");
-                    for s in Snap::ALL {
-                        let snap = &mut self.view.panel(uid).poly_snap;
-                        if ui.selectable_label(*snap == s, s.label()).clicked() {
-                            *snap = s;
-                        }
                     }
                 });
             });

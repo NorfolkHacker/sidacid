@@ -80,8 +80,8 @@ impl SidAcidApp {
             return;
         };
         let ticks = pattern.ticks();
+        let snap = self.view.dock.snap;
         let panel = self.view.panel(uid);
-        let snap = panel.poly_snap;
         let new_len = match panel.poly_len {
             0 => TICKS_PER_STEP,
             l => l,

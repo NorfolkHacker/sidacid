@@ -488,6 +488,46 @@ pub struct MachineEntry {
     /// Channel strip + type params.
     pub params: BTreeMap<MachineParam, f32>,
     pub body: MachineBody,
+    /// How this machine's lane looks in the editor dock.
+    #[serde(default, skip_serializing_if = "LaneView::is_default")]
+    pub lane: LaneView,
+}
+
+/// A machine's lane in the editor dock: its height and what it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneView {
+    /// Lane height in points; read it through `clamped_height`.
+    pub height: u16,
+    /// The lane is folded down to its header.
+    pub collapsed: bool,
+    /// The lane shows its velocity/parameter strip.
+    pub strip: bool,
+}
+
+impl LaneView {
+    pub const DEFAULT_HEIGHT: u16 = 120;
+    pub const MIN_HEIGHT: u16 = 48;
+    pub const MAX_HEIGHT: u16 = 480;
+
+    /// True when nothing differs from a fresh lane (so it is not saved).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `height` held to `MIN_HEIGHT..=MAX_HEIGHT`.
+    pub fn clamped_height(&self) -> u16 {
+        self.height.clamp(Self::MIN_HEIGHT, Self::MAX_HEIGHT)
+    }
+}
+
+impl Default for LaneView {
+    fn default() -> Self {
+        Self {
+            height: Self::DEFAULT_HEIGHT,
+            collapsed: false,
+            strip: true,
+        }
+    }
 }
 
 impl MachineEntry {
@@ -502,6 +542,7 @@ impl MachineEntry {
                 .map(|p| (p, p.info().default))
                 .collect(),
             body: MachineBody::new(ty),
+            lane: LaneView::default(),
         }
     }
 
@@ -909,6 +950,36 @@ mod tests {
     use super::*;
     use crate::machine::MachineUid;
     use crate::params::{FmParam, KitParam, MasterParam, SynthParam};
+
+    #[test]
+    fn lane_views_save_only_when_changed() {
+        let mut p = Project::default();
+        assert!(!p.to_ron().contains(" lane:"), "defaults are skipped");
+        p.machines[0].lane = LaneView {
+            height: 200,
+            collapsed: true,
+            strip: false,
+        };
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back.machines[0].lane, p.machines[0].lane);
+        assert_eq!(back.machines[1].lane, LaneView::default());
+        assert_eq!(
+            LaneView {
+                height: 5,
+                ..LaneView::default()
+            }
+            .clamped_height(),
+            48
+        );
+        assert_eq!(
+            LaneView {
+                height: 9000,
+                ..LaneView::default()
+            }
+            .clamped_height(),
+            480
+        );
+    }
 
     const SAMPLER: MachineUid = MachineUid(6);
     const FM: MachineUid = MachineUid(5);

@@ -54,11 +54,17 @@ pub struct PanelState {
     pub bank: u8,
     /// Poly-roll drag (note machines).
     pub poly_drag: Option<poly_edit::PolyDrag>,
-    pub poly_snap: poly_edit::Snap,
     /// Length in ticks of the last note drawn or resized (0 = one step).
     pub poly_len: u16,
     /// The roll has been scrolled to its starting pitch once.
     pub poly_scrolled: bool,
+    /// Vertical scroll of this machine's dock lane; None until first placed
+    /// at `roll_start_pitch`.
+    #[allow(dead_code)] // used by the dock (phase 2, task 6)
+    pub lane_scroll_y: Option<f32>,
+    /// Keyboard note-entry cursor in this machine's lane.
+    #[allow(dead_code)] // used by the dock (phase 2, task 6)
+    pub cursor: key_entry::Cursor,
     /// Selected sampler slot (0..16; samplers).
     pub sampler_slot: usize,
     /// Operator shown in the FM operator editor (0..6; FM).
@@ -73,8 +79,37 @@ pub struct PanelState {
     pub fm_voice_src: Option<(fm_voices::FmBrowser, usize)>,
 }
 
+/// The editor dock's view state (not saved).
+#[allow(dead_code)] // fields used by the dock (phase 2, tasks 4-6)
+pub struct DockState {
+    /// Index into `lane_geom::ZOOMS`.
+    pub zoom: usize,
+    pub scroll_x: f32,
+    /// The dock scrolls to follow the playhead.
+    pub follow: bool,
+    pub snap: poly_edit::Snap,
+    /// The dock has keyboard focus.
+    pub keyboard: bool,
+    /// The divider above the dock is being dragged.
+    pub resizing: bool,
+}
+
+impl Default for DockState {
+    fn default() -> Self {
+        DockState {
+            zoom: 2,
+            scroll_x: 0.0,
+            follow: true,
+            snap: poly_edit::Snap::Step,
+            keyboard: false,
+            resizing: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ViewState {
+    pub dock: DockState,
     pub audio_window: audio_settings::AudioWindow,
     /// Machine that keyboard shortcuts act on; None (or a uid no longer in
     /// the rack) means the first machine (see `SidAcidApp::focused`).
