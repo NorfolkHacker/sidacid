@@ -19,7 +19,10 @@ mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
 mod note_ops;
+// The Tools menu (phase 7, task 3) calls these.
 mod note_panel;
+#[allow(dead_code)]
+mod note_tools;
 mod pads;
 mod params_ui;
 mod perf;
