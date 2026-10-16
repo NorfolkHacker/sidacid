@@ -20,6 +20,7 @@ impl SidAcidApp {
     pub(crate) fn dock(&mut self, ctx: &egui::Context) {
         let window_h = ctx.screen_rect().height().max(0.0);
         let frac = self.settings.ui.clamped_dock_frac();
+        self.latch_dock_resize(ctx);
         let panel = egui::TopBottomPanel::bottom("dock")
             .resizable(true)
             .default_height(window_h * frac)
@@ -30,25 +31,38 @@ impl SidAcidApp {
             });
         let rect = panel.response.rect;
         self.track_dock_resize(ctx, rect, window_h, frac);
-        self.view.dock.rect = Some(rect);
     }
 
-    /// Watches the panel's height while its top edge is dragged; when the
-    /// drag ends the new share of the window is kept.
-    fn track_dock_resize(&mut self, ctx: &egui::Context, rect: Rect, window_h: f32, frac: f32) {
+    /// On the frame a press starts, before the panel is drawn: a press on
+    /// the dock's top edge (as last drawn, which is what egui's own resize
+    /// handle hit-tests against) starts a resize, latched until release.
+    /// Deciding once at the press keeps it true however fast the edge
+    /// then moves with the pointer.
+    fn latch_dock_resize(&mut self, ctx: &egui::Context) {
+        let Some(last) = self.view.dock.rect else {
+            return;
+        };
         let grab = ctx.style().interaction.resize_grab_radius_side + 1.0;
-        let (down, on_edge) = ctx.input(|i| {
-            let on_edge = i
-                .pointer
-                .press_origin()
-                .is_some_and(|p| (p.y - rect.top()).abs() <= grab);
-            (i.pointer.any_down(), on_edge)
+        let on_edge = ctx.input(|i| {
+            i.pointer.primary_pressed()
+                && i.pointer
+                    .press_origin()
+                    .is_some_and(|p| (p.y - last.top()).abs() <= grab)
         });
-        if down {
-            if on_edge && (rect.height() - window_h * frac).abs() > 1.0 {
-                self.view.dock.resizing = true;
-            }
-        } else if std::mem::take(&mut self.view.dock.resizing) && window_h > 0.0 {
+        if on_edge {
+            self.view.dock.resizing = true;
+        }
+    }
+
+    /// After the panel is drawn: when a latched resize's pointer is
+    /// released, the panel's new share of the window is kept (if it
+    /// moved). Stores this frame's rect for the next press.
+    fn track_dock_resize(&mut self, ctx: &egui::Context, rect: Rect, window_h: f32, frac: f32) {
+        self.view.dock.rect = Some(rect);
+        if ctx.input(|i| i.pointer.any_down()) || !std::mem::take(&mut self.view.dock.resizing) {
+            return;
+        }
+        if window_h > 0.0 && (rect.height() - window_h * frac).abs() > 1.0 {
             self.finish_dock_resize(rect.height() / window_h);
         }
     }
@@ -140,9 +154,9 @@ impl SidAcidApp {
             let x = step as f32 * TICKS_PER_STEP as f32 * tw;
             self.view.dock.scroll_x = follow_scroll(self.view.dock.scroll_x, view_w, x);
         }
-        self.ruler(ui, key_w, tw, view_w, content_w);
         let max_scroll = (content_w - view_w).max(0.0);
         self.view.dock.scroll_x = self.view.dock.scroll_x.clamp(0.0, max_scroll);
+        self.ruler(ui, key_w, tw, view_w, content_w);
         egui::ScrollArea::vertical()
             .id_salt("dock_lanes")
             .auto_shrink(false)
@@ -162,7 +176,9 @@ impl SidAcidApp {
         let width = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(vec2(width, RULER_H), Sense::drag());
         if resp.dragged() {
-            self.view.dock.scroll_x = (self.view.dock.scroll_x + resp.drag_delta().x).max(0.0);
+            let max_scroll = (content_w - view_w).max(0.0);
+            let x = self.view.dock.scroll_x + resp.drag_delta().x;
+            self.view.dock.scroll_x = x.clamp(0.0, max_scroll);
         }
         let left = rect.left() + key_w;
         let strip = Rect::from_min_max(pos2(left, rect.top()), rect.max);
@@ -338,5 +354,47 @@ mod tests {
         app.view.dock.scroll_x = 0.0;
         frame(&mut app, &ctx, 0.1, vec![]);
         assert_eq!(app.view.dock.scroll_x, 0.0, "no follow, no scroll");
+    }
+
+    /// Presses at `from`, moves `dy` in one frame, releases; returns the
+    /// dock's height after.
+    fn drag(app: &mut SidAcidApp, ctx: &egui::Context, from: egui::Pos2, dy: f32) -> f32 {
+        let to = from + vec2(0.0, dy);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(app, ctx, 1.0, vec![egui::Event::PointerMoved(from)]);
+        frame(app, ctx, 1.05, vec![button(from, true)]);
+        frame(app, ctx, 1.1, vec![egui::Event::PointerMoved(to)]);
+        frame(app, ctx, 1.15, vec![button(to, false)]);
+        frame(app, ctx, 1.2, vec![]);
+        app.view.dock.rect.unwrap().height()
+    }
+
+    #[test]
+    fn a_fast_drag_on_the_dock_edge_saves_the_new_size() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let top = app.view.dock.rect.unwrap().top();
+        let h = drag(&mut app, &ctx, pos2(640.0, top), -30.0);
+        assert!((h - (360.0 + 30.0)).abs() < 2.0, "the dock grew: {h}");
+        let frac = app.settings.ui.dock_frac;
+        assert!((frac - h / 800.0).abs() < 1e-3, "kept: {frac} for {h}");
+        assert!(!app.view.dock.resizing);
+    }
+
+    #[test]
+    fn a_drag_inside_the_dock_keeps_its_size() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let rect = app.view.dock.rect.unwrap();
+        drag(&mut app, &ctx, pos2(640.0, rect.top() + 120.0), -30.0);
+        assert_eq!(app.settings.ui.dock_frac, 0.45);
+        assert!(!app.view.dock.resizing);
     }
 }
