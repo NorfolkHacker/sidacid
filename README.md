@@ -20,6 +20,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - An 808-flavoured and a 909-flavoured kit: BD, SD, LT, HT, CP, RS, CH and OH.
   - Tune, Decay, Tone and Level per instrument.
   - Closed hat chokes open hat.
+  - Hits are stored at 1/64 resolution; the grid edits them on 1/16 steps.
 - **FM synth** in the style of the DX7 / M-VAVE FM-1:
   - 6 operators, 32 algorithms with a live algorithm diagram, DX7 envelopes, keyboard and velocity scaling.
   - LFO and pitch EG.
@@ -33,9 +34,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
   - The piano roll labels each sampler row with its slot and slice.
 - Both use a **polyphonic piano roll**: chords, 1/16 to 1/64 snap, a velocity lane, and click-to-audition keys.
-- **Two sequencer views per synth,** swappable at any time over the same pattern:
-  - The classic **303 step editor**, with tracker-style step-write.
-  - A **piano roll**: click to add, drag to move or stretch, right-click to delete, plus accent and slide lanes.
+- **Piano roll for the bass synths:** 1/16 to 1/64 snap, one note at a time, accent and slide lanes, and slides drawn as ties.
 - **Patterns:** 128 per machine, in banks A–H × 16. Each pattern is up to 64 steps, and a pattern switch queues to the next loop.
 - **Mixer and effects:**
   - Six channels with per-channel distortion (2× oversampled) and compressor, level, pan, mute and solo.
@@ -88,19 +87,6 @@ Pick the driver and device under **File → Audio Settings…**.
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+C / Ctrl+V | Copy / paste a pattern |
 | Ctrl+S / Ctrl+O / Ctrl+N | Save / open / new |
-
-**Step-write** starts when you click a note cell in the 303 view:
-
-| Key | Action |
-|---|---|
-| Z-row (Z S X D C V G B H N J M) | One octave of notes |
-| Q-row | The octave above |
-| `[` / `]` | Octave down / up |
-| A | Toggle accent |
-| F | Toggle slide |
-| `-` | Tie |
-| Space | Rest |
-| Esc | Leave step-write |
 
 ## Layout
 

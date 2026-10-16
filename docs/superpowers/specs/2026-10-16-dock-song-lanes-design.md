@@ -76,7 +76,7 @@ engine act on `chance`, `ratchet` and `cond`.
   0–7 (BD, SD, LT, HT, CP, RS, CH, OH), `accent` for accent, and `len`
   defaulting to one step (it matters for ratchet in phase 6). Closed hat
   still chokes open hat.
-- `MAX_NOTES` (256) applies to every pattern.
+- `MAX_NOTES` (512, a full 64-step pattern on all eight drums) applies to every pattern.
 
 ### Migration (project version 4 → 5)
 
@@ -85,6 +85,11 @@ engine act on `chance`, `ratchet` and `cond`.
   `SynthStep::midi` with transpose 0.
 - Drums: each `On`/`Accent` hit becomes a note at `step × 4` ticks, one
   step long.
+- A Tie at step 0 of a pattern whose last step plays continues that note
+  over the loop (the last note slides into a same-pitch note at tick 0).
+  A Tie after a song bar line or a queued pattern switch starts its own
+  note.
+- Malformed old step lists are refused with an error, not converted.
 - A golden render test proves a converted fixture renders identical
   audio.
 
@@ -93,7 +98,8 @@ engine act on `chance`, `ratchet` and `cond`.
 - Sequencer synth and drum playback (`sequencer.rs`).
 - Smart randomiser (`random.rs`): dice, Template and Evolve are rewritten
   to produce notes. Behaviour is kept: same scales, groove-aware placement
-  and chained slides.
+  and chained slides. Dice work on the 1/16 grid; a step the Rest die
+  turns on repeats the nearest earlier note's pitch.
 - Song record and pattern copy/paste.
 - Removed: `step303.rs`, `step_edit.rs`, the 303 pitch-scroll use of
   `scroll.rs` (its knob wheel gestures stay) and the `SeqView` toggle (including `Edit::View` and the saved view).
@@ -145,7 +151,7 @@ engine act on `chance`, `ratchet` and `cond`.
 - The focused lane has a cursor at a step and pitch (a drum row on drum
   lanes).
 - Arrow keys move the cursor by one grid step or one semitone/row.
-- The existing note keys (`keys.rs`) write a note one grid step long at
+- The tracker key layout of the removed step-writer (`crates/app/src/ui/step_edit.rs` at commit `32308c6`: Z S X D C V G B H N J M for the lower octave, Q 2 W 3 E R 5 T 6 Y 7 U I above) write a note one grid step long at
   the cursor and advance it. On drum lanes any note key writes a hit on
   the cursor's row.
 - Backspace deletes the note under the cursor. Space still plays/stops.
@@ -188,8 +194,9 @@ engine act on `chance`, `ratchet` and `cond`.
   into the same machines.
 - Melodic↔melodic paste works; melodic↔drum paste is refused with a
   message.
-- Acid lanes stay monophonic: an overlap trims the earlier note at the
-  later one's start.
+- Acid lanes stay monophonic: the note just edited wins: other notes
+  starting inside it are deleted, and a note sounding into its start is
+  cut there.
 - Notes past the pattern length are kept but not played.
 - A paste that would exceed `MAX_NOTES` is refused with a message.
 - Editing logic is pure functions with unit tests, in the style of
