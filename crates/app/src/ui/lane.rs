@@ -444,6 +444,20 @@ impl SidAcidApp {
             .clicked();
         row.label(RichText::new(self.panel_title(uid)).strong());
         row.label(RichText::new(PatternRef(slot).label()).monospace().weak());
+        // Notes past a shortened pattern's end are kept but silent and
+        // off the grid: say so in Pattern mode.
+        let hidden = self.doc.project.roll(uid, slot).map_or(0, |p| {
+            let ticks = p.ticks();
+            p.notes.iter().filter(|n| n.start >= ticks).count()
+        });
+        if strip_toggle && hidden > 0 {
+            row.label(RichText::new(format!("+{hidden} hidden")).small().weak())
+                .on_hover_text(format!(
+                    "{hidden} note{} past this pattern's end: silent and not shown. \
+                     They come back if the pattern is lengthened.",
+                    if hidden == 1 { " starts" } else { "s start" }
+                ));
+        }
         let kind = self.lane_kind(uid);
         let melodic = kind != LaneKind::Drums;
         let mode = self.view.panel(uid).strip_mode;
@@ -2372,6 +2386,19 @@ mod tests {
             }
         }
         (texts, acid_lines)
+    }
+
+    #[test]
+    fn the_header_counts_notes_hidden_past_the_end() {
+        for uid in [FM, KIT808] {
+            let mut app = app_with(uid, &[(0, 4, 0), (60, 4, 1)]);
+            let (texts, _) = painted(&mut app, uid);
+            assert!(!texts.iter().any(|t| t.contains("hidden")), "{uid:?}");
+            // Shortened to 8 steps (32 ticks): the note at 60 is hidden.
+            app.doc.project.roll_mut(uid, 0).unwrap().length = 8;
+            let (texts, _) = painted(&mut app, uid);
+            assert!(texts.iter().any(|t| t == "+1 hidden"), "{uid:?}");
+        }
     }
 
     #[test]
