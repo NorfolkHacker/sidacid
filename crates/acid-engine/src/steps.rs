@@ -195,6 +195,161 @@ pub fn set_drum_hit(roll: &mut NotePattern, step: usize, inst: usize, hit: DrumH
     true
 }
 
+/// Steps a note covers on the grid, as `SynthGrid::from_roll` shows it:
+/// from the step its start falls in, as many as its length rounds up to.
+fn grid_span(n: &Note) -> (usize, usize) {
+    let first = (n.start / STEP) as usize;
+    let count = (n.len.max(1) as usize).div_ceil(STEP as usize);
+    (first, (first + count).min(STEPS) - 1)
+}
+
+fn end_of(n: &Note) -> u16 {
+    n.start.saturating_add(n.len.max(1))
+}
+
+/// The note the grid shows on `step`: the latest-starting one covering it.
+fn shown_on(roll: &NotePattern, step: usize) -> Option<usize> {
+    roll.notes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            let (first, last) = grid_span(n);
+            (first..=last).contains(&step)
+        })
+        .max_by_key(|(_, n)| n.start)
+        .map(|(i, _)| i)
+}
+
+/// Notes sounding past tick `at` that started before it now end there.
+fn cut_at(roll: &mut NotePattern, at: u16) {
+    for n in roll
+        .notes
+        .iter_mut()
+        .filter(|n| n.start < at && end_of(n) > at)
+    {
+        n.len = at - n.start;
+    }
+}
+
+/// Sets one grid step by changing only the notes under it, so whatever
+/// the grid can't show (chance, ratchet, condition, an off-grid start or
+/// length, a pitch outside its octaves) stays. A gate change adds, splits,
+/// lengthens, joins or removes notes; otherwise a pitch change moves the
+/// whole note by the same interval, accent is its first step's and slide
+/// its last step's (marks elsewhere change nothing). A Tie with no note
+/// before it starts one, as the old grid played it. False when nothing
+/// changed, or when the edit would exceed `MAX_NOTES`.
+pub fn set_synth_step(roll: &mut NotePattern, step: usize, value: SynthStep) -> bool {
+    if step >= STEPS {
+        return false;
+    }
+    let cur = SynthGrid::from_roll(roll).steps[step];
+    if value == cur {
+        return false;
+    }
+    let before = roll.clone();
+    let at = step as u16 * STEP;
+    let shown = shown_on(roll, step);
+    let shift =
+        |pitch: u8| (pitch as i32 + value.midi(0) as i32 - cur.midi(0) as i32).clamp(0, 127) as u8;
+    match (cur.gate, value.gate, shown) {
+        (Gate::Off, Gate::Off, _) => {}
+        (Gate::Off, _, _) => {
+            let prev = step.checked_sub(1).and_then(|s| shown_on(roll, s));
+            match prev {
+                Some(p) if value.gate == Gate::Tie => {
+                    let n = &mut roll.notes[p];
+                    n.len = at + STEP - n.start;
+                }
+                _ => {
+                    if roll.notes.len() >= MAX_NOTES {
+                        return false;
+                    }
+                    cut_at(roll, at);
+                    roll.notes.push(Note {
+                        accent: value.accent,
+                        slide: value.slide,
+                        ..Note::new(at, STEP, value.midi(0), ACID_VEL)
+                    });
+                }
+            }
+        }
+        (Gate::On, Gate::Off, Some(i)) => {
+            // Its tail past the step stays as a note; any shorter notes
+            // before it in the step go too.
+            let n = roll.notes[i];
+            let tail = grid_span(&n).1 > step;
+            let mut k = 0;
+            roll.notes.retain(|m| {
+                k += 1;
+                (k - 1 == i && tail) || (m.start / STEP) as usize != step
+            });
+            if let Some(m) = roll.notes.iter_mut().find(|m| **m == n) {
+                m.start = at + STEP;
+                m.len = end_of(&n) - m.start;
+            }
+            cut_at(roll, at);
+        }
+        (Gate::Tie, Gate::Off | Gate::On, Some(i)) => {
+            let n = roll.notes[i];
+            let (_, last) = grid_span(&n);
+            let m = &mut roll.notes[i];
+            m.len = at - n.start;
+            m.slide = false;
+            let tail = if value.gate == Gate::On {
+                at
+            } else {
+                at + STEP
+            };
+            if end_of(&n) > tail {
+                if roll.notes.len() >= MAX_NOTES {
+                    *roll = before;
+                    return false;
+                }
+                let on = value.gate == Gate::On;
+                roll.notes.push(Note {
+                    start: tail,
+                    len: end_of(&n) - tail,
+                    pitch: if on { shift(n.pitch) } else { n.pitch },
+                    accent: on && value.accent,
+                    slide: if on && step == last {
+                        value.slide
+                    } else {
+                        n.slide
+                    },
+                    ..n
+                });
+            }
+        }
+        (Gate::On, Gate::Tie, Some(i)) => {
+            let Some(p) = step.checked_sub(1).and_then(|s| shown_on(roll, s)) else {
+                return false;
+            };
+            let n = roll.notes[i];
+            let q = &mut roll.notes[p];
+            q.len = end_of(&n) - q.start;
+            q.slide = n.slide;
+            // The joined note and any shorter ones before it in the step.
+            roll.notes.retain(|m| (m.start / STEP) as usize != step);
+        }
+        (_, _, Some(i)) => {
+            let n = &mut roll.notes[i];
+            let (first, last) = grid_span(n);
+            if (value.note, value.octave) != (cur.note, cur.octave) {
+                n.pitch = shift(n.pitch);
+            }
+            if value.accent != cur.accent && step == first {
+                n.accent = value.accent;
+            }
+            if value.slide != cur.slide && step == last {
+                n.slide = value.slide;
+            }
+        }
+        (_, _, None) => {}
+    }
+    *roll != before
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gate {
     #[default]
@@ -214,6 +369,10 @@ pub struct SynthStep {
 }
 
 impl SynthStep {
+    pub fn with_gate(self, gate: Gate) -> Self {
+        Self { gate, ..self }
+    }
+
     pub fn midi(&self, transpose: i8) -> u8 {
         (BASE_MIDI + 12 * self.octave as i32 + self.note as i32 + transpose as i32).clamp(0, 127)
             as u8
@@ -467,5 +626,254 @@ mod tests {
         assert_eq!(roll.notes.len(), MAX_NOTES);
         assert!(set_drum_hit(&mut roll, 0, 0, DrumHit::Off));
         assert!(set_drum_hit(&mut roll, 63, 7, DrumHit::On));
+    }
+
+    fn roll(notes: Vec<Note>) -> NotePattern {
+        NotePattern { notes, length: 16 }
+    }
+
+    /// A note with every field the grid can't show set away from its default.
+    fn rich(start: u16, len: u16, pitch: u8) -> Note {
+        Note {
+            chance: 50,
+            ratchet: 3,
+            cond: crate::project::Cond::Fill,
+            ..Note::new(start, len, pitch, 77)
+        }
+    }
+
+    fn at(r: &NotePattern, s: usize) -> SynthStep {
+        SynthGrid::from_roll(r).steps[s]
+    }
+
+    #[test]
+    fn a_step_set_to_what_it_shows_changes_nothing() {
+        let mut r = roll(vec![rich(0, 8, 40)]);
+        let before = r.clone();
+        assert!(!set_synth_step(&mut r, 1, at(&before, 1)));
+        assert!(!set_synth_step(&mut r, 5, at(&before, 5)));
+        assert_eq!(r, before);
+    }
+
+    #[test]
+    fn a_gate_on_a_rest_adds_a_one_step_note() {
+        let mut r = roll(vec![]);
+        let value = SynthStep {
+            accent: true,
+            ..step(4, 0, Gate::On)
+        };
+        assert!(set_synth_step(&mut r, 3, value));
+        assert_eq!(
+            r.notes,
+            vec![Note {
+                accent: true,
+                ..Note::new(12, 4, 40, ACID_VEL)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_note_cuts_a_tail_that_spills_into_its_step() {
+        // Starts in step 0 and sounds into step 1, which the grid shows as a rest.
+        let mut r = roll(vec![rich(2, 4, 40)]);
+        assert_eq!(at(&r, 1).gate, Gate::Off);
+        assert!(set_synth_step(&mut r, 1, step(0, 0, Gate::On)));
+        assert_eq!(r.notes, vec![rich(2, 2, 40), Note::new(4, 4, 36, ACID_VEL)]);
+    }
+
+    #[test]
+    fn a_rest_on_a_note_start_keeps_its_tail_as_a_note() {
+        let mut r = roll(vec![rich(0, 4, 40), rich(8, 12, 43)]);
+        assert!(set_synth_step(&mut r, 0, SynthStep::default()));
+        assert_eq!(r.notes, vec![rich(8, 12, 43)]);
+        assert!(set_synth_step(&mut r, 2, SynthStep::default()));
+        assert_eq!(
+            r.notes,
+            vec![rich(12, 8, 43)],
+            "starts a step later, same end"
+        );
+    }
+
+    #[test]
+    fn a_tie_on_a_rest_lengthens_the_note_before() {
+        let mut r = roll(vec![Note {
+            slide: true,
+            ..rich(0, 4, 40)
+        }]);
+        assert!(set_synth_step(&mut r, 1, step(4, 0, Gate::Tie)));
+        assert_eq!(
+            r.notes,
+            vec![Note {
+                slide: true,
+                ..rich(0, 8, 40)
+            }]
+        );
+        // No note before: the tie starts one, as the old grid played it.
+        let mut r = roll(vec![]);
+        assert!(set_synth_step(&mut r, 2, step(4, 0, Gate::Tie)));
+        assert_eq!(r.notes, vec![Note::new(8, 4, 40, ACID_VEL)]);
+    }
+
+    #[test]
+    fn a_tie_on_a_note_start_joins_it_to_the_note_before() {
+        let later = Note {
+            slide: true,
+            accent: true,
+            ..Note::new(4, 8, 50, ACID_VEL)
+        };
+        let mut r = roll(vec![rich(0, 4, 40), later]);
+        let tie = at(&r, 1).with_gate(Gate::Tie);
+        assert!(set_synth_step(&mut r, 1, tie));
+        assert_eq!(
+            r.notes,
+            vec![Note {
+                slide: true,
+                ..rich(0, 12, 40)
+            }],
+            "the earlier note's settings, the later one's slide"
+        );
+        // Nothing before to join: unchanged.
+        let mut r = roll(vec![rich(4, 4, 40)]);
+        let tie = at(&r, 1).with_gate(Gate::Tie);
+        assert!(!set_synth_step(&mut r, 1, tie));
+    }
+
+    #[test]
+    fn a_rest_inside_a_note_splits_it() {
+        let mut r = roll(vec![Note {
+            accent: true,
+            slide: true,
+            ..rich(0, 16, 40)
+        }]);
+        assert!(set_synth_step(&mut r, 1, SynthStep::default()));
+        assert_eq!(
+            r.notes,
+            vec![
+                Note {
+                    accent: true,
+                    ..rich(0, 4, 40)
+                },
+                Note {
+                    slide: true,
+                    ..rich(8, 8, 40)
+                },
+            ]
+        );
+        // On its last step: just shorter.
+        let mut r = roll(vec![rich(0, 8, 40)]);
+        assert!(set_synth_step(&mut r, 1, SynthStep::default()));
+        assert_eq!(r.notes, vec![rich(0, 4, 40)]);
+    }
+
+    #[test]
+    fn a_gate_inside_a_note_splits_it_there_with_the_new_pitch() {
+        let mut r = roll(vec![Note {
+            slide: true,
+            ..rich(0, 12, 40)
+        }]);
+        let value = SynthStep {
+            accent: true,
+            ..step(7, 0, Gate::On)
+        };
+        assert!(set_synth_step(&mut r, 1, value));
+        assert_eq!(
+            r.notes,
+            vec![
+                rich(0, 4, 40),
+                Note {
+                    accent: true,
+                    slide: true,
+                    ..rich(4, 8, 43)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pitch_moves_the_whole_note_and_keeps_everything_else() {
+        // Off the grid in time and above the grid's octaves.
+        let mut r = roll(vec![rich(5, 9, 72)]);
+        let shown = at(&r, 1);
+        assert_eq!((shown.note, shown.octave), (0, 1), "72 folds to 48");
+        let up = SynthStep {
+            note: 2,
+            ..at(&r, 2)
+        };
+        assert!(set_synth_step(&mut r, 2, up));
+        assert_eq!(r.notes, vec![rich(5, 9, 74)], "a tie step moves it too");
+        let down = SynthStep {
+            octave: -1,
+            ..at(&r, 1)
+        };
+        assert!(set_synth_step(&mut r, 1, down));
+        assert_eq!(r.notes, vec![rich(5, 9, 50)]);
+    }
+
+    #[test]
+    fn accent_is_the_first_step_and_slide_the_last() {
+        let mut r = roll(vec![rich(0, 12, 40)]);
+        let toggle = |r: &mut NotePattern, s: usize, f: fn(&mut SynthStep)| {
+            let mut v = at(r, s);
+            f(&mut v);
+            set_synth_step(r, s, v)
+        };
+        assert!(
+            !toggle(&mut r, 1, |v| v.accent = true),
+            "a tie step has no accent"
+        );
+        assert!(
+            !toggle(&mut r, 1, |v| v.slide = true),
+            "nor a slide before the last"
+        );
+        assert!(toggle(&mut r, 0, |v| v.accent = true));
+        assert!(toggle(&mut r, 2, |v| v.slide = true));
+        assert_eq!(
+            r.notes,
+            vec![Note {
+                accent: true,
+                slide: true,
+                ..rich(0, 12, 40)
+            }]
+        );
+    }
+
+    #[test]
+    fn every_gate_edit_shows_on_the_grid() {
+        let base = roll(vec![
+            rich(0, 4, 40),
+            rich(4, 12, 43),
+            rich(20, 4, 36),
+            rich(26, 3, 38),
+        ]);
+        for s in 0..12 {
+            for gate in [Gate::Off, Gate::On, Gate::Tie] {
+                let mut r = base.clone();
+                let value = at(&r, s).with_gate(gate);
+                set_synth_step(&mut r, s, value);
+                assert!(r.is_well_formed());
+                let shown = at(&r, s).gate;
+                let want = if gate == Gate::Tie && (s == 0 || at(&base, s - 1).gate == Gate::Off) {
+                    Gate::On
+                } else {
+                    gate
+                };
+                assert_eq!(shown, want, "step {s} set to {gate:?}");
+                let mut sorted = r.notes.clone();
+                sorted.sort_by_key(|n| n.start);
+                for w in sorted.windows(2) {
+                    assert!(
+                        w[0].start + w[0].len <= w[1].start,
+                        "no overlap: {sorted:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn set_synth_step_refuses_to_exceed_the_note_cap() {
+        let mut r = roll(vec![Note::new(255, 1, 40, 1); MAX_NOTES]);
+        assert!(!set_synth_step(&mut r, 0, step(0, 0, Gate::On)));
+        assert_eq!(r.notes.len(), MAX_NOTES);
     }
 }
