@@ -38,6 +38,10 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Each lane has a header (collapse, pattern label, Strip toggle) and a handle to change its height.
   - An expression strip per lane: velocity, or accent and slide on the bass synths, or accent on the drums. The drum accent strip accents every hit on a step; double-click a hit to toggle its own accent.
   - Type notes with the keyboard: click a lane to focus it, then use the tracker layout (Z S X D C V G B H N J M and Q 2 W 3 E R 5 T 6 Y 7 U I). Arrows move the cursor and Backspace steps back and deletes. Clicking outside the dock turns keyboard entry off.
+  - Select notes: click one (Shift-click toggles), or drag on empty space to box-select (Shift adds). Drag the selection to move it; Ctrl-drag moves copies, and Alt moves in single 1/64 ticks. Drag a note's right edge to resize the whole selection. Right-click deletes (the whole selection if the note is selected).
+  - Drag along the ruler, above the thumb strip, to select a time range across every lane; a click on the ruler clears it.
+  - With the dock focused: Left/Right nudge the selection one snap (Alt: one tick); Up/Down transpose a semitone, or move a drum row (Shift: an octave, melodic lanes only); Delete or Backspace removes it; Esc clears it; Ctrl+A selects the whole lane.
+  - Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste notes at the cursor, and Ctrl+D duplicates right after the selection. With a ruler range these act on every lane at once, pasting back into the same parts, and Ctrl+D repeats the block. Without dock focus, Ctrl+C / Ctrl+V copy whole patterns as before.
   - The rack above keeps the knobs, pads, Len/Trans and dice.
 - **Patterns:** 128 per machine, in banks A–H × 16. Each pattern is up to 64 steps, and a pattern switch queues to the next loop.
 - **Mixer and effects:**
