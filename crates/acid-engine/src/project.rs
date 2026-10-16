@@ -6,6 +6,7 @@
 use crate::drums::KitKind;
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
+use crate::scale::Key;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -589,6 +590,13 @@ pub struct Project {
     /// Send effects and master bus.
     pub globals: BTreeMap<GlobalParam, f32>,
     pub song: Song,
+    /// The project's key: root, scale and snap.
+    #[serde(default, skip_serializing_if = "is_default_key")]
+    pub key: Key,
+}
+
+fn is_default_key(k: &Key) -> bool {
+    *k == Key::default()
 }
 
 impl Default for Project {
@@ -608,6 +616,7 @@ impl Default for Project {
                 .map(|g| (g, g.info().default))
                 .collect(),
             song: Song::default(),
+            key: Key::default(),
         }
     }
 }
@@ -780,6 +789,9 @@ impl Project {
         let bad = |m: String| Err(ProjectError::Invalid(m));
         if !self.bpm.is_finite() || !self.swing.is_finite() {
             return bad("bpm or swing is not a number".into());
+        }
+        if self.key.root >= 12 {
+            return bad(format!("key root {} is out of range", self.key.root));
         }
         if self.machines.len() > MAX_MACHINES {
             return bad(format!("rack has {} machines", self.machines.len()));
@@ -1006,6 +1018,33 @@ mod tests {
     use super::*;
     use crate::machine::MachineUid;
     use crate::params::{FmParam, KitParam, MasterParam, SynthParam};
+
+    #[test]
+    fn key_saves_only_when_changed_and_round_trips() {
+        use crate::scale::Scale;
+        let mut p = Project::default();
+        assert!(!p.to_ron().contains("key:"), "default key is skipped");
+        p.key = Key {
+            root: 9,
+            scale: Scale::Minor,
+            snap: true,
+        };
+        let text = p.to_ron();
+        assert!(text.contains("key:"));
+        assert_eq!(Project::from_ron(&text).unwrap().key, p.key);
+        // a file without the field loads as Chromatic
+        let old = Project::default().to_ron();
+        assert_eq!(Project::from_ron(&old).unwrap().key, Key::default());
+    }
+
+    #[test]
+    fn key_root_must_be_a_pitch_class() {
+        let mut p = Project::default();
+        p.key.root = 11;
+        assert!(p.validate().is_ok());
+        p.key.root = 12;
+        assert!(p.validate().is_err());
+    }
 
     #[test]
     fn lane_views_save_only_when_changed() {

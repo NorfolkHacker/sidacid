@@ -20,6 +20,7 @@ mod rack_edit;
 pub mod random;
 pub mod render;
 pub mod sampler;
+pub mod scale;
 pub mod sequencer;
 pub mod song;
 pub mod steps;

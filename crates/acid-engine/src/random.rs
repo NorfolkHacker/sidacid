@@ -9,6 +9,7 @@ use crate::fm::sysex::{Dx7Op, Dx7Voice};
 use crate::params::DRUM_INSTRUMENTS;
 use crate::params::MonoParam;
 use crate::project::{DrumPattern, STEPS, SynthPattern, TICKS_PER_STEP, steps_of};
+use crate::scale::Scale;
 use crate::steps::{DrumGrid, DrumHit, Gate, SynthGrid};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
@@ -32,33 +33,33 @@ impl Dice {
     };
 }
 
-/// (scale degrees in semitones, selection weight)
-const SCALES: [(&[i32], f32); 5] = [
-    (&[0, 2, 3, 5, 7, 8, 10], 2.0), // natural minor
-    (&[0, 2, 3, 5, 7, 9, 11], 2.0), // melodic minor
-    (&[0, 1, 3, 5, 7, 8, 10], 1.0), // phrygian
-    (&[0, 2, 4, 5, 7, 9, 11], 1.0), // major
-    (&[0, 2, 3, 6, 7, 8, 11], 0.5), // hungarian minor
+/// (scale, selection weight)
+const SCALES: [(Scale, f32); 5] = [
+    (Scale::Minor, 2.0),
+    (Scale::MelodicMinor, 2.0),
+    (Scale::Phrygian, 1.0),
+    (Scale::Major, 1.0),
+    (Scale::HungarianMinor, 0.5),
 ];
 const MAX_LEAP: i32 = 7;
 const LOWEST: i32 = -12;
 const HIGHEST: i32 = 23;
 
-fn pick_scale(rng: &mut Pcg32) -> &'static [i32] {
+fn pick_scale(rng: &mut Pcg32) -> &'static [u8] {
     let total: f32 = SCALES.iter().map(|(_, w)| w).sum();
     let mut r = rng.gen_range(0.0..total);
     for (scale, weight) in SCALES {
         if r < weight {
-            return scale;
+            return scale.degrees();
         }
         r -= weight;
     }
-    SCALES[0].0
+    SCALES[0].0.degrees()
 }
 
-fn degree_to_semitone(scale: &[i32], degree: i32) -> i32 {
+fn degree_to_semitone(scale: &[u8], degree: i32) -> i32 {
     let n = scale.len() as i32;
-    scale[degree.rem_euclid(n) as usize] + 12 * degree.div_euclid(n)
+    scale[degree.rem_euclid(n) as usize] as i32 + 12 * degree.div_euclid(n)
 }
 
 /// Steps where the paired drum pattern has a kick or snare.

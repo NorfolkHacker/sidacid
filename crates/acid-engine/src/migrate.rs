@@ -429,6 +429,7 @@ impl ProjectV5 {
             next_uid: self.next_uid,
             globals: self.globals,
             song,
+            key: Default::default(),
         }
     }
 }
