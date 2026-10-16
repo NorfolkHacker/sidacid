@@ -1287,6 +1287,20 @@ mod tests {
     }
 
     #[test]
+    fn the_acid_roll_draws_headless_with_a_slide() {
+        use acid_engine::project::Note;
+        let mut doc = Document::new(Project::default());
+        let roll = &mut doc.project.synth_mut(SYNTH1).unwrap().patterns[0].roll;
+        let mut first = Note::new(0, 4, 36, 100);
+        first.slide = true;
+        roll.notes.push(first);
+        roll.notes.push(Note::new(4, 4, 39, 100));
+        let mut app = SidAcidApp::headless(doc);
+        run_frames(&mut app, 1);
+        assert_eq!(panels(&mut app, &[SYNTH1], |p| p.poly_scrolled), [true]);
+    }
+
+    #[test]
     fn loading_a_document_resets_poly_roll_state() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         for uid in [FM, SAMPLER] {

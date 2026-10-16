@@ -227,12 +227,110 @@ impl PolyGeom {
     }
 }
 
+/// Keeps an acid pattern monophonic around note `keep` after an edit:
+/// other notes starting inside it are deleted, a note sounding into its
+/// start is cut there. Returns `keep`'s new index.
+pub fn make_mono(p: &mut NotePattern, keep: usize) -> usize {
+    let Some(&k) = p.notes.get(keep) else {
+        return keep;
+    };
+    let k_end = end(&k);
+    let mut kept = Vec::with_capacity(p.notes.len());
+    let mut at = 0;
+    for (i, n) in p.notes.iter().enumerate() {
+        if i == keep {
+            at = kept.len();
+            kept.push(*n);
+        } else if n.start >= k.start && n.start < k_end {
+            continue;
+        } else if n.start < k.start && end(n) > k.start {
+            kept.push(Note {
+                len: k.start - n.start,
+                ..*n
+            });
+        } else {
+            kept.push(*n);
+        }
+    }
+    p.notes = kept;
+    at
+}
+
+/// The note sounding at `tick` (the first stored).
+pub fn note_covering(p: &NotePattern, tick: u16) -> Option<usize> {
+    p.notes
+        .iter()
+        .position(|n| n.start <= tick && tick < end(n))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    Accent,
+    Slide,
+}
+
+/// Flips accent or slide on the note sounding at `tick`.
+pub fn toggle_flag(p: &mut NotePattern, tick: u16, flag: Flag) -> bool {
+    let Some(i) = note_covering(p, tick) else {
+        return false;
+    };
+    let n = &mut p.notes[i];
+    match flag {
+        Flag::Accent => n.accent = !n.accent,
+        Flag::Slide => n.slide = !n.slide,
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pat() -> NotePattern {
         NotePattern::default()
+    }
+
+    fn notes_pat(notes: &[(u16, u16, u8)]) -> NotePattern {
+        NotePattern {
+            notes: notes
+                .iter()
+                .map(|&(s, l, p)| Note::new(s, l, p, 100))
+                .collect(),
+            length: 16,
+        }
+    }
+
+    #[test]
+    fn make_mono_keeps_the_edited_note_and_cuts_around_it() {
+        // 0..8 sounds into the kept note at 4; 6 and 8 start inside it;
+        // 20 is clear of it.
+        let mut p = notes_pat(&[(0, 8, 40), (4, 8, 50), (6, 2, 41), (8, 4, 42), (20, 4, 43)]);
+        let kept = make_mono(&mut p, 1);
+        assert_eq!(p.notes[kept], Note::new(4, 8, 50, 100));
+        let mut starts: Vec<_> = p.notes.iter().map(|n| (n.start, n.len)).collect();
+        starts.sort();
+        assert_eq!(starts, vec![(0, 4), (4, 8), (20, 4)]);
+    }
+
+    #[test]
+    fn make_mono_drops_a_note_with_the_same_start() {
+        let mut p = notes_pat(&[(4, 4, 40), (4, 2, 52)]);
+        let kept = make_mono(&mut p, 1);
+        assert_eq!(p.notes.len(), 1);
+        assert_eq!(p.notes[kept].pitch, 52);
+    }
+
+    #[test]
+    fn flags_toggle_on_the_note_under_the_tick() {
+        let mut p = notes_pat(&[(4, 8, 40)]);
+        assert!(toggle_flag(&mut p, 9, Flag::Accent));
+        assert!(p.notes[0].accent);
+        assert!(toggle_flag(&mut p, 4, Flag::Slide));
+        assert!(p.notes[0].slide);
+        assert!(toggle_flag(&mut p, 11, Flag::Accent));
+        assert!(!p.notes[0].accent);
+        assert!(!toggle_flag(&mut p, 12, Flag::Slide), "no note at 12");
+        assert_eq!(note_covering(&p, 3), None);
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Poly piano roll for every melodic machine: one column per tick,
-//! every MIDI pitch, a velocity lane underneath. Click adds a note (with
+//! every MIDI pitch, a velocity lane underneath. The acid synths use it
+//! too: one note at a time, and accent and slide lanes instead of
+//! velocity. Click adds a note (with
 //! the last length used), drag the body to move, drag the right edge to
 //! stretch, right-click deletes, chords stack freely. Clicking the key
 //! strip auditions the pitch.
 
 use super::poly_edit::{
-    PolyDrag, PolyGeom, ROWS, add, delete, move_to, note_at, resize, resolve_overlaps,
-    set_velocity_in,
+    Flag, PolyDrag, PolyGeom, ROWS, add, delete, make_mono, move_to, note_at, resize,
+    resolve_overlaps, set_velocity_in, toggle_flag,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -29,6 +31,7 @@ const KEY_W: f32 = 30.0;
 /// The sampler's key strip is wider to fit row labels like "Amen ·05".
 const SAMPLER_KEY_W: f32 = 64.0;
 const VEL_H: f32 = 32.0;
+const FLAG_H: f32 = 12.0;
 const VIEW_H: f32 = ROW_H * VIEW_ROWS as f32;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
@@ -69,6 +72,7 @@ impl SidAcidApp {
     }
 
     pub(crate) fn poly_roll(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let acid = self.doc.project.synth(uid).is_some();
         let is_sampler = self.doc.project.sampler(uid).is_some();
         let key_w = if is_sampler { SAMPLER_KEY_W } else { KEY_W };
         let slot = self.selected(uid);
@@ -211,6 +215,22 @@ impl SidAcidApp {
                         );
                         let shade = 0.35 + 0.65 * note.vel as f32 / 127.0;
                         painter.rect_filled(r, 2.0, theme::ACID.gamma_multiply(shade));
+                        if acid
+                            && note.slide
+                            && let Some(next) = pattern
+                                .notes
+                                .iter()
+                                .find(|m| m.start == note.start.saturating_add(note.len))
+                        {
+                            let (nx0, ny0, _, ny1) = geom.note_rect(next);
+                            painter.line_segment(
+                                [
+                                    pos2(x1 - 0.5, (y0 + y1) / 2.0),
+                                    pos2(nx0 + 0.5, (ny0 + ny1) / 2.0),
+                                ],
+                                Stroke::new(2.0_f32, theme::ACCENT),
+                            );
+                        }
                     }
 
                     let pointer = resp.interact_pointer_pos();
@@ -218,15 +238,18 @@ impl SidAcidApp {
                         && let Some(p) = pointer
                         && p.x < geom.left
                     {
-                        key_down = geom.pitch_at(p.y);
+                        key_down = geom.pitch_at(p.y).filter(|_| !acid);
                     }
                     if resp.clicked()
                         && let Some(p) = pointer
                         && let Some((tick, pitch)) = geom.cell_at(p.x, p.y)
                         && note_at(&pattern, tick, pitch).is_none()
                     {
-                        changed |=
-                            add(&mut pattern, snap.floor(tick), new_len, pitch, NEW_VEL).is_some();
+                        let added = add(&mut pattern, snap.floor(tick), new_len, pitch, NEW_VEL);
+                        if acid && let Some(i) = added {
+                            make_mono(&mut pattern, i);
+                        }
+                        changed |= added.is_some();
                         finished = true;
                     }
                     if resp.secondary_clicked()
@@ -258,7 +281,13 @@ impl SidAcidApp {
                                     NEW_VEL,
                                 );
                                 changed |= added.is_some();
-                                added.map(|index| PolyDrag::Resize { index })
+                                added.map(|index| PolyDrag::Resize {
+                                    index: if acid {
+                                        make_mono(&mut pattern, index)
+                                    } else {
+                                        index
+                                    },
+                                })
                             }
                         };
                     }
@@ -297,6 +326,57 @@ impl SidAcidApp {
                         finished = true;
                     }
                 });
+
+                if acid {
+                    for (label, flag) in [("Acc", Flag::Accent), ("Slide", Flag::Slide)] {
+                        let (lane, lresp) =
+                            ui.allocate_exact_size(vec2(width, FLAG_H), Sense::click());
+                        let left = lane.left() + key_w;
+                        let painter = ui.painter_at(lane);
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(pos2(left, lane.top()), lane.right_bottom()),
+                            0.0,
+                            theme::GRID_DARK,
+                        );
+                        painter.text(
+                            pos2(lane.left() + 2.0, lane.center().y),
+                            Align2::LEFT_CENTER,
+                            label,
+                            FontId::monospace(9.0),
+                            ui.visuals().text_color(),
+                        );
+                        for note in pattern.notes.iter().filter(|n| n.start < ticks) {
+                            let (on, tick, colour) = match flag {
+                                Flag::Accent => (note.accent, note.start, theme::ACCENT),
+                                Flag::Slide => (
+                                    note.slide,
+                                    note.start.saturating_add(note.len).saturating_sub(1),
+                                    theme::ACID,
+                                ),
+                            };
+                            if on {
+                                let x = left + tick as f32 * TICK_W;
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        pos2(x, lane.top() + 1.0),
+                                        pos2(x + TICK_W.max(2.0), lane.bottom() - 1.0),
+                                    ),
+                                    0.0,
+                                    colour,
+                                );
+                            }
+                        }
+                        if lresp.clicked()
+                            && let Some(p) = lresp.interact_pointer_pos()
+                            && p.x >= left
+                        {
+                            let tick = (((p.x - left) / TICK_W).floor() as u16).min(ticks - 1);
+                            changed |= toggle_flag(&mut pattern, tick, flag);
+                            finished = true;
+                        }
+                    }
+                    return;
+                }
 
                 let (lane, lresp) =
                     ui.allocate_exact_size(vec2(width, VEL_H), Sense::click_and_drag());
@@ -369,7 +449,11 @@ impl SidAcidApp {
     ) {
         if let Some(index) = dropped {
             let before = pattern.clone();
-            resolve_overlaps(&mut pattern, index);
+            if self.doc.project.synth(uid).is_some() {
+                make_mono(&mut pattern, index);
+            } else {
+                resolve_overlaps(&mut pattern, index);
+            }
             changed |= pattern != before;
         }
         let dragging = dropped.is_some() || self.view.panel(uid).poly_drag.is_some();
