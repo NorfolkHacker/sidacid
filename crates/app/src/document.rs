@@ -811,9 +811,14 @@ impl Document {
                 for e in edits {
                     let inverse = self.apply_raw(e);
                     if self.refusal.is_some() {
+                        // Taken while rolling back: an inverse that is a
+                        // group itself (a rippled edit) would read it as
+                        // its own refusal and stop half way.
+                        let refusal = self.refusal.take();
                         for done in inverses.into_iter().rev() {
                             self.apply_raw(done);
                         }
+                        self.refusal = refusal;
                         return Edit::Group(Vec::new());
                     }
                     inverses.push(inverse);
@@ -1537,6 +1542,29 @@ mod tests {
         assert!(cmds.is_empty());
         assert_eq!(d.take_refusal(), Some(SONG_TOO_LONG));
         assert_eq!(d.project, before);
+        assert_eq!(d.undo_depth(), 0);
+    }
+
+    #[test]
+    fn a_refused_group_fully_undoes_an_earlier_rippled_child() {
+        use acid_engine::project::{Block, PatternRef};
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let mut d = doc();
+        d.project.song.lane_mut(SYNTH1).extend([
+            Block::new(0, PatternRef(0)),
+            Block::new(16, PatternRef(1)),
+            Block::new(max - 16, PatternRef(3)),
+        ]);
+        let before = d.project.clone();
+        // The first grows and ripples (its inverse is a group); the second
+        // would end past the limit.
+        let cmds = d.apply(
+            Edit::Group(vec![length(SYNTH1, 0, 24), length(SYNTH1, 3, 24)]),
+            false,
+        );
+        assert!(cmds.is_empty());
+        assert_eq!(d.take_refusal(), Some(SONG_TOO_LONG));
+        assert_eq!(d.project, before, "the rippled length edit is undone too");
         assert_eq!(d.undo_depth(), 0);
     }
 
