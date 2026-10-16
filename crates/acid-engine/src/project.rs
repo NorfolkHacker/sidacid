@@ -985,7 +985,7 @@ impl Project {
             p.check_shapes()?;
             v5(p.upgrade())
         };
-        let p = match head.version {
+        let mut p = match head.version {
             0 | 1 => v4(ron::from_str::<crate::migrate::ProjectV1>(text)
                 .map_err(parse)?
                 .upgrade()
@@ -1007,6 +1007,13 @@ impl Project {
             PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
+        // Kits older builds named "808"/"909" (plus a number) take today's
+        // default names; a name the user typed is kept.
+        for m in &mut p.machines {
+            if let Some(name) = crate::machine::renamed_legacy_default(m.machine_type(), &m.name) {
+                m.name = name;
+            }
+        }
         p.validate()?;
         Ok(p)
     }
@@ -1140,7 +1147,10 @@ mod tests {
         let p = Project::from_ron(v2).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
         let names: Vec<_> = p.machines.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["Synth 1", "Synth 2", "808", "909", "FM", "Sampler"]);
+        assert_eq!(
+            names,
+            ["Synth 1", "Synth 2", "Kit A", "Kit B", "FM", "Sampler"]
+        );
         let uids: Vec<_> = p.machines.iter().map(|m| m.uid.0).collect();
         assert_eq!(uids, [1, 2, 3, 4, 5, 6]);
         assert_eq!(p.next_uid, 7);
@@ -1165,9 +1175,14 @@ mod tests {
     fn a_v4_save_loads_as_the_demo_on_notes() {
         let text = include_str!("../tests/fixtures/v4_demo.sidacid");
         assert!(text.contains("version: 4,") && text.contains("view: PianoRoll"));
+        assert!(text.contains("name: \"808\"") && text.contains("name: \"909\""));
         let p = Project::from_ron(text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
         assert_eq!(PROJECT_VERSION, 6);
+        assert_eq!(
+            (p.machines[2].name.as_str(), p.machines[3].name.as_str()),
+            ("Kit A", "Kit B")
+        );
         let demo = crate::demo::demo_project();
         assert_eq!(p.machines[..6], demo.machines[..6]);
         assert_eq!(p.song, demo.song);
@@ -1181,6 +1196,44 @@ mod tests {
         };
         assert_eq!(m.patterns[0].notes, [Note::new(0, 8, 48, 100)]);
         p.validate().unwrap();
+    }
+
+    /// A save from before the generic kit names: default names of the old
+    /// stems take today's; names the user typed stay.
+    #[test]
+    fn old_default_kit_names_are_renamed_on_load() {
+        let mut old = Project::default();
+        old.machines[2].name = "808".into();
+        old.machines[3].name = "909".into();
+        for (uid, ty, name) in [
+            (7, MachineType::Kit808, "808 2"),
+            (8, MachineType::Kit909, "909 3"),
+            (9, MachineType::Kit808, "808 Boom"),
+            (10, MachineType::Kit909, "Big 909"),
+            (11, MachineType::Synth, "808"),
+        ] {
+            old.insert_machine(99, MachineEntry::new(MachineUid(uid), ty, name.into()))
+                .unwrap();
+        }
+        let text = old.to_ron();
+        assert!(text.contains("K808") && text.contains("name: \"808 2\""));
+        let p = Project::from_ron(&text).unwrap();
+        let names: Vec<_> = p.machines.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Synth 1", "Synth 2", "Kit A", "Kit B", "FM", "Sampler", "Kit A 2", "Kit B 3",
+                "808 Boom", "Big 909", "808",
+            ]
+        );
+        // Everything but the names survives the trip.
+        let mut renamed = old.clone();
+        for (m, n) in renamed.machines.iter_mut().zip(&names) {
+            m.name = (*n).to_string();
+        }
+        assert_eq!(p, renamed);
+        // Today's names save and load unchanged.
+        assert_eq!(Project::from_ron(&p.to_ron()).unwrap(), p);
     }
 
     #[test]

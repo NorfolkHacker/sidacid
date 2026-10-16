@@ -121,7 +121,7 @@ pub fn value_text(id: ParamId, v: f32) -> String {
     }
 }
 
-/// "Synth 1 Cutoff", "808 BD Tune", "909 Volume", "Synth 2 Level", "Feedback",
+/// "Synth 1 Cutoff", "Kit A BD Tune", "Kit B Volume", "Synth 2 Level", "Feedback",
 /// "Master Ratio": a machine param is prefixed with its machine's name.
 pub fn param_label(project: &acid_engine::project::Project, id: ParamId) -> String {
     let (uid, p) = match id {
@@ -547,7 +547,7 @@ mod tests {
                 &acid_engine::project::Project::default(),
                 KIT909.param(MachineParam::Drum(0, DrumParam::Tune))
             ),
-            "909 BD Tune"
+            "Kit B BD Tune"
         );
         assert_eq!(
             param_label(

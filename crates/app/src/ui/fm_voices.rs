@@ -64,7 +64,7 @@ impl SidAcidApp {
 
     pub(crate) fn import_syx(&mut self, uid: MachineUid) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("DX7 SysEx", &["syx", "SYX"])
+            .add_filter("FM SysEx", &["syx", "SYX"])
             .pick_file()
         else {
             return;
@@ -93,7 +93,7 @@ impl SidAcidApp {
             }
             Err(e) => {
                 self.view.message = Some(format!(
-                    "Could not import the file: {e}. Use a DX7 .syx file."
+                    "Could not import the file: {e}. Use a 6-operator FM .syx file."
                 ))
             }
         }

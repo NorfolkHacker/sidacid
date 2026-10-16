@@ -2372,7 +2372,7 @@ mod tests {
         d.move_machine(uid, 0);
         let (copy, _) = d.duplicate_machine(MachineUid(1)).unwrap();
         let (name, _) = d.remove_machine(MachineUid(4)).unwrap();
-        assert_eq!(name, "909");
+        assert_eq!(name, "Kit B");
         let end = d.project.clone();
         for _ in 0..5 {
             d.undo();

@@ -291,7 +291,7 @@ mod tests {
         app.begin_rename(MachineUid(3));
         app.view.renaming.as_mut().unwrap().1 = String::new();
         app.commit_rename();
-        assert_eq!(app.panel_title(MachineUid(3)), "808");
+        assert_eq!(app.panel_title(MachineUid(3)), "Kit A");
         app.begin_rename(MachineUid(3));
         app.cancel_rename();
         assert!(app.view.renaming.is_none());
@@ -305,7 +305,7 @@ mod tests {
         run_frames(&mut app, 2);
         assert_eq!(
             app.panel_title(*app.doc.project.rack_uids().last().unwrap()),
-            "909 2"
+            "Kit B 2"
         );
     }
 
@@ -313,10 +313,10 @@ mod tests {
     fn a_rename_starts_from_the_name_and_a_cancel_changes_nothing() {
         let mut app = demo();
         app.begin_rename(KIT808);
-        assert_eq!(app.view.renaming, Some((KIT808, "808".to_string())));
+        assert_eq!(app.view.renaming, Some((KIT808, "Kit A".to_string())));
         app.view.renaming.as_mut().unwrap().1 = "Boom".into();
         app.cancel_rename();
-        assert_eq!(app.panel_title(KIT808), "808");
+        assert_eq!(app.panel_title(KIT808), "Kit A");
         assert!(!app.doc.can_undo(), "a cancelled rename is no edit");
         app.begin_rename(MachineUid(99));
         assert!(
@@ -400,7 +400,7 @@ mod tests {
         assert!(app.doc.project.machine(KIT808).is_none());
         assert_eq!(
             app.view.status_line.as_deref(),
-            Some("Removed '808' — Ctrl+Z to undo")
+            Some("Removed 'Kit A' — Ctrl+Z to undo")
         );
         app.view.rack_action = Some(RackAction::Duplicate(FM));
         run_frames(&mut app, 1);
@@ -433,7 +433,7 @@ mod tests {
         let labels: Vec<&str> = MachineType::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels,
-            ["303 Synth", "808 Kit", "909 Kit", "FM", "Sampler", "Mono"]
+            ["Acid Synth", "Kit A", "Kit B", "FM", "Sampler", "Mono"]
         );
     }
 

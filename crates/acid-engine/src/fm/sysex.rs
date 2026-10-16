@@ -64,7 +64,7 @@ pub enum SysexError {
 impl fmt::Display for SysexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            SysexError::NotDx7 => "it is not a DX7 voice or 32-voice bank",
+            SysexError::NotDx7 => "it is not a 6-operator FM voice or 32-voice bank",
             SysexError::Truncated => "the file is cut short",
             SysexError::Checksum => "its checksum does not match (the file is damaged)",
         })

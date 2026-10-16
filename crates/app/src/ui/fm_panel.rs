@@ -308,7 +308,7 @@ impl SidAcidApp {
             }
             if ui
                 .button("Import .syx…")
-                .on_hover_text("Load a DX7 32-voice bank or single voice")
+                .on_hover_text("Load a 32-voice bank or single voice (6-operator FM .syx)")
                 .clicked()
             {
                 self.import_syx(uid);

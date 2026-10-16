@@ -818,7 +818,10 @@ mod tests {
         p.machines.swap(0, 5);
         let app = SidAcidApp::headless(Document::new(p));
         let order: Vec<String> = app.rack_panel_titles();
-        assert_eq!(order, ["Sampler", "Synth 2", "808", "909", "FM", "Synth 1"]);
+        assert_eq!(
+            order,
+            ["Sampler", "Synth 2", "Kit A", "Kit B", "FM", "Synth 1"]
+        );
     }
 
     #[test]
@@ -1884,7 +1887,13 @@ mod tests {
 
         let before = app.doc.project.clone();
         app.import_syx_bytes(FM, b"not sysex");
-        assert!(app.view.message.as_deref().unwrap_or("").contains("DX7"));
+        assert!(
+            app.view
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("6-operator FM")
+        );
         assert_eq!(app.doc.project, before);
     }
 

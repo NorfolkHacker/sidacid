@@ -187,7 +187,7 @@ mod tests {
     fn new_machines_take_fresh_uids_and_default_names() {
         let mut p = Project::default();
         let a = p.new_machine(MachineType::Kit909);
-        assert_eq!((a.uid, a.name.as_str()), (MachineUid(7), "909 2"));
+        assert_eq!((a.uid, a.name.as_str()), (MachineUid(7), "Kit B 2"));
         p.insert_machine(p.machines.len(), a).unwrap();
         let b = p.new_machine(MachineType::Synth);
         assert_eq!((b.uid, b.name.as_str()), (MachineUid(8), "Synth 3"));
@@ -267,11 +267,11 @@ mod tests {
         assert_eq!(p.rack_uids().last(), Some(&MachineUid(1)));
         assert_eq!(
             p.rename_machine(MachineUid(3), "Boom"),
-            Some("808".to_string())
+            Some("Kit A".to_string())
         );
         assert_eq!(p.machine(MachineUid(3)).unwrap().name, "Boom");
         p.rename_machine(MachineUid(3), "  ");
-        assert_eq!(p.machine(MachineUid(3)).unwrap().name, "808");
+        assert_eq!(p.machine(MachineUid(3)).unwrap().name, "Kit A");
     }
 
     #[test]

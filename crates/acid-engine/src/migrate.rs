@@ -890,7 +890,7 @@ mod tests {
                 .steps
                 .resize(steps, [DrumHit::Off; DRUM_INSTRUMENTS]);
             match load(&v4) {
-                Err(ProjectError::Invalid(e)) => assert_eq!(e, "909: pattern A01"),
+                Err(ProjectError::Invalid(e)) => assert_eq!(e, "Kit B: pattern A01"),
                 other => panic!("{steps} drum steps: {other:?}"),
             }
         }
