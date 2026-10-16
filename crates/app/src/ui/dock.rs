@@ -213,6 +213,7 @@ impl SidAcidApp {
             let cmds = self.doc.apply(Edit::Key { key: picked }, false);
             self.send(cmds);
             self.doc.end_gesture();
+            self.cursors_to_shown_rows();
         }
         if toggle.clicked() {
             self.doc.project.key.snap = !key.snap;

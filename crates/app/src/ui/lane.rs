@@ -160,6 +160,37 @@ impl SidAcidApp {
         if let Some(m) = self.doc.project.machine_mut(uid) {
             m.lane.fold = !view.fold;
         }
+        self.cursors_to_shown_rows();
+    }
+
+    /// Moves the keyboard cursor of every folded melodic lane off a hidden
+    /// pitch onto the shown row that draws it, so typing writes where the
+    /// cursor appears.
+    pub(crate) fn cursors_to_shown_rows(&mut self) {
+        let uids: Vec<MachineUid> = self
+            .doc
+            .project
+            .machines
+            .iter()
+            .filter(|m| m.lane.fold && !m.lane.collapsed)
+            .map(|m| m.uid)
+            .collect();
+        for uid in uids {
+            if self.lane_kind(uid) == LaneKind::Drums {
+                continue;
+            }
+            let pattern = self
+                .doc
+                .project
+                .roll(uid, self.selected(uid))
+                .cloned()
+                .unwrap_or_default();
+            let rows = self.lane_rows(uid, true, &pattern);
+            let cursor = &mut self.view.panel(uid).cursor;
+            if let Some(p) = rows.pitch_of_row(rows.row_near(cursor.pitch)) {
+                cursor.pitch = p;
+            }
+        }
     }
 
     /// The key-strip width every lane uses, so the grids line up: wide
@@ -2370,6 +2401,28 @@ mod tests {
         click(&mut app, 1.0);
         assert!(!app.doc.project.machine(FM).unwrap().lane.fold);
         assert_eq!(app.view.panel(FM).lane_scroll_y, Some(centre(127 - 64)));
+    }
+
+    #[test]
+    fn folding_moves_a_hidden_cursor_onto_a_shown_row() {
+        let mut app = app_with(FM, &[]);
+        app.doc.project.key = acid_engine::scale::Key {
+            root: 0,
+            scale: Scale::Major,
+            snap: false,
+        };
+        app.view.panel(FM).cursor.pitch = 66; // F#4, not in C major
+        app.doc.project.machine_mut(FM).unwrap().lane.fold = true;
+        app.cursors_to_shown_rows();
+        assert_eq!(
+            app.view.panel(FM).cursor.pitch,
+            65,
+            "the row drawn under F#4"
+        );
+        // A key change that hides the cursor's pitch moves it too.
+        app.doc.project.key.root = 2; // D major has no F
+        app.cursors_to_shown_rows();
+        assert_eq!(app.view.panel(FM).cursor.pitch, 64, "E, the row under F");
     }
 
     #[test]
