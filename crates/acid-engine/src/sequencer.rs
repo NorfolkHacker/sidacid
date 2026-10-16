@@ -595,10 +595,11 @@ impl Sequencer {
     /// Puts the track at `pos` where it would be at song tick `next` (the
     /// next tick to run, 4 per step): on the block covering it, at that
     /// tick's place in its pattern (looping inside a longer block), or
-    /// silent in a gap. Landing on the block, pattern and position the
-    /// track already plays (a resync after an edit elsewhere) keeps its
-    /// loop count, the notes played this pass and the pending ratchet
-    /// sub-hits, so ringing notes and ratchets carry on.
+    /// silent in a gap. Landing on the block (known by its start),
+    /// pattern and position the track already plays (a resync after an
+    /// edit elsewhere) keeps its loop count, the notes played this pass
+    /// and the pending ratchet sub-hits, so ringing notes and ratchets
+    /// carry on.
     fn seek_track(&mut self, pos: usize, next: u64, song: &CompiledSong, banks: Banks<'_>) {
         let step = (next / SUBS as u64).min(u32::MAX as u64) as u32;
         let t = &mut self.tracks[pos];
@@ -611,7 +612,9 @@ impl Sequencer {
             return;
         };
         let b = song.lane(pos)[i];
-        let was = (t.block, t.block_start, t.pattern, t.pos);
+        // A block is known by its start: a lane's blocks are sorted and never
+        // overlap, while an insert before it shifts its index.
+        let was = (t.block.is_some(), t.block_start, t.pattern, t.pos);
         let kept = (t.trig, t.played, t.rat, t.rat_n);
         take_block(t, pos, i, &b, banks);
         let len = banks.length(pos, t.pattern).unwrap_or(1) as u64;
@@ -621,7 +624,7 @@ impl Sequencer {
         // As `advance` leaves it: the step of the last tick run.
         let last = rel.checked_sub(1).map_or(0, |k| k % ticks);
         t.step = (last / TICKS_PER_STEP as u64) as usize;
-        if was == (Some(i), b.start, t.pattern, t.pos) {
+        if was == (true, b.start, t.pattern, t.pos) {
             (t.trig, t.played, t.rat, t.rat_n) = kept;
             return;
         }
@@ -3097,5 +3100,55 @@ mod tests {
         assert_eq!(kit(&ev), [(0, 0)]);
         assert_eq!(fm(&ev), [(0, true, 60)]);
         assert_eq!(acid(&ev), [(0, 'N')]);
+    }
+
+    #[test]
+    fn a_resync_after_an_earlier_block_insert_keeps_the_pass() {
+        // FM and kit blocks from step 4 (tick 16); the kit's 2-step
+        // pattern has a x4 ratchet over its pass and a 2:2 hit at 4.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 32, 60));
+        f.drums[0][0].roll.length = 2;
+        f.drums[0][0].roll.notes.push(ratcheted(0, 8, 1, 4));
+        f.drums[0][0].roll.notes.push(cond(4, 0, Cond::Ratio(2, 2)));
+        f.song
+            .lane_mut(MachineUid(5))
+            .push(Block::new(4, PatternRef(0)));
+        f.song.lane_mut(MachineUid(3)).push(Block {
+            len: Some(8),
+            ..Block::new(4, PatternRef(0))
+        });
+        f.song.end = Some(20);
+        let mut s = song_seq();
+        s.play();
+        let _ = run_ticks(&f, &mut s, 18);
+        // Blocks inserted before the playing ones shift their indices.
+        for uid in [3, 5] {
+            f.song.lane_mut(MachineUid(uid)).insert(
+                0,
+                Block {
+                    len: Some(2),
+                    ..Block::new(0, PatternRef(0))
+                },
+            );
+        }
+        s.resync(); // takes effect at tick 20
+        let ev = run_ticks(&f, &mut s, 14);
+        assert_eq!(
+            kit(&ev),
+            [
+                (0, 1),
+                (2, 1),
+                (4, 1),
+                (6, 1),
+                (8, 1),
+                (10, 0),
+                (10, 1),
+                (12, 1)
+            ],
+            "the pending sub-hits, then pass 2"
+        );
+        assert!(fm(&ev).is_empty(), "the FM note still rings");
+        assert_eq!(fm(&run_ticks(&f, &mut s, 17)), [(16, false, 60)]);
     }
 }
