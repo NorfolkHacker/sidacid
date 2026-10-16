@@ -85,6 +85,10 @@ pub enum Command {
         uid: MachineUid,
         pitch: u8,
     },
+    /// Fill held or latched (true) or let go (false).
+    SetFill(bool),
+    /// The project's chance seed changed.
+    SetSeed(u32),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -322,6 +326,8 @@ impl EngineHost {
                 }
                 Command::NoteOn { uid, pitch, vel } => self.engine.note_on(uid, pitch, vel),
                 Command::NoteOff { uid, pitch } => self.engine.note_off(uid, pitch),
+                Command::SetFill(fill) => self.engine.set_fill(fill),
+                Command::SetSeed(seed) => self.engine.set_seed(seed),
             }
         }
     }
@@ -393,6 +399,19 @@ mod tests {
             host.process(&mut l, &mut r);
             done += 512;
         }
+    }
+
+    #[test]
+    fn fill_and_seed_commands_reach_the_engine() {
+        let (mut host, mut tx, _rx) = host_with_demo();
+        tx.push(Command::SetFill(true)).unwrap();
+        tx.push(Command::SetSeed(42)).unwrap();
+        run(&mut host, 512);
+        assert!(host.engine.fill());
+        assert_eq!(host.engine.seed(), 42);
+        tx.push(Command::SetFill(false)).unwrap();
+        run(&mut host, 512);
+        assert!(!host.engine.fill());
     }
 
     #[test]

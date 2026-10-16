@@ -231,6 +231,53 @@ fn a_sixteen_slot_song_with_automation_does_not_allocate() {
     assert!(l.iter().any(|v| *v != 0.0) || r.iter().any(|v| *v != 0.0));
 }
 
+/// The busy project with chance, ratchets and every kind of condition
+/// on the acid lines, both kits and the poly machines.
+fn chance_project() -> Project {
+    use acid_engine::project::Cond;
+    let mut p = busy_project();
+    p.seed = 1234;
+    let conds = [
+        Cond::Always,
+        Cond::Ratio(1, 2),
+        Cond::Ratio(3, 4),
+        Cond::First,
+        Cond::NotFirst,
+        Cond::Fill,
+        Cond::NotFill,
+        Cond::Pre,
+        Cond::NotPre,
+    ];
+    for uid in 1..=6 {
+        let roll = p.roll_mut(MachineUid(uid), 0).unwrap();
+        for (i, n) in roll.notes.iter_mut().enumerate() {
+            n.chance = [100, 50, 75, 25][i % 4];
+            n.ratchet = (i % 8) as u8 + 1;
+            n.cond = conds[i % conds.len()];
+        }
+    }
+    p
+}
+
+#[test]
+fn chance_ratchets_conditions_and_fill_do_not_allocate() {
+    for mode in [Mode::Pattern, Mode::Song] {
+        let mut e = Engine::from_project(SR, &chance_project());
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        e.set_mode(mode);
+        e.play();
+        let n = count_allocs(|| {
+            render_seconds(&mut e, &mut l, &mut r, 3.0);
+            e.set_fill(true);
+            e.set_seed(99);
+            render_seconds(&mut e, &mut l, &mut r, 3.0);
+            e.set_fill(false);
+            render_seconds(&mut e, &mut l, &mut r, 2.0);
+        });
+        assert_eq!(n, 0, "{mode:?}");
+    }
+}
+
 #[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());

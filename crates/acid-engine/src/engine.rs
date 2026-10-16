@@ -168,6 +168,7 @@ impl Engine {
         self.song = CompiledSong::compile(&p.song, &self.slot_uids());
         self.set_bpm(p.bpm);
         self.set_swing(p.swing);
+        self.set_seed(p.seed);
         // Every position takes its machine's selection; empty ones go back
         // to the first pattern.
         for pos in 0..MAX_MACHINES {
@@ -437,6 +438,25 @@ impl Engine {
 
     pub fn set_swing(&mut self, swing: f32) {
         self.seq.set_swing(swing);
+    }
+
+    /// Fill on or off: `Fill` notes play while on, `NotFill` ones while
+    /// off. Real-time safe.
+    pub fn set_fill(&mut self, fill: bool) {
+        self.seq.set_fill(fill);
+    }
+
+    /// The seed chance rolls hash (`Project.seed`). Real-time safe.
+    pub fn set_seed(&mut self, seed: u32) {
+        self.seq.set_seed(seed);
+    }
+
+    pub fn fill(&self) -> bool {
+        self.seq.fill()
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.seq.seed()
     }
 
     /// Releases the note machines' pattern notes (auditions keep sounding).
@@ -2522,5 +2542,30 @@ mod tests {
             (bar_two..=bar_two + 2).contains(&third),
             "third step at {third}, bar two at {bar_two}"
         );
+    }
+
+    #[test]
+    fn chance_renders_the_same_every_time_and_follows_the_seed() {
+        let plain = crate::demo::demo_project();
+        let mut p = plain.clone();
+        let uids: Vec<_> = p.machines.iter().map(|m| m.uid).collect();
+        for uid in uids {
+            if let Some(roll) = p.roll_mut(uid, 0) {
+                for n in &mut roll.notes {
+                    n.chance = 50;
+                }
+            }
+        }
+        let go = |p: &crate::project::Project| {
+            let mut e = Engine::from_project(SR, p);
+            assert_eq!(e.seed(), p.seed);
+            e.play();
+            render(&mut e, 2.0)
+        };
+        let a = go(&p);
+        assert_eq!(a, go(&p), "same project, same render");
+        assert_ne!(a, go(&plain), "chance 50 drops notes");
+        p.seed = 7;
+        assert_ne!(a, go(&p), "the seed picks which");
     }
 }
