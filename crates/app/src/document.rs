@@ -12,6 +12,7 @@ use acid_engine::project::{
 };
 use acid_engine::rack::CompiledSong;
 use acid_engine::sampler::slot::{SlotData, SlotMeta, SlotPlay};
+use acid_engine::scale::Key;
 use acid_engine::song;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +68,11 @@ pub enum Edit {
     },
     Bpm(f32),
     Swing(f32),
+    /// The project key's root and scale; the snap toggle is a view setting
+    /// and stays as it is.
+    Key {
+        key: Key,
+    },
     Song {
         song: Box<Song>,
     },
@@ -140,6 +146,7 @@ enum MergeKey {
     NoteLength(MachineUid, u8),
     Bpm,
     Swing,
+    Key,
     Song,
     FmVoice(MachineUid),
     MonoPatch(MachineUid),
@@ -161,6 +168,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::NoteLength { uid, slot, .. } => MergeKey::NoteLength(*uid, *slot),
         Edit::Bpm(_) => MergeKey::Bpm,
         Edit::Swing(_) => MergeKey::Swing,
+        Edit::Key { .. } => MergeKey::Key,
         Edit::Song { .. } => MergeKey::Song,
         Edit::FmVoice { uid, .. } => MergeKey::FmVoice(*uid),
         Edit::MonoPatch { uid, .. } => MergeKey::MonoPatch(*uid),
@@ -394,6 +402,7 @@ impl Document {
             Edit::Param { id, value } => p.param(*id) == *value,
             Edit::Bpm(bpm) => p.bpm == *bpm,
             Edit::Swing(swing) => p.swing == *swing,
+            Edit::Key { key } => p.key.root == key.root && p.key.scale == key.scale,
             Edit::SynthTranspose {
                 uid,
                 slot,
@@ -716,6 +725,15 @@ impl Document {
             Edit::Swing(swing) => {
                 Edit::Swing(std::mem::replace(&mut p.swing, swing.clamp(0.0, 0.75)))
             }
+            Edit::Key { key } => {
+                let old = p.key;
+                p.key = Key {
+                    root: key.root % 12,
+                    scale: key.scale,
+                    snap: old.snap,
+                };
+                Edit::Key { key: old }
+            }
             Edit::Song { song } => Edit::Song {
                 song: Box::new(std::mem::replace(&mut p.song, *song)),
             },
@@ -859,7 +877,7 @@ impl Document {
                 .iter()
                 .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
                 .collect(),
-            Edit::FmBank { .. } => Vec::new(),
+            Edit::FmBank { .. } | Edit::Key { .. } => Vec::new(),
             Edit::SamplerSlot {
                 uid, slot, values, ..
             } => {
@@ -1211,6 +1229,44 @@ mod tests {
         d.undo();
         assert_eq!(d.project.synth(SYNTH1).unwrap().patterns[0], before);
         assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn a_key_change_is_one_undo_step_and_keeps_snap() {
+        use acid_engine::scale::Scale;
+        let mut d = doc();
+        d.project.key.snap = true;
+        let cmds = d.apply(
+            Edit::Key {
+                key: Key {
+                    root: 9,
+                    scale: Scale::Minor,
+                    snap: false,
+                },
+            },
+            false,
+        );
+        assert!(cmds.is_empty(), "the engine does not hear about the key");
+        assert_eq!((d.project.key.root, d.project.key.scale), (9, Scale::Minor));
+        assert!(d.project.key.snap, "snap is a view setting, not undone");
+        assert!(d.is_dirty());
+        d.project.key.snap = false;
+        d.undo();
+        assert_eq!(
+            d.project.key,
+            Key {
+                root: 0,
+                scale: Scale::Chromatic,
+                snap: false
+            }
+        );
+        assert!(!d.can_undo());
+        d.redo();
+        assert_eq!((d.project.key.root, d.project.key.scale), (9, Scale::Minor));
+        // The same key again is no step.
+        let depth = d.undo_depth();
+        d.apply(Edit::Key { key: d.project.key }, false);
+        assert_eq!(d.undo_depth(), depth);
     }
 
     #[test]

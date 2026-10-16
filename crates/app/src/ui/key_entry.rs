@@ -10,6 +10,7 @@
 use super::poly_edit::{Snap, add, make_mono, note_at};
 use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::NotePattern;
+use acid_engine::scale::Key as ScaleKey;
 use eframe::egui::{Key, Modifiers};
 
 const ENTRY_VEL: u8 = 100;
@@ -84,12 +85,15 @@ fn wrap_cell(cell: u16, by: i32, cells: u16) -> u16 {
     (cell as i32 + by).rem_euclid(cells.max(1) as i32) as u16
 }
 
+/// Applies one entry key; with `scale` (snap to scale on a melodic lane)
+/// a typed note lands on the nearest in-scale pitch.
 pub fn apply_entry(
     roll: &mut NotePattern,
     cursor: &mut Cursor,
     key: EntryKey,
     kind: LaneKind,
     snap: Snap,
+    scale: Option<ScaleKey>,
 ) -> bool {
     let ticks = roll.ticks();
     let s = snap.ticks().max(1);
@@ -122,7 +126,10 @@ pub fn apply_entry(
         EntryKey::Note(semis) => {
             let pitch = match kind {
                 LaneKind::Drums => cursor.pitch.min(top),
-                _ => (cursor.pitch / 12 * 12).saturating_add(semis).min(127),
+                _ => {
+                    let typed = (cursor.pitch / 12 * 12).saturating_add(semis).min(127);
+                    scale.map_or(typed, |k| k.snap(typed))
+                }
             };
             let Some(i) = add(roll, here, s.min(ticks - here).max(1), pitch, ENTRY_VEL) else {
                 return false;
@@ -214,11 +221,44 @@ mod tests {
             &mut c,
             EntryKey::Note(7),
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         // C of the cursor's octave (48) + 7, at the snapped tick 4.
         assert_eq!(roll.notes, vec![Note::new(4, 4, 55, 100)]);
         assert_eq!(c, Cursor { tick: 8, pitch: 55 });
+    }
+
+    #[test]
+    fn with_snap_to_scale_a_typed_note_lands_on_the_scale() {
+        let key = ScaleKey {
+            root: 0,
+            scale: acid_engine::scale::Scale::Major,
+            snap: true,
+        };
+        let mut roll = empty();
+        let mut c = Cursor { tick: 0, pitch: 48 };
+        // C# (49) is off C major: ties go up, to D.
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(1),
+            LaneKind::Poly,
+            Snap::Step,
+            Some(key),
+        );
+        assert_eq!(roll.notes, vec![Note::new(0, 4, 50, 100)]);
+        assert_eq!(c.pitch, 50);
+        // In scale stays put.
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Note(4),
+            LaneKind::Acid,
+            Snap::Step,
+            Some(key),
+        );
+        assert_eq!(roll.notes[1].pitch, 52);
     }
 
     #[test]
@@ -234,6 +274,7 @@ mod tests {
             EntryKey::Note(0),
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c.tick, 0);
         apply_entry(
@@ -242,9 +283,17 @@ mod tests {
             EntryKey::Left,
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c.tick, 60);
-        apply_entry(&mut roll, &mut c, EntryKey::Up, LaneKind::Poly, Snap::Step);
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Up,
+            LaneKind::Poly,
+            Snap::Step,
+            None,
+        );
         assert_eq!(c.pitch, 49);
     }
 
@@ -259,6 +308,7 @@ mod tests {
             EntryKey::Note(0),
             LaneKind::Acid,
             Snap::Step,
+            None,
         );
         let mut spans: Vec<_> = roll.notes.iter().map(|n| (n.start, n.len)).collect();
         spans.sort();
@@ -275,11 +325,26 @@ mod tests {
             EntryKey::Note(9),
             LaneKind::Drums,
             Snap::Half,
+            None,
         );
         assert_eq!(roll.notes, vec![Note::new(0, 2, 6, 100)]);
         assert_eq!(c, Cursor { tick: 2, pitch: 6 });
-        apply_entry(&mut roll, &mut c, EntryKey::Up, LaneKind::Drums, Snap::Half);
-        apply_entry(&mut roll, &mut c, EntryKey::Up, LaneKind::Drums, Snap::Half);
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Up,
+            LaneKind::Drums,
+            Snap::Half,
+            None,
+        );
+        apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Up,
+            LaneKind::Drums,
+            Snap::Half,
+            None,
+        );
         assert_eq!(c.pitch, 7, "clamped to the open hat");
     }
 
@@ -293,7 +358,8 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert!(roll.notes.is_empty());
         roll.notes.push(Note::new(4, 2, 60, 100));
@@ -303,7 +369,8 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert!(roll.notes.is_empty());
         assert!(!apply_entry(
@@ -311,7 +378,8 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
     }
 
@@ -325,6 +393,7 @@ mod tests {
             EntryKey::Note(0),
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         apply_entry(
             &mut roll,
@@ -332,6 +401,7 @@ mod tests {
             EntryKey::Note(2),
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c, Cursor { tick: 8, pitch: 62 });
         assert!(apply_entry(
@@ -339,14 +409,16 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert!(apply_entry(
             &mut roll,
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert!(roll.notes.is_empty());
         assert_eq!(c, Cursor { tick: 0, pitch: 60 });
@@ -363,7 +435,8 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert_eq!(roll.notes, vec![Note::new(4, 4, 65, 100)]);
         assert_eq!(c, Cursor { tick: 4, pitch: 60 });
@@ -378,7 +451,8 @@ mod tests {
             &mut c,
             EntryKey::Back,
             LaneKind::Poly,
-            Snap::Step
+            Snap::Step,
+            None
         ));
         assert_eq!(c.tick, 4);
     }
@@ -401,6 +475,7 @@ mod tests {
             EntryKey::Right,
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c.tick, 4);
         apply_entry(
@@ -409,6 +484,7 @@ mod tests {
             EntryKey::Down,
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         apply_entry(
             &mut roll,
@@ -416,6 +492,7 @@ mod tests {
             EntryKey::Down,
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c.pitch, 0);
     }
@@ -433,6 +510,7 @@ mod tests {
             EntryKey::Note(24),
             LaneKind::Poly,
             Snap::Step,
+            None,
         );
         assert_eq!(c.pitch, 127);
         assert_eq!(roll.notes[0].pitch, 127);
@@ -453,6 +531,7 @@ mod tests {
             EntryKey::Left,
             LaneKind::Poly,
             Snap::Eighth,
+            None,
         );
         assert_eq!(c.tick, 8);
         apply_entry(
@@ -461,6 +540,7 @@ mod tests {
             EntryKey::Left,
             LaneKind::Poly,
             Snap::Eighth,
+            None,
         );
         assert_eq!(c.tick, 0);
         c.tick = 8;
@@ -470,6 +550,7 @@ mod tests {
             EntryKey::Right,
             LaneKind::Poly,
             Snap::Eighth,
+            None,
         );
         assert_eq!(c.tick, 0);
         c.tick = 8;
@@ -479,6 +560,7 @@ mod tests {
             EntryKey::Note(0),
             LaneKind::Poly,
             Snap::Eighth,
+            None,
         );
         assert_eq!(roll.notes, vec![Note::new(8, 4, 48, 100)]);
         assert_eq!(c.tick, 0);
@@ -497,6 +579,7 @@ mod tests {
             EntryKey::Note(0),
             LaneKind::Poly,
             Snap::Quarter,
+            None,
         );
         assert_eq!(roll.notes, vec![Note::new(0, 4, 48, 100)]);
         assert_eq!(c.tick, 0);

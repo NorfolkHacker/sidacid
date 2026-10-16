@@ -1,5 +1,5 @@
-//! The editor dock at the bottom of the window: a header row (snap, zoom,
-//! follow), a ruler that doubles as the shared horizontal scrollbar, and
+//! The editor dock at the bottom of the window: a header row (snap, key,
+//! zoom, follow), a ruler that doubles as the shared horizontal scrollbar, and
 //! every machine's lane stacked in rack order. Its height is a share of
 //! the window kept in the settings file.
 
@@ -11,6 +11,7 @@ use super::{NoteClip, SidAcidApp, song_lane, song_ops, theme};
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::project::{Note, NotePattern, TICKS_PER_STEP};
+use acid_engine::scale::{ROOT_NAMES, Scale};
 use acid_engine::sequencer::Mode;
 use acid_engine::song;
 use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
@@ -115,7 +116,8 @@ impl SidAcidApp {
         dock.zoom = new;
     }
 
-    /// Snap choices (Pattern mode), zoom buttons and the follow toggle;
+    /// Snap choices and the key picker (Pattern mode), zoom buttons and
+    /// the follow toggle;
     /// in Song mode then the song tools (`song_tools`).
     fn dock_header(&mut self, ui: &mut egui::Ui) {
         #[cfg(test)]
@@ -131,6 +133,8 @@ impl SidAcidApp {
                         self.view.dock.snap = snap;
                     }
                 }
+                ui.separator();
+                self.key_picker(ui);
                 ui.separator();
             }
             ui.label(RichText::new("Zoom").small().color(theme::ACID));
@@ -164,6 +168,55 @@ impl SidAcidApp {
                 self.song_tools(ui);
             }
         });
+    }
+
+    /// The project key: root and scale combos (one undo step each) and
+    /// the snap to scale toggle (a view setting, set directly).
+    fn key_picker(&mut self, ui: &mut egui::Ui) {
+        let key = self.doc.project.key;
+        let mut picked = key;
+        // Test builds note where each combo and its open items sit.
+        #[cfg(test)]
+        let mut rects: Vec<(String, Rect)> = Vec::new();
+        #[cfg(test)]
+        let mut note = |name: String, r: &egui::Response| rects.push((name, r.rect));
+        #[cfg(not(test))]
+        let note = |_: String, _: &egui::Response| {};
+        ui.label(RichText::new("Key").small().color(theme::ACID));
+        let root = egui::ComboBox::from_id_salt("key_root")
+            .width(44.0)
+            .selected_text(ROOT_NAMES[key.root as usize % 12])
+            .show_ui(ui, |ui| {
+                for (i, name) in ROOT_NAMES.iter().enumerate() {
+                    let item = ui.selectable_value(&mut picked.root, i as u8, *name);
+                    note(format!("Root {name}"), &item);
+                }
+            });
+        note("Key root".into(), &root.response);
+        let scale = egui::ComboBox::from_id_salt("key_scale")
+            .width(110.0)
+            .selected_text(key.scale.label())
+            .show_ui(ui, |ui| {
+                for s in Scale::ALL {
+                    let item = ui.selectable_value(&mut picked.scale, s, s.label());
+                    note(format!("Scale {}", s.label()), &item);
+                }
+            });
+        note("Key scale".into(), &scale.response);
+        let toggle = ui
+            .selectable_label(key.snap, "Snap to scale")
+            .on_hover_text("New, moved and transposed notes land on the key's scale");
+        note("Snap to scale".into(), &toggle);
+        #[cfg(test)]
+        self.view.dock.tool_rects.extend(rects);
+        if picked != key {
+            let cmds = self.doc.apply(Edit::Key { key: picked }, false);
+            self.send(cmds);
+            self.doc.end_gesture();
+        }
+        if toggle.clicked() {
+            self.doc.project.key.snap = !key.snap;
+        }
     }
 
     /// Ticks in the longest selected pattern in the rack.
@@ -555,12 +608,20 @@ impl SidAcidApp {
         let kind = self.lane_kind(uid);
         let snap = self.view.dock.snap;
         let mut cursor = self.view.panel(uid).cursor;
-        let changed = apply_entry(&mut pattern, &mut cursor, entry, kind, snap);
+        let scale = self.snap_key(kind);
+        let changed = apply_entry(&mut pattern, &mut cursor, entry, kind, snap, scale);
         self.view.panel(uid).cursor = cursor;
         if changed {
             self.commit_poly(uid, slot, Some(pattern), false, true);
         }
         true
+    }
+
+    /// The project key when snap to scale applies to a lane of `kind`:
+    /// snap is on, the scale isn't Chromatic and the lane is melodic.
+    pub(crate) fn snap_key(&self, kind: LaneKind) -> Option<acid_engine::scale::Key> {
+        let key = self.doc.project.key;
+        (key.snap && key.scale != Scale::Chromatic && kind != LaneKind::Drums).then_some(key)
     }
 
     /// A lane's mouse move or resize is in progress: keyboard and
@@ -604,7 +665,7 @@ impl SidAcidApp {
         key: egui::Key,
         mods: egui::Modifiers,
     ) -> Option<bool> {
-        use super::note_ops::{delete, settle, shift, values};
+        use super::note_ops::{delete, settle, shift, transpose_in_key, values};
         use egui::Key;
         if mods.command || mods.ctrl {
             return None;
@@ -649,7 +710,14 @@ impl SidAcidApp {
         } else if (dt, dp) == (0, 0) {
             return Some(true);
         } else {
-            let moved = shift(&mut pattern, &sel, dt, dp, kind);
+            let key = self.snap_key(kind);
+            let moved = match key {
+                // With snap to scale, up/down step by scale degrees.
+                Some(key) if dt == 0 && !mods.shift => {
+                    transpose_in_key(&mut pattern, &sel, dp > 0, key)
+                }
+                _ => shift(&mut pattern, &sel, dt, dp, kind),
+            };
             let kept = settle(&mut pattern, &moved, kind);
             if pattern == *original {
                 // Clamped to nothing: no edit, and the range still holds.
@@ -1662,6 +1730,94 @@ mod tests {
             app.undo();
         }
         assert_eq!(app.doc.project, before, "one undo per key");
+    }
+
+    #[test]
+    fn with_snap_to_scale_up_and_down_step_by_scale_degrees() {
+        use crate::test_rack::FM;
+        use acid_engine::scale::Key as ScaleKey;
+        use egui::{Key, Modifiers};
+        // E, and C# (off C major).
+        let mut app = sel_app(FM, &[(0, 4, 64), (16, 4, 61)], &[0, 1]);
+        app.doc.project.key = ScaleKey {
+            root: 0,
+            scale: Scale::Major,
+            snap: true,
+        };
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 65), (16, 4, 62)], "E->F, C#->D");
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 67), (16, 4, 64)], "F->G, D->E");
+        assert!(app.dock_key(Key::ArrowDown, Modifiers::SHIFT));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 55), (16, 4, 52)], "an octave");
+        assert_eq!(app.selection(FM), vec![0, 1], "still selected");
+        app.undo();
+        app.undo();
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 65), (16, 4, 62)],
+            "one undo per key"
+        );
+        // Snap off: semitones again. (Undo left the old values unselected.)
+        let all = app.doc.project.roll(FM, 0).unwrap().notes.clone();
+        app.set_selection(FM, all);
+        app.doc.project.key.snap = false;
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 66), (16, 4, 63)]);
+    }
+
+    #[test]
+    fn with_snap_to_scale_typed_notes_land_on_the_scale() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(FM, &[], &[]);
+        app.view.panel(FM).cursor.pitch = 48;
+        app.doc.project.key.scale = Scale::Major;
+        app.doc.project.key.snap = true;
+        // S types C# of the cursor's octave: it lands on D.
+        assert!(app.dock_key(Key::S, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 50)]);
+    }
+
+    #[test]
+    fn with_snap_to_scale_drums_still_move_by_one_row() {
+        use crate::test_rack::KIT808;
+        use egui::{Key, Modifiers};
+        let mut app = sel_app(KIT808, &[(0, 4, 2)], &[0]);
+        app.doc.project.key.scale = Scale::Major;
+        app.doc.project.key.snap = true;
+        assert!(app.dock_key(Key::ArrowUp, Modifiers::NONE));
+        assert_eq!(notes_of(&app, KIT808), [(0, 4, 3)]);
+    }
+
+    #[test]
+    fn the_header_picks_the_key_and_toggles_snap() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Key root", 0.0);
+        click_tool(&mut app, &ctx, "Root A", 1.0);
+        assert_eq!(app.doc.project.key.root, 9);
+        click_tool(&mut app, &ctx, "Key scale", 2.0);
+        click_tool(&mut app, &ctx, "Scale Minor", 3.0);
+        assert_eq!(app.doc.project.key.scale, Scale::Minor);
+        assert_eq!(app.doc.undo_depth(), 2, "one undo step per change");
+        assert!(app.doc.is_dirty());
+        app.undo();
+        assert_eq!(app.doc.project.key.scale, Scale::Chromatic);
+        assert_eq!(app.doc.project.key.root, 9);
+        app.undo();
+        assert!(!app.doc.is_dirty());
+        click_tool(&mut app, &ctx, "Snap to scale", 4.0);
+        assert!(app.doc.project.key.snap);
+        assert!(!app.doc.can_undo(), "the snap toggle is no undo step");
+        assert!(!app.doc.is_dirty());
+        click_tool(&mut app, &ctx, "Snap to scale", 5.0);
+        assert!(!app.doc.project.key.snap);
+        // Song mode has no key picker.
+        app.view.mode = Mode::Song;
+        frame(&mut app, &ctx, 6.0, vec![]);
+        assert!(tool(&app, "Key root").is_none());
+        assert!(tool(&app, "Snap to scale").is_none());
     }
 
     #[test]

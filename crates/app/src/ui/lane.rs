@@ -14,6 +14,9 @@
 //! accent and slide lanes instead of velocity; drum lanes get an accent
 //! lane, and double-clicking a drum hit toggles its accent. Clicking the
 //! key strip of an FM, Mono or sampler lane auditions the pitch.
+//! Melodic lanes show the project key (rows off its scale darker, root
+//! rows marked and named) and, with snap to scale on, put clicked and
+//! dragged notes on it; drum lanes ignore the key.
 
 use super::key_entry::LaneKind;
 use super::lane_geom::{LaneGeom, Rows, ZOOMS, tick_w};
@@ -30,6 +33,7 @@ use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{
     BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, TICKS_PER_STEP,
 };
+use acid_engine::scale::Scale;
 use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, UiBuilder, pos2, vec2,
@@ -61,6 +65,8 @@ const NEW_VEL: u8 = 100;
 const FM_START_PITCH: u8 = 48;
 /// Pitch the Mono roll first scrolls to: C2 (MIDI 36), as it is mostly bass.
 const MONO_START_PITCH: u8 = 36;
+/// Laid over rows off the project key's scale.
+const OFF_SCALE: Color32 = Color32::from_black_alpha(70);
 const BLACK_KEYS: [bool; 12] = [
     false, true, false, true, false, false, true, false, true, false, true, false,
 ];
@@ -300,6 +306,8 @@ impl SidAcidApp {
         keys.rect_filled(key_rect, 0.0, theme::GRID_DARK);
 
         // Rows and keys, only those in view.
+        let pkey = self.doc.project.key;
+        let scaled = pkey.scale != Scale::Chromatic;
         let held = self.view.audition.filter(|a| a.0 == uid).map(|a| a.1);
         let first = (scroll_y / row_h).floor().max(0.0) as usize;
         let last = (((scroll_y + height) / row_h).ceil().max(0.0) as usize).min(geom.row_count());
@@ -340,6 +348,18 @@ impl SidAcidApp {
                     theme::GRID_BG
                 },
             );
+            // The key: rows off the scale darker, the root marked.
+            let root = scaled && pkey.is_root(pitch);
+            if scaled && !pkey.contains(pitch) {
+                grid.rect_filled(row, 0.0, OFF_SCALE);
+            }
+            if root {
+                let y = y0 + row_h - 0.5;
+                grid.line_segment(
+                    [pos2(geom.left, y), pos2(rect.right(), y)],
+                    Stroke::new(1.0_f32, theme::ACID),
+                );
+            }
             let sampler_row = self
                 .doc
                 .project
@@ -372,13 +392,18 @@ impl SidAcidApp {
                         Color32::BLACK
                     },
                 );
-            } else if pitch % 12 == 0 {
+            } else if root || pitch % 12 == 0 {
+                let name = NOTE_NAMES[pitch as usize % 12];
                 keys.text(
                     pos2(rect.left() + 2.0, y0 + ROW_H / 2.0),
                     Align2::LEFT_CENTER,
-                    format!("C{}", pitch as i32 / 12 - 1),
+                    format!("{name}{}", pitch as i32 / 12 - 1),
                     FontId::monospace(8.0),
-                    Color32::BLACK,
+                    if black {
+                        Color32::from_gray(230)
+                    } else {
+                        Color32::BLACK
+                    },
                 );
             }
         }
@@ -599,6 +624,8 @@ impl SidAcidApp {
         let kind = self.lane_kind(uid);
         let drums = kind == LaneKind::Drums;
         let snap = self.view.dock.snap;
+        // Snap to scale, on melodic lanes only.
+        let scale = self.snap_key(kind);
         let primary = egui::PointerButton::Primary;
         let mods = ui.input(|i| i.modifiers);
         let slot = self.selected(uid);
@@ -649,6 +676,7 @@ impl SidAcidApp {
                 // Shift-click on empty space is ignored.
                 None if mods.shift => {}
                 None => {
+                    let pitch = scale.map_or(pitch, |k| k.snap(pitch));
                     if let Some(i) = add(pattern, snap.floor(tick), snap.ticks(), pitch, NEW_VEL) {
                         *sel = note_ops::settle(pattern, &[i], kind);
                         frame.changed = true;
@@ -753,8 +781,14 @@ impl SidAcidApp {
                 }) => {
                     let mut p = (**origin).clone();
                     let dt = step as i32 - floor(grab.0) as i32;
-                    let dp = pitch as i32 - grab.1 as i32;
+                    // With snap to scale the grabbed note follows the
+                    // pointer's snapped pitch; the rest then snap too.
+                    let to = scale.map_or(pitch, |k| k.snap(pitch));
+                    let dp = to as i32 - grab.1 as i32;
                     note_ops::shift(&mut p, idx, dt, dp, kind);
+                    if let Some(k) = scale {
+                        note_ops::snap_pitches(&mut p, idx, k);
+                    }
                     Some((p, idx.clone()))
                 }
                 Some(LaneDrag::Resize {
@@ -1348,6 +1382,70 @@ mod tests {
         assert_eq!(notes_of(&app, FM), [(0, 4, 60)], "one undo step");
     }
 
+    fn snap_to(app: &mut SidAcidApp, scale: Scale) {
+        app.doc.project.key = acid_engine::scale::Key {
+            root: 0,
+            scale,
+            snap: true,
+        };
+    }
+
+    #[test]
+    fn with_snap_to_scale_a_click_adds_on_the_scale() {
+        let mut app = app_with(FM, &[]);
+        snap_to(&mut app, Scale::Major);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        // C# is off C major: the note lands on D (ties go up).
+        let at = m.at(&mut app, 9.5, 61);
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, FM), [(8, 4, 62)]);
+        // Chromatic snaps nothing.
+        snap_to(&mut app, Scale::Chromatic);
+        let at = m.at(&mut app, 17.5, 61);
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, FM), [(8, 4, 62), (16, 4, 61)]);
+    }
+
+    #[test]
+    fn with_snap_to_scale_a_drag_follows_the_snapped_pointer() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 64)]);
+        snap_to(&mut app, Scale::Major);
+        let mut m = Mouse::new(&mut app, FM, 70);
+        let (a, b) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 9.5, 64));
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        // The pointer ends on C# (61), which snaps to D: the grabbed note
+        // moves +2 to D, and the other (E + 2 = F#) snaps up to G.
+        let to = m.at(&mut app, 1.5, 61);
+        m.drag(&mut app, a, to, NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 62), (8, 4, 67)]);
+        app.doc.undo();
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 60), (8, 4, 64)],
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn drum_lanes_ignore_the_key() {
+        let mut app = app_with(KIT808, &[]);
+        snap_to(&mut app, Scale::Major);
+        let mut m = Mouse::new(&mut app, KIT808, 0);
+        // Instrument 1 would be C#, off C major: it stays put.
+        let at = m.at(&mut app, 9.5, 1);
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, KIT808), [(8, 4, 1)]);
+        let from = m.at(&mut app, 9.5, 1);
+        let to = m.at(&mut app, 9.5, 3);
+        m.drag(&mut app, from, to, NONE);
+        assert_eq!(
+            notes_of(&app, KIT808),
+            [(8, 4, 3)],
+            "D# is off the scale too"
+        );
+    }
+
     #[test]
     fn dragging_on_empty_space_box_selects() {
         let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62), (24, 4, 60)]);
@@ -1843,6 +1941,49 @@ mod tests {
             let melodic = app.lane_kind(uid) != LaneKind::Drums;
             assert_eq!(app.view.panel(uid).lane_scroll_y.is_some(), melodic);
         }
+    }
+
+    /// Text and ACID line segments painted by one frame of `uid`'s lane.
+    fn painted(app: &mut SidAcidApp, uid: MachineUid) -> (Vec<String>, usize) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.lane(ui, uid, 800.0));
+        });
+        let (mut texts, mut acid_lines) = (Vec::new(), 0);
+        for c in &out.shapes {
+            match &c.shape {
+                Shape::Text(t) => texts.push(t.galley.text().to_string()),
+                Shape::LineSegment { stroke, .. } if stroke.color == theme::ACID => acid_lines += 1,
+                _ => {}
+            }
+        }
+        (texts, acid_lines)
+    }
+
+    #[test]
+    fn a_scale_marks_its_root_rows_in_melodic_lanes_only() {
+        let mut app = app_with(FM, &[]);
+        app.view.panel(FM).lane_scroll_y = Some((127 - 64) as f32 * ROW_H);
+        let (texts, lines) = painted(&mut app, FM);
+        assert!(!texts.iter().any(|t| t == "A3"), "Chromatic marks nothing");
+        let before = lines;
+        app.doc.project.key.root = 9;
+        app.doc.project.key.scale = Scale::Minor;
+        let (texts, lines) = painted(&mut app, FM);
+        assert!(texts.iter().any(|t| t == "A3"), "the root row is named");
+        assert!(texts.iter().any(|t| t == "C4"), "C rows keep their names");
+        assert!(lines > before, "root rows get a line");
+        let (texts, lines) = painted(&mut app, KIT808);
+        assert!(!texts.iter().any(|t| t == "A3"));
+        let (_, chromatic_kit) = {
+            app.doc.project.key.scale = Scale::Chromatic;
+            painted(&mut app, KIT808)
+        };
+        assert_eq!(lines, chromatic_kit, "drum lanes ignore the key");
     }
 
     #[test]

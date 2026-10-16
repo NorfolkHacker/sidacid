@@ -5,6 +5,7 @@
 use super::key_entry::LaneKind;
 use super::poly_edit::make_mono;
 use acid_engine::project::{MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
+use acid_engine::scale::Key;
 
 /// Why a paste was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +102,33 @@ pub fn shift(p: &mut NotePattern, idx: &[usize], dt: i32, dp: i32, kind: LaneKin
         }
     }
     idx.to_vec()
+}
+
+/// Moves each note at `idx` to the next (`up`) or previous in-scale pitch
+/// of `key` (from an off-scale pitch: the nearest one that way). When any
+/// note can't move (the end of the pitch range) none does, like `shift`.
+/// Positions in the vector don't change.
+pub fn transpose_in_key(p: &mut NotePattern, idx: &[usize], up: bool, key: Key) -> Vec<usize> {
+    let stuck = values(p, idx)
+        .iter()
+        .any(|n| key.step(n.pitch, up) == n.pitch);
+    if !stuck {
+        for &i in idx {
+            if let Some(n) = p.notes.get_mut(i) {
+                n.pitch = key.step(n.pitch, up);
+            }
+        }
+    }
+    idx.to_vec()
+}
+
+/// Moves each note at `idx` to its nearest in-scale pitch (`Key::snap`).
+pub fn snap_pitches(p: &mut NotePattern, idx: &[usize], key: Key) {
+    for &i in idx {
+        if let Some(n) = p.notes.get_mut(i) {
+            n.pitch = key.snap(n.pitch);
+        }
+    }
 }
 
 /// Lengthens (or shortens) each note by `dlen` ticks: at least 1, and never
@@ -292,6 +320,7 @@ mod tests {
     use super::*;
     use crate::ui::key_entry::LaneKind;
     use acid_engine::project::{MAX_NOTES, Note, NotePattern};
+    use acid_engine::scale::{Key, Scale};
 
     fn pat(notes: &[(u16, u16, u8)]) -> NotePattern {
         NotePattern {
@@ -307,6 +336,47 @@ mod tests {
         let mut v: Vec<_> = p.notes.iter().map(|n| (n.start, n.len, n.pitch)).collect();
         v.sort();
         v
+    }
+
+    fn c_major() -> Key {
+        Key {
+            root: 0,
+            scale: Scale::Major,
+            snap: true,
+        }
+    }
+
+    #[test]
+    fn transpose_in_key_moves_each_note_one_degree() {
+        // E -> F (a semitone), F -> G (a tone), C# (off-scale) -> D.
+        let mut p = pat(&[(0, 4, 64), (4, 4, 65), (8, 4, 61)]);
+        let idx = transpose_in_key(&mut p, &[0, 1, 2], true, c_major());
+        assert_eq!(idx, vec![0, 1, 2]);
+        assert_eq!(spans(&p), vec![(0, 4, 65), (4, 4, 67), (8, 4, 62)]);
+        transpose_in_key(&mut p, &[0, 1], false, c_major());
+        assert_eq!(spans(&p), vec![(0, 4, 64), (4, 4, 65), (8, 4, 62)]);
+        // An off-scale note goes to the nearest in-scale pitch below.
+        let mut p = pat(&[(0, 4, 61)]);
+        transpose_in_key(&mut p, &[0], false, c_major());
+        assert_eq!(spans(&p), vec![(0, 4, 60)]);
+    }
+
+    #[test]
+    fn transpose_in_key_holds_the_group_at_the_ends() {
+        // 127 (G) has no in-scale pitch above: nobody moves.
+        let mut p = pat(&[(0, 4, 127), (4, 4, 60)]);
+        transpose_in_key(&mut p, &[0, 1], true, c_major());
+        assert_eq!(spans(&p), vec![(0, 4, 127), (4, 4, 60)]);
+        let mut p = pat(&[(0, 4, 0), (4, 4, 60)]);
+        transpose_in_key(&mut p, &[0, 1], false, c_major());
+        assert_eq!(spans(&p), vec![(0, 4, 0), (4, 4, 60)]);
+    }
+
+    #[test]
+    fn snap_pitches_puts_each_note_on_the_scale() {
+        let mut p = pat(&[(0, 4, 61), (4, 4, 66), (8, 4, 60)]);
+        snap_pitches(&mut p, &[0, 1], c_major());
+        assert_eq!(spans(&p), vec![(0, 4, 62), (4, 4, 67), (8, 4, 60)]);
     }
 
     #[test]
