@@ -342,6 +342,20 @@ fn remap(alive: &[bool]) -> Vec<Option<usize>> {
 /// each touched note absorbs the same-pitch notes it overlaps (union span;
 /// it keeps its own other fields).
 pub fn settle(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<usize> {
+    let map = settle_map(p, touched, kind);
+    let mut out: Vec<usize> = touched
+        .iter()
+        .filter_map(|&i| map.get(i).copied().flatten())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// `settle`, returning where every note before it now is (`None` once
+/// removed), touched or not.
+pub fn settle_map(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<Option<usize>> {
+    let mut whole: Vec<Option<usize>> = (0..p.notes.len()).map(Some).collect();
     let mut ids: Vec<usize> = touched
         .iter()
         .copied()
@@ -372,13 +386,11 @@ pub fn settle(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<usi
             absorb(p, cur)
         };
         let map = remap(&alive);
-        for slot in at.iter_mut() {
+        for slot in at.iter_mut().chain(whole.iter_mut()) {
             *slot = slot.and_then(|i| map[i]);
         }
     }
-    let mut out: Vec<usize> = at.into_iter().flatten().collect();
-    out.sort_unstable();
-    out
+    whole
 }
 
 /// Merges every visible same-pitch note overlapping note `cur` into it

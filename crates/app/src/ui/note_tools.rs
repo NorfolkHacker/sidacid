@@ -3,9 +3,11 @@
 //! pattern and a scope (indices of the notes it acts on) to the new
 //! pattern and the scope notes' new indices. Notes are edited in place, so
 //! the vector's order never changes (the engine keys its played-record
-//! and chance hash by index); afterwards the scope is settled against its
-//! neighbours for the lane kind (`note_ops::settle`), which may cut or
-//! remove notes. A tool that changes nothing returns the pattern as it was.
+//! and chance hash by index); afterwards the notes a tool changed are
+//! settled against their neighbours for the lane kind (`note_ops::settle`),
+//! which may cut or remove notes. Selected notes hidden past the pattern
+//! end are left as they are. A tool that changes nothing returns the
+//! pattern as it was.
 
 use super::key_entry::LaneKind;
 use super::note_ops;
@@ -34,8 +36,10 @@ pub fn default_scope(p: &NotePattern) -> Vec<usize> {
         .collect()
 }
 
-/// The valid indices of `scope`, sorted and unique.
-fn clean(p: &NotePattern, scope: &[usize]) -> Vec<usize> {
+/// The valid indices of `scope`, sorted and unique, and those of them a
+/// tool edits: the notes starting inside the pattern length (a selected
+/// note hidden past the end is left as it is).
+fn split(p: &NotePattern, scope: &[usize]) -> (Vec<usize>, Vec<usize>) {
     let mut s: Vec<usize> = scope
         .iter()
         .copied()
@@ -43,21 +47,35 @@ fn clean(p: &NotePattern, scope: &[usize]) -> Vec<usize> {
         .collect();
     s.sort_unstable();
     s.dedup();
-    s
+    let visible = p.ticks();
+    let edit = s
+        .iter()
+        .copied()
+        .filter(|&i| p.notes[i].start < visible)
+        .collect();
+    (s, edit)
 }
 
-/// Settles the edited copy `q` over `scope`, or returns the original when
-/// the tool changed nothing.
+/// Settles the notes the tool changed in `q` (an edited copy of `p`, same
+/// order and count) and returns `q` with the scope notes' new indices.
+/// Unchanged notes are never settled, so a tool that changed nothing
+/// returns the pattern as it was.
 fn finish(
     p: &NotePattern,
     mut q: NotePattern,
     scope: &[usize],
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
-    if q == *p {
+    let changed: Vec<usize> = scope
+        .iter()
+        .copied()
+        .filter(|&i| q.notes[i] != p.notes[i])
+        .collect();
+    if changed.is_empty() {
         return (q, scope.to_vec());
     }
-    let idx = note_ops::settle(&mut q, scope, kind);
+    let map = note_ops::settle_map(&mut q, &changed, kind);
+    let idx = scope.iter().filter_map(|&i| map[i]).collect();
     (q, idx)
 }
 
@@ -99,11 +117,11 @@ pub fn quantize(
     params: &Quantize,
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
+    let (scope, edit) = split(p, scope);
     let g = params.grid.ticks().max(1) as i32;
     let strength = params.strength.min(100) as i32;
     let mut q = p.clone();
-    for &i in &scope {
+    for &i in &edit {
         let n = &mut q.notes[i];
         let start = clamp_start(toward_grid(n.start as i32, g, strength, true));
         let e = if params.ends {
@@ -161,10 +179,10 @@ pub fn humanize(
     params: &Humanize,
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
+    let (scope, edit) = split(p, scope);
     let (timing, vel) = (params.timing.min(8), params.vel.min(40));
     let mut q = p.clone();
-    for &i in &scope {
+    for &i in &edit {
         let n = &mut q.notes[i];
         let start = clamp_start(n.start as i32 + offset(params.seed, i, 0, timing));
         n.len = n.len.min(u16::MAX - start).max(1);
@@ -175,18 +193,20 @@ pub fn humanize(
 }
 
 /// Legato: each note runs to the next start strictly after its own among
-/// the scope notes (any pitch, so a chord stretches together); the last
-/// runs to the pattern end.
+/// every visible note of the lane, selected or not and at any pitch (so a
+/// note stops at its neighbour, nothing is cut, and a chord stretches
+/// together); the last runs to the pattern end.
 pub fn legato(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
+    let (scope, edit) = split(p, scope);
     let ticks = p.ticks();
     let mut q = p.clone();
-    for &i in &scope {
+    for &i in &edit {
         let start = p.notes[i].start;
-        let next = scope
+        let next = p
+            .notes
             .iter()
-            .map(|&j| p.notes[j].start)
-            .filter(|&s| s > start)
+            .map(|n| n.start)
+            .filter(|&s| s > start && s < ticks)
             .min()
             .unwrap_or(ticks);
         q.notes[i].len = next.saturating_sub(start).max(1);
@@ -197,17 +217,17 @@ pub fn legato(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern,
 /// Reverse: the scope mirrors in time over its span (first start to last
 /// end): `start' = span_start + span_end - end`.
 pub fn reverse(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
-    let Some(lo) = scope.iter().map(|&i| p.notes[i].start as i32).min() else {
+    let (scope, edit) = split(p, scope);
+    let Some(lo) = edit.iter().map(|&i| p.notes[i].start as i32).min() else {
         return (p.clone(), scope);
     };
-    let hi = scope
+    let hi = edit
         .iter()
         .map(|&i| end(&p.notes[i]) as i32)
         .max()
         .unwrap_or(lo);
     let mut q = p.clone();
-    for &i in &scope {
+    for &i in &edit {
         let n = &mut q.notes[i];
         let start = clamp_start(lo + hi - end(n) as i32);
         n.len = n.len.min(u16::MAX - start).max(1);
@@ -219,20 +239,20 @@ pub fn reverse(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern
 /// Invert: pitches mirror within the scope's pitch range
 /// (`pitch' = lo + hi - pitch`). Melodic lanes only: drums are unchanged.
 pub fn invert(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
+    let (scope, edit) = split(p, scope);
     if kind == LaneKind::Drums {
         return (p.clone(), scope);
     }
-    let Some(lo) = scope.iter().map(|&i| p.notes[i].pitch as i32).min() else {
+    let Some(lo) = edit.iter().map(|&i| p.notes[i].pitch as i32).min() else {
         return (p.clone(), scope);
     };
-    let hi = scope
+    let hi = edit
         .iter()
         .map(|&i| p.notes[i].pitch as i32)
         .max()
         .unwrap_or(lo);
     let mut q = p.clone();
-    for &i in &scope {
+    for &i in &edit {
         let n = &mut q.notes[i];
         n.pitch = (lo + hi - n.pitch as i32).clamp(0, 127) as u8;
     }
@@ -261,17 +281,17 @@ pub fn strum(
     params: &Strum,
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
-    let scope = clean(p, scope);
+    let (scope, edit) = split(p, scope);
     if kind == LaneKind::Drums {
         return (p.clone(), scope);
     }
     let gap = params.ticks.clamp(1, 8) as i32;
     let mut q = p.clone();
-    let mut starts: Vec<u16> = scope.iter().map(|&i| p.notes[i].start).collect();
+    let mut starts: Vec<u16> = edit.iter().map(|&i| p.notes[i].start).collect();
     starts.sort_unstable();
     starts.dedup();
     for s in starts {
-        let mut chord: Vec<usize> = scope
+        let mut chord: Vec<usize> = edit
             .iter()
             .copied()
             .filter(|&i| p.notes[i].start == s)
@@ -385,7 +405,8 @@ mod tests {
 
     #[test]
     fn quantize_never_starts_at_the_pattern_limit() {
-        let p = pat(&[(255, 1, 60)]);
+        let mut p = pat(&[(255, 1, 60)]);
+        p.length = 64;
         let params = Quantize {
             grid: Snap::Quarter,
             ..Quantize::default()
@@ -466,6 +487,7 @@ mod tests {
     #[test]
     fn humanize_clamps_start_and_velocity() {
         let mut p = pat(&[(0, 2, 60), (255, 1, 62)]);
+        p.length = 64;
         p.notes[0].vel = 1;
         p.notes[1].vel = 127;
         for seed in 0..50 {
@@ -527,12 +549,73 @@ mod tests {
     }
 
     #[test]
-    fn legato_acid_cuts_a_note_outside_the_scope() {
-        // Note 1 is not in scope; note 0's stretch to 8 removes it.
+    fn legato_stops_at_an_unselected_neighbour() {
+        // Note 1 is not in scope: it survives, and note 0 ends at its start.
         let p = pat(&[(0, 1, 60), (4, 1, 62), (8, 1, 64)]);
         let (q, idx) = legato(&p, &[0, 2], LaneKind::Acid);
-        assert_eq!(spans(&q), vec![(0, 8, 60), (8, 56, 64)]);
-        assert_eq!(idx, vec![0, 1]);
+        assert_eq!(spans(&q), vec![(0, 4, 60), (4, 1, 62), (8, 56, 64)]);
+        assert_eq!(idx, vec![0, 2]);
+    }
+
+    #[test]
+    fn legato_poly_stops_at_any_visible_start() {
+        // The chord stops at the unselected 67; a hidden note past the end
+        // is no neighbour.
+        let p = pat(&[(0, 1, 60), (0, 1, 64), (4, 2, 67), (8, 1, 62), (70, 1, 50)]);
+        let (q, idx) = legato(&p, &[0, 1, 3], LaneKind::Poly);
+        assert_eq!(
+            spans(&q),
+            vec![(0, 4, 60), (0, 4, 64), (4, 2, 67), (8, 56, 62), (70, 1, 50)]
+        );
+        assert_eq!(idx, vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn hidden_selected_notes_are_left_alone() {
+        // Note 1 starts past the pattern end (64) but is in scope.
+        let p = pat(&[(1, 1, 60), (70, 3, 62)]);
+        let k = LaneKind::Poly;
+        let h = Humanize {
+            timing: 8,
+            vel: 40,
+            seed: 3,
+        };
+        let s = Strum::default();
+        let results = [
+            quantize(&p, &[0, 1], &Quantize::default(), k),
+            humanize(&p, &[0, 1], &h, k),
+            legato(&p, &[0, 1], k),
+            reverse(&p, &[0, 1], k),
+            invert(&p, &[0, 1], k),
+            strum(&p, &[0, 1], &s, k),
+        ];
+        for (q, idx) in &results {
+            assert_eq!(q.notes[1], p.notes[1]);
+            assert_eq!(idx, &vec![0, 1]);
+        }
+        // Spans and pitch ranges ignore it too.
+        assert_eq!(results[2].0.notes[0].len, 63);
+        assert_eq!(results[3].0.notes[0], p.notes[0]);
+        assert_eq!(results[4].0.notes[0], p.notes[0]);
+    }
+
+    #[test]
+    fn only_changed_notes_are_settled() {
+        // Notes 0 and 1 overlap on one pitch already and don't move; only
+        // note 2 does, so the old overlap is not merged.
+        let p = pat(&[(0, 6, 60), (4, 4, 60), (9, 2, 64)]);
+        let (q, idx) = quantize(&p, &all(&p), &Quantize::default(), LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(0, 6, 60), (4, 4, 60), (8, 2, 64)]);
+        assert_eq!(idx, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn settle_map_tracks_untouched_notes() {
+        // Acid: note 2 (4..8) removes note 1 starting inside it.
+        let mut p = pat(&[(0, 2, 60), (5, 1, 62), (4, 4, 64)]);
+        let map = note_ops::settle_map(&mut p, &[2], LaneKind::Acid);
+        assert_eq!(map, vec![Some(0), None, Some(1)]);
+        assert_eq!(spans(&p), vec![(0, 2, 60), (4, 4, 64)]);
     }
 
     // --- reverse ---
@@ -620,10 +703,12 @@ mod tests {
 
     #[test]
     fn strum_clamps_at_the_pattern_limit() {
-        let p = pat(&[(254, 2, 60), (254, 2, 64), (254, 2, 67)]);
+        let mut p = pat(&[(254, 2, 60), (254, 2, 64), (254, 2, 67)]);
+        p.length = 64;
         let params = Strum { ticks: 8, up: true };
         let (q, _) = strum(&p, &all(&p), &params, LaneKind::Poly);
-        assert!(q.notes.iter().all(|n| n.start < 256 && n.len >= 1));
+        // 254, 262 and 270 clamp to 255 (ends kept where they can be).
+        assert_eq!(spans(&q), vec![(254, 2, 60), (255, 1, 64), (255, 1, 67)]);
     }
 
     #[test]
