@@ -18,7 +18,6 @@ mod lane_geom;
 mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
-#[allow(dead_code)] // used by the lanes (phase 3, tasks 2–4)
 mod note_ops;
 mod note_panel;
 mod pads;
@@ -54,10 +53,13 @@ pub type WaveCacheEntry = (usize, usize, usize, Vec<(f32, f32)>);
 pub struct PanelState {
     /// Bank shown on the machine's pads (0..8).
     pub bank: u8,
-    /// Poly-roll drag (note machines).
-    pub poly_drag: Option<poly_edit::PolyDrag>,
-    /// Length in ticks of the last note drawn or resized (0 = one step).
-    pub poly_len: u16,
+    /// The lane's mouse drag in progress (note machines).
+    pub drag: Option<poly_edit::LaneDrag>,
+    /// The lane's selected notes, by value (see `note_ops::resolve`).
+    pub selected: Vec<acid_engine::project::Note>,
+    /// The pattern `selected` belongs to; another selected pattern means
+    /// no selection.
+    pub sel_slot: u8,
     /// Vertical scroll of this machine's dock lane; None until first placed
     /// at `roll_start_pitch`.
     pub lane_scroll_y: Option<f32>,
@@ -629,6 +631,30 @@ impl SidAcidApp {
     /// `uid`'s selected pattern (0 for a machine not in the rack).
     pub(crate) fn selected(&self, uid: MachineUid) -> u8 {
         self.doc.project.machine(uid).map_or(0, |m| m.selected)
+    }
+
+    /// Indices of `uid`'s selected notes in its selected pattern: empty
+    /// when the selection belongs to another pattern.
+    pub(crate) fn selection(&self, uid: MachineUid) -> Vec<usize> {
+        let slot = self.selected(uid);
+        match (self.view.panels.get(&uid), self.doc.project.roll(uid, slot)) {
+            (Some(panel), Some(p)) if panel.sel_slot == slot => {
+                note_ops::resolve(p, &panel.selected)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Makes `notes` (values in the selected pattern) `uid`'s selection.
+    pub(crate) fn set_selection(
+        &mut self,
+        uid: MachineUid,
+        notes: Vec<acid_engine::project::Note>,
+    ) {
+        let slot = self.selected(uid);
+        let panel = self.view.panel(uid);
+        panel.selected = notes;
+        panel.sel_slot = slot;
     }
 
     /// `uid`'s playhead step while it plays pattern `slot`. `Status`
@@ -1363,12 +1389,20 @@ mod tests {
     fn loading_a_document_resets_poly_roll_state() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         for uid in [FM, SAMPLER] {
-            app.view.panel(uid).poly_drag = Some(poly_edit::PolyDrag::Velocity);
+            app.view.panel(uid).drag = Some(poly_edit::LaneDrag::Velocity);
+            app.view.panel(uid).selected = vec![acid_engine::project::Note::new(0, 4, 60, 100)];
             app.view.panel(uid).lane_scroll_y = Some(100.0);
         }
         app.view.audition = Some((FM, 60));
         app.load_document(Document::new(Project::default()));
-        assert_eq!(panels(&mut app, &[FM, SAMPLER], |p| p.poly_drag), [None; 2]);
+        assert_eq!(
+            panels(&mut app, &[FM, SAMPLER], |p| p.drag.is_none()),
+            [true; 2]
+        );
+        assert_eq!(
+            panels(&mut app, &[FM, SAMPLER], |p| p.selected.is_empty()),
+            [true; 2]
+        );
         assert_eq!(
             panels(&mut app, &[FM, SAMPLER], |p| p.lane_scroll_y),
             [None; 2]

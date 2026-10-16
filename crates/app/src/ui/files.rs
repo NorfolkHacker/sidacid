@@ -212,9 +212,10 @@ impl SidAcidApp {
             }
         }
         self.view.overwrite = None;
-        // Gestures and scroll positions start over; snap and note length stay.
+        // Gestures, selections and scroll positions start over; the snap stays.
         for panel in self.view.panels.values_mut() {
-            panel.poly_drag = None;
+            panel.drag = None;
+            panel.selected.clear();
             panel.lane_scroll_y = None;
             panel.fm_op = 0;
             panel.sampler_slot = 0;

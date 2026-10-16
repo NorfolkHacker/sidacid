@@ -1,6 +1,6 @@
-//! Pure editing of note patterns for the lanes' piano rolls. Notes stay
-//! in insertion order (the engine scans them all), so an index stays
-//! valid for the whole of a drag.
+//! Pure editing of note patterns for the lanes' piano rolls (selection
+//! edits are in `note_ops`). Notes stay in insertion order (the engine
+//! scans them all), so an index stays valid for the whole of a drag.
 
 use acid_engine::project::{MAX_NOTES, Note, NotePattern, TICKS_PER_STEP};
 
@@ -48,17 +48,27 @@ impl Snap {
     }
 }
 
-/// A mouse drag in progress in the roll.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PolyDrag {
-    /// `grab` = ticks between the note start and where it was grabbed.
+/// A mouse drag in progress in a lane. Move and resize recompute the
+/// pattern from `origin` (the pattern when the drag started, after any
+/// copies) every frame, so deltas never accumulate.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LaneDrag {
+    /// The notes at `idx` follow the pointer from `grab` (tick, row pitch).
     Move {
-        index: usize,
+        origin: Box<NotePattern>,
+        idx: Vec<usize>,
+        grab: (u16, u8),
+    },
+    /// The notes at `idx` stretch with the grabbed note's end (`grab`).
+    Resize {
+        origin: Box<NotePattern>,
+        idx: Vec<usize>,
         grab: u16,
     },
-    Resize {
-        index: usize,
-    },
+    /// A selection box from `from` (tick, pitch); `add` keeps the old
+    /// selection.
+    Marquee { from: (u16, u8), add: bool },
+    /// A drag in the velocity strip.
     Velocity,
 }
 
@@ -96,77 +106,6 @@ pub fn add(p: &mut NotePattern, start: u16, len: u16, pitch: u8, vel: u8) -> Opt
     p.notes
         .push(Note::new(start, len, pitch, vel.clamp(1, 127)));
     Some(p.notes.len() - 1)
-}
-
-pub fn delete(p: &mut NotePattern, index: usize) -> bool {
-    if index < p.notes.len() {
-        p.notes.remove(index);
-        true
-    } else {
-        false
-    }
-}
-
-/// Moves a note, keeping its start inside the pattern and its pitch in MIDI range.
-pub fn move_to(p: &mut NotePattern, index: usize, start: u16, pitch: u8) -> bool {
-    let last = p.ticks() - 1;
-    let Some(n) = p.notes.get_mut(index) else {
-        return false;
-    };
-    let (start, pitch) = (start.min(last), pitch.min(127));
-    if n.start == start && n.pitch == pitch {
-        return false;
-    }
-    n.start = start;
-    n.pitch = pitch;
-    true
-}
-
-/// Run when a move or resize drag is dropped: absorbs every other visible
-/// same-pitch note the dragged note overlaps into it (the union span; the
-/// dragged note keeps its velocity). Returns the dragged note's new index.
-/// Not run mid-drag, so an index stays valid for the whole drag.
-pub fn resolve_overlaps(p: &mut NotePattern, index: usize) -> usize {
-    let Some(&dragged) = p.notes.get(index) else {
-        return index;
-    };
-    let visible = p.ticks();
-    let hit = |n: &Note| {
-        n.pitch == dragged.pitch
-            && n.start < visible
-            && n.start < end(&dragged)
-            && dragged.start < end(n)
-    };
-    let (mut lo, mut hi) = (dragged.start, end(&dragged));
-    let mut kept = Vec::with_capacity(p.notes.len());
-    let mut at = 0;
-    for (k, n) in p.notes.iter().enumerate() {
-        if k == index {
-            at = kept.len();
-            kept.push(*n);
-        } else if hit(n) {
-            lo = lo.min(n.start);
-            hi = hi.max(end(n));
-        } else {
-            kept.push(*n);
-        }
-    }
-    kept[at].start = lo;
-    kept[at].len = hi - lo;
-    p.notes = kept;
-    at
-}
-
-pub fn resize(p: &mut NotePattern, index: usize, len: u16) -> bool {
-    let Some(n) = p.notes.get_mut(index) else {
-        return false;
-    };
-    let len = len.max(1);
-    if n.len == len {
-        return false;
-    }
-    n.len = len;
-    true
 }
 
 /// Sets the velocity of every note starting in `from..to`.
@@ -354,34 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn resolving_overlaps_merges_same_pitch_notes_into_the_dragged_one() {
-        let mut p = pat();
-        add(&mut p, 0, 4, 60, 100);
-        let i = add(&mut p, 8, 4, 60, 50).unwrap();
-        add(&mut p, 2, 4, 62, 100);
-        assert!(move_to(&mut p, i, 2, 60), "moved onto the first note");
-        assert_eq!(p.notes.len(), 3, "move alone leaves the overlap");
-        let at = resolve_overlaps(&mut p, i);
-        assert_eq!(p.notes.len(), 2, "the other 60 was absorbed");
-        let merged = p.notes[at];
-        assert_eq!((merged.start, merged.len, merged.pitch), (0, 6, 60));
-        assert_eq!(merged.vel, 50, "the dragged note keeps its velocity");
-        assert!(p.notes.iter().any(|n| n.pitch == 62), "other pitches stay");
-    }
-
-    #[test]
-    fn resolving_overlaps_ignores_touching_hidden_and_other_pitches() {
-        let mut p = pat();
-        add(&mut p, 0, 4, 60, 100);
-        let i = add(&mut p, 4, 4, 60, 100).unwrap();
-        add(&mut p, 20, 4, 60, 100);
-        p.length = 1;
-        let before = p.clone();
-        resolve_overlaps(&mut p, i);
-        assert_eq!(p, before);
-    }
-
-    #[test]
     fn add_refuses_past_the_end_and_over_the_cap() {
         let mut p = pat();
         let end_tick = p.ticks();
@@ -403,10 +314,6 @@ mod tests {
         let mut p = pat();
         let i = add(&mut p, 0, 0, 60, 0).unwrap();
         assert_eq!((p.notes[i].len, p.notes[i].vel), (1, 1));
-        assert!(!resize(&mut p, i, 0), "already length 1");
-        assert!(resize(&mut p, i, 9));
-        assert_eq!(p.notes[i].len, 9);
-        assert!(!resize(&mut p, 5, 3), "bad index");
     }
 
     #[test]
@@ -418,20 +325,6 @@ mod tests {
         assert_eq!(note_at(&p, 8, 60), None);
         assert_eq!(note_at(&p, 5, 62), Some(1));
         assert_eq!(note_at(&p, 5, 61), None);
-    }
-
-    #[test]
-    fn move_and_delete_keep_other_indices() {
-        let mut p = pat();
-        add(&mut p, 0, 4, 60, 100);
-        add(&mut p, 8, 4, 62, 100);
-        assert!(move_to(&mut p, 0, 200, 130));
-        assert_eq!((p.notes[0].start, p.notes[0].pitch), (p.ticks() - 1, 127));
-        let last = p.ticks() - 1;
-        assert!(!move_to(&mut p, 0, last, 127), "no change");
-        assert!(delete(&mut p, 0));
-        assert_eq!(p.notes[0].pitch, 62);
-        assert!(!delete(&mut p, 3));
     }
 
     #[test]

@@ -4,20 +4,23 @@
 //! zoomed with the dock; one row per MIDI pitch, or per instrument on a
 //! drum kit), an optional expression strip and a height handle.
 //!
-//! Click adds a note (with the last length used; a drum hit is one snap
-//! long), drag the body to move, drag the right edge to stretch (not on
-//! drum lanes), right-click deletes, chords stack freely. The acid synths
-//! keep one note at a time and get accent and slide lanes instead of
-//! velocity; drum lanes get an accent lane, and double-clicking a drum
-//! hit toggles its accent. Clicking the key strip of an FM, Mono or
-//! sampler lane auditions the pitch.
+//! Notes are edited as a selection. Click a note to select it (Shift
+//! toggles it), click empty space to add a note one snap long, drag empty
+//! space to box-select (Shift adds), drag a note to move the selection
+//! (Ctrl moves copies, Alt moves by single ticks), drag a note's right
+//! edge to stretch the selection (not on drum lanes); right-click deletes
+//! the selection, or the note under the pointer when it is not selected.
+//! Chords stack freely. The acid synths keep one note at a time and get
+//! accent and slide lanes instead of velocity; drum lanes get an accent
+//! lane, and double-clicking a drum hit toggles its accent. Clicking the
+//! key strip of an FM, Mono or sampler lane auditions the pitch.
 
 use super::key_entry::LaneKind;
 use super::lane_geom::{LaneGeom, Rows, ZOOMS, tick_w};
+use super::note_ops;
 use super::poly_edit::Snap;
 use super::poly_edit::{
-    Flag, PolyDrag, add, delete, make_mono, move_to, note_at, resize, resolve_overlaps,
-    set_velocity_in, toggle_accent_in, toggle_flag,
+    Flag, LaneDrag, add, note_at, set_velocity_in, toggle_accent_in, toggle_flag,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -25,7 +28,7 @@ use acid_engine::host::Command;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{
-    BASE_MIDI, LaneView, MachineBody, NotePattern, PatternRef, TICKS_PER_STEP,
+    BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, TICKS_PER_STEP,
 };
 use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Sense, Shape, Stroke,
@@ -73,7 +76,8 @@ fn vel_from_y(y: f32, top: f32) -> u8 {
 struct Frame {
     changed: bool,
     finished: bool,
-    dropped: Option<usize>,
+    /// A move or resize was dropped: the dragged notes' indices.
+    dropped: Option<Vec<usize>>,
     /// The pointer went down in an expression strip.
     pressed: bool,
 }
@@ -233,10 +237,6 @@ impl SidAcidApp {
         let ticks = pattern.ticks();
         let snap = self.view.dock.snap;
         let tw = tick_w(ZOOMS[self.view.dock.zoom.min(ZOOMS.len() - 1)]);
-        let new_len = match self.view.panel(uid).poly_len {
-            0 => TICKS_PER_STEP,
-            l => l,
-        };
         let playhead = self.playhead(uid, slot);
         // Drum rows shrink to fit a short lane, so all 8 always show.
         let (rows, row_h) = if drums {
@@ -408,7 +408,8 @@ impl SidAcidApp {
         let drawn = |n: &acid_engine::project::Note| {
             n.start < ticks && (!drums || (n.pitch as usize) < DRUM_INSTRUMENTS)
         };
-        for note in pattern.notes.iter().filter(|n| drawn(n)) {
+        let mut sel = self.selection(uid);
+        for (i, note) in pattern.notes.iter().enumerate().filter(|(_, n)| drawn(n)) {
             let r = geom.note_rect(note).shrink(0.5);
             let fill = if drums {
                 if note.accent {
@@ -445,6 +446,14 @@ impl SidAcidApp {
                     Stroke::new(2.0_f32, theme::ACCENT),
                 );
             }
+            if sel.binary_search(&i).is_ok() {
+                grid.rect_stroke(
+                    r,
+                    2.0,
+                    Stroke::new(1.5_f32, theme::ACID_LIGHT),
+                    StrokeKind::Inside,
+                );
+            }
         }
 
         // The keyboard-entry cursor, one snap wide.
@@ -466,7 +475,6 @@ impl SidAcidApp {
 
         // Mouse editing.
         let pointer = resp.interact_pointer_pos();
-        let cell_at = |p: egui::Pos2| Some((geom.tick_at(p.x)?, geom.pitch_at(p.y)?));
         if resp.is_pointer_button_down_on()
             && let Some(p) = pointer
             && p.x < geom.left
@@ -487,98 +495,29 @@ impl SidAcidApp {
                 cursor.tick = snap.floor(geom.tick_at_clamped(p.x));
             }
         }
-        if resp.clicked()
+        self.lane_mouse(ui, uid, &resp, &geom, &mut pattern, &mut sel, &mut frame);
+        if let Some(LaneDrag::Marquee { from, .. }) = &self.view.panel(uid).drag
             && let Some(p) = pointer
-            && let Some((tick, pitch)) = cell_at(p)
-            && note_at(&pattern, tick, pitch).is_none()
         {
-            let len = if drums { snap.ticks() } else { new_len };
-            let added = add(&mut pattern, snap.floor(tick), len, pitch, NEW_VEL);
-            if acid && let Some(i) = added {
-                make_mono(&mut pattern, i);
-            }
-            frame.changed |= added.is_some();
-            frame.finished = true;
-        }
-        if drums
-            && resp.double_clicked()
-            && let Some(p) = pointer
-            && let Some((tick, pitch)) = cell_at(p)
-            && let Some(i) = note_at(&pattern, tick, pitch)
-        {
-            pattern.notes[i].accent = !pattern.notes[i].accent;
-            frame.changed = true;
-            frame.finished = true;
-        }
-        if resp.secondary_clicked()
-            && let Some(p) = pointer
-            && let Some((tick, pitch)) = cell_at(p)
-            && let Some(i) = note_at(&pattern, tick, pitch)
-        {
-            frame.changed |= delete(&mut pattern, i);
-            frame.finished = true;
-        }
-        if resp.drag_started()
-            && let Some(p) = pointer
-            && let Some((tick, pitch)) = cell_at(p)
-        {
-            self.view.panel(uid).poly_drag = match note_at(&pattern, tick, pitch) {
-                Some(i) if !drums && geom.near_right_edge(&pattern.notes[i], p.x) => {
-                    Some(PolyDrag::Resize { index: i })
-                }
-                Some(i) => Some(PolyDrag::Move {
-                    index: i,
-                    grab: tick - pattern.notes[i].start,
-                }),
-                None => {
-                    let added = add(&mut pattern, snap.floor(tick), snap.ticks(), pitch, NEW_VEL);
-                    frame.changed |= added.is_some();
-                    added.map(|index| {
-                        if drums {
-                            // A new hit follows the pointer.
-                            PolyDrag::Move { index, grab: 0 }
-                        } else if acid {
-                            PolyDrag::Resize {
-                                index: make_mono(&mut pattern, index),
-                            }
-                        } else {
-                            PolyDrag::Resize { index }
-                        }
-                    })
-                }
-            };
-        }
-        if resp.dragged()
-            && let Some(p) = pointer
-            && let Some(drag) = self.view.panel(uid).poly_drag
-        {
-            let (tick, pitch) = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
-            match drag {
-                PolyDrag::Resize { index } => {
-                    if let Some(start) = pattern.notes.get(index).map(|n| n.start) {
-                        let len = (snap.floor(tick) + snap.ticks())
-                            .saturating_sub(start)
-                            .max(1);
-                        if resize(&mut pattern, index, len) {
-                            self.view.panel(uid).poly_len = len;
-                            frame.changed = true;
-                        }
-                    }
-                }
-                PolyDrag::Move { index, grab } => {
-                    let start = snap.floor(tick.saturating_sub(grab));
-                    frame.changed |= move_to(&mut pattern, index, start, pitch);
-                }
-                PolyDrag::Velocity => {}
-            }
-        }
-        let drag = self.view.panel(uid).poly_drag;
-        if resp.drag_stopped() && drag != Some(PolyDrag::Velocity) {
-            if let Some(PolyDrag::Move { index, .. } | PolyDrag::Resize { index }) = drag {
-                frame.dropped = Some(index);
-            }
-            self.view.panel(uid).poly_drag = None;
-            frame.finished = true;
+            let to = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
+            let rows = [from.1, to.1].map(|q| geom.row_of(q).unwrap_or(0));
+            let r = Rect::from_min_max(
+                pos2(
+                    geom.x_of(from.0.min(to.0)),
+                    geom.row_top(rows[0].min(rows[1])),
+                ),
+                pos2(
+                    geom.x_of(from.0.max(to.0) + 1),
+                    geom.row_top(rows[0].max(rows[1]) + 1),
+                ),
+            );
+            grid.rect_filled(r, 0.0, theme::ACID_LIGHT.gamma_multiply(0.12));
+            grid.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0_f32, theme::ACID_LIGHT),
+                StrokeKind::Inside,
+            );
         }
 
         if view.strip {
@@ -612,6 +551,208 @@ impl SidAcidApp {
             frame.dropped,
             frame.finished,
         );
+    }
+
+    /// The grid's clicks and drags, around the selection `sel` (sorted
+    /// indices into `pattern`, kept up to date here). Edits go into
+    /// `pattern` and `frame`; selection changes alone edit nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn lane_mouse(
+        &mut self,
+        ui: &egui::Ui,
+        uid: MachineUid,
+        resp: &egui::Response,
+        geom: &LaneGeom,
+        pattern: &mut NotePattern,
+        sel: &mut Vec<usize>,
+        frame: &mut Frame,
+    ) {
+        let kind = self.lane_kind(uid);
+        let drums = kind == LaneKind::Drums;
+        let snap = self.view.dock.snap;
+        let primary = egui::PointerButton::Primary;
+        let mods = ui.input(|i| i.modifiers);
+        let pointer = resp
+            .interact_pointer_pos()
+            .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+        // Drags hit-test where the press began, not where the pointer is
+        // once the drag is recognised.
+        let press = ui.input(|i| i.pointer.press_origin()).or(pointer);
+        let cell_at = |p: egui::Pos2| Some((geom.tick_at(p.x)?, geom.pitch_at(p.y)?));
+        let hit_at = |pattern: &NotePattern, p: egui::Pos2| {
+            cell_at(p).and_then(|(tick, pitch)| note_at(pattern, tick, pitch))
+        };
+        let toggle = |sel: &mut Vec<usize>, i: usize| match sel.binary_search(&i) {
+            Ok(k) => {
+                sel.remove(k);
+            }
+            Err(k) => sel.insert(k, i),
+        };
+
+        // Before the click: the click then selects the toggled hit.
+        if drums
+            && resp.double_clicked()
+            && let Some(p) = pointer
+            && let Some(i) = hit_at(pattern, p)
+        {
+            pattern.notes[i].accent = !pattern.notes[i].accent;
+            frame.changed = true;
+            frame.finished = true;
+        }
+        if resp.clicked()
+            && let Some(p) = pointer
+            && let Some((tick, pitch)) = cell_at(p)
+        {
+            match note_at(pattern, tick, pitch) {
+                Some(i) if mods.shift => toggle(sel, i),
+                Some(i) => *sel = vec![i],
+                // Shift-click on empty space is ignored.
+                None if mods.shift => {}
+                None => {
+                    if let Some(i) = add(pattern, snap.floor(tick), snap.ticks(), pitch, NEW_VEL) {
+                        *sel = note_ops::settle(pattern, &[i], kind);
+                        frame.changed = true;
+                    }
+                    frame.finished = true;
+                }
+            }
+            self.set_selection(uid, note_ops::values(pattern, sel));
+        }
+        if resp.secondary_clicked()
+            && let Some(p) = pointer
+            && let Some(i) = hit_at(pattern, p)
+        {
+            if sel.contains(&i) {
+                note_ops::delete(pattern, sel);
+                sel.clear();
+                self.set_selection(uid, Vec::new());
+            } else {
+                // The selection is kept by value, so it survives this.
+                note_ops::delete(pattern, &[i]);
+            }
+            frame.changed = true;
+            frame.finished = true;
+        }
+
+        if resp.drag_started_by(primary)
+            && let Some(p) = press
+            && p.x >= geom.left
+        {
+            let from = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
+            let drag = match hit_at(pattern, p) {
+                None => Some(LaneDrag::Marquee {
+                    from,
+                    add: mods.shift,
+                }),
+                Some(i) => {
+                    // The grabbed note joins (Shift) or replaces the selection.
+                    if sel.binary_search(&i).is_err() {
+                        if mods.shift {
+                            toggle(sel, i);
+                        } else {
+                            *sel = vec![i];
+                        }
+                    }
+                    let grabbed = pattern.notes[i];
+                    if !drums && geom.near_right_edge(&grabbed, p.x) {
+                        Some(LaneDrag::Resize {
+                            origin: Box::new(pattern.clone()),
+                            idx: sel.clone(),
+                            grab: grabbed.start.saturating_add(grabbed.len),
+                        })
+                    } else if mods.command || mods.ctrl {
+                        // Copies move; the originals stay.
+                        let copies = note_ops::values(pattern, sel);
+                        if pattern.notes.len() + copies.len() > MAX_NOTES {
+                            self.view.message =
+                                Some(format!("A pattern holds at most {MAX_NOTES} notes."));
+                            None
+                        } else {
+                            let first = pattern.notes.len();
+                            pattern.notes.extend(copies);
+                            *sel = (first..pattern.notes.len()).collect();
+                            frame.changed = true;
+                            Some(LaneDrag::Move {
+                                origin: Box::new(pattern.clone()),
+                                idx: sel.clone(),
+                                grab: from,
+                            })
+                        }
+                    } else {
+                        Some(LaneDrag::Move {
+                            origin: Box::new(pattern.clone()),
+                            idx: sel.clone(),
+                            grab: from,
+                        })
+                    }
+                }
+            };
+            if !matches!(drag, Some(LaneDrag::Marquee { .. })) {
+                self.set_selection(uid, note_ops::values(pattern, sel));
+            }
+            self.view.panel(uid).drag = drag;
+        }
+
+        // Each frame recomputes the drag from its origin.
+        if resp.dragged_by(primary)
+            && let Some(p) = pointer
+        {
+            let (tick, pitch) = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
+            // Alt: single ticks; else whole snap cells.
+            let (step, unit) = if mods.alt {
+                (tick, 1)
+            } else {
+                (snap.floor(tick), snap.ticks())
+            };
+            let floor = |t: u16| if mods.alt { t } else { snap.floor(t) };
+            let moved = match &self.view.panel(uid).drag {
+                Some(LaneDrag::Move { origin, idx, grab }) => {
+                    let mut p = (**origin).clone();
+                    let dt = step as i32 - floor(grab.0) as i32;
+                    let dp = pitch as i32 - grab.1 as i32;
+                    note_ops::shift(&mut p, idx, dt, dp, kind);
+                    Some((p, idx.clone()))
+                }
+                Some(LaneDrag::Resize { origin, idx, grab }) => {
+                    let mut p = (**origin).clone();
+                    note_ops::resize(&mut p, idx, (step + unit) as i32 - *grab as i32);
+                    Some((p, idx.clone()))
+                }
+                _ => None,
+            };
+            if let Some((p, idx)) = moved {
+                if p != *pattern {
+                    *pattern = p;
+                    frame.changed = true;
+                }
+                *sel = idx;
+                self.set_selection(uid, note_ops::values(pattern, sel));
+            }
+        }
+
+        let panel = self.view.panel(uid);
+        if resp.drag_stopped_by(primary) && !matches!(panel.drag, Some(LaneDrag::Velocity)) {
+            match panel.drag.take() {
+                Some(LaneDrag::Move { idx, .. } | LaneDrag::Resize { idx, .. }) => {
+                    frame.dropped = Some(idx);
+                }
+                Some(LaneDrag::Marquee { from, add }) => {
+                    if let Some(p) = pointer {
+                        let to = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
+                        let hits = note_ops::in_box(pattern, from.0, to.0, from.1, to.1);
+                        if !add {
+                            sel.clear();
+                        }
+                        sel.extend(hits);
+                        sel.sort_unstable();
+                        sel.dedup();
+                        self.set_selection(uid, note_ops::values(pattern, sel));
+                    }
+                }
+                Some(LaneDrag::Velocity) | None => {}
+            }
+            frame.finished = true;
+        }
     }
 
     /// The mouse wheel over a lane's grid: vertical scrolls the pitches of
@@ -681,7 +822,7 @@ impl SidAcidApp {
             );
         }
         if lresp.drag_started() {
-            self.view.panel(uid).poly_drag = Some(PolyDrag::Velocity);
+            self.view.panel(uid).drag = Some(LaneDrag::Velocity);
         }
         if (lresp.clicked() || lresp.dragged())
             && let Some(p) = lresp.interact_pointer_pos()
@@ -697,7 +838,7 @@ impl SidAcidApp {
             frame.finished |= lresp.clicked();
         }
         if lresp.drag_stopped() {
-            self.view.panel(uid).poly_drag = None;
+            self.view.panel(uid).drag = None;
             frame.finished = true;
         }
     }
@@ -728,30 +869,28 @@ impl SidAcidApp {
         }
     }
 
-    /// Commits one frame of the poly roll. On the frame a move/resize is
-    /// dropped (`dropped` = the note's index) same-pitch overlaps merge into
-    /// it first, and the frame counts as still dragging: `poly_drag` is
-    /// already cleared by then, but the drop's edits must merge into the
-    /// drag's undo step, not push a second one.
+    /// Commits one frame of a lane. On the frame a move/resize is dropped
+    /// (`dropped` = the dragged notes' indices) they settle against their
+    /// neighbours first (`note_ops::settle`) and become the selection, and
+    /// the frame counts as still dragging: `drag` is already cleared by
+    /// then, but the drop's edits must merge into the drag's undo step, not
+    /// push a second one.
     fn commit_poly_frame(
         &mut self,
         uid: MachineUid,
         slot: u8,
         mut pattern: NotePattern,
         mut changed: bool,
-        dropped: Option<usize>,
+        dropped: Option<Vec<usize>>,
         finished: bool,
     ) {
-        if let Some(index) = dropped {
+        let dragging = dropped.is_some() || self.view.panel(uid).drag.is_some();
+        if let Some(idx) = dropped {
             let before = pattern.clone();
-            if self.doc.project.synth(uid).is_some() {
-                make_mono(&mut pattern, index);
-            } else {
-                resolve_overlaps(&mut pattern, index);
-            }
+            let kept = note_ops::settle(&mut pattern, &idx, self.lane_kind(uid));
             changed |= pattern != before;
+            self.set_selection(uid, note_ops::values(&pattern, &kept));
         }
-        let dragging = dropped.is_some() || self.view.panel(uid).poly_drag.is_some();
         self.commit_poly(uid, slot, changed.then_some(pattern), dragging, finished);
     }
 
@@ -795,7 +934,7 @@ impl SidAcidApp {
         }
         let mut open = false;
         for panel in self.view.panels.values_mut() {
-            open |= panel.poly_drag.take().is_some();
+            open |= panel.drag.take().is_some();
         }
         if open {
             self.doc.end_gesture();
@@ -940,8 +1079,6 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_rack::*;
-    use crate::ui::key_entry::LaneKind;
-    use crate::ui::poly_edit::move_to;
     use acid_engine::project::Project;
 
     /// Runs one frame of KIT808's lane in a 1000x800 screen at `time`;
@@ -963,10 +1100,23 @@ mod tests {
         time: f64,
         events: Vec<egui::Event>,
     ) -> egui::Pos2 {
+        lane_frame_mods(app, ctx, uid, time, events, egui::Modifiers::NONE)
+    }
+
+    /// Like `lane_frame`, with `mods` held.
+    fn lane_frame_mods(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        uid: MachineUid,
+        time: f64,
+        events: Vec<egui::Event>,
+        mods: egui::Modifiers,
+    ) -> egui::Pos2 {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
             time: Some(time),
             events,
+            modifiers: mods,
             ..Default::default()
         };
         let mut origin = pos2(0.0, 0.0);
@@ -977,6 +1127,291 @@ mod tests {
             });
         });
         origin
+    }
+
+    /// Mouse gestures in one machine's lane, with egui's clock.
+    struct Mouse {
+        ctx: egui::Context,
+        uid: MachineUid,
+        time: f64,
+        origin: egui::Pos2,
+    }
+
+    impl Mouse {
+        /// Draws `uid`'s lane once (melodic lanes scrolled so `top` is the
+        /// top row) to find where it sits.
+        fn new(app: &mut SidAcidApp, uid: MachineUid, top: u8) -> Mouse {
+            if app.lane_kind(uid) != LaneKind::Drums {
+                app.view.panel(uid).lane_scroll_y = Some((127 - top) as f32 * ROW_H);
+            }
+            let ctx = egui::Context::default();
+            let origin = lane_frame(app, &ctx, uid, 0.0, vec![]);
+            Mouse {
+                ctx,
+                uid,
+                time: 0.0,
+                origin,
+            }
+        }
+
+        /// Screen position of `tick` (fractions allowed) in `pitch`'s row.
+        fn at(&self, app: &mut SidAcidApp, tick: f32, pitch: u8) -> egui::Pos2 {
+            let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+            let x = self.origin.x + app.lane_key_w() + tick * tw - app.view.dock.scroll_x;
+            let (row, row_h, scroll) = if app.lane_kind(self.uid) == LaneKind::Drums {
+                (7 - pitch as usize, DRUM_ROW_H, 0.0)
+            } else {
+                let scroll = app.view.panel(self.uid).lane_scroll_y.unwrap_or(0.0);
+                (127 - pitch as usize, ROW_H, scroll)
+            };
+            let y = self.origin.y + HEADER_H + row as f32 * row_h - scroll + row_h / 2.0;
+            pos2(x, y)
+        }
+
+        fn frame(&mut self, app: &mut SidAcidApp, events: Vec<egui::Event>, mods: egui::Modifiers) {
+            // Well apart, so no two clicks make a double click.
+            self.time += 0.5;
+            lane_frame_mods(app, &self.ctx, self.uid, self.time, events, mods);
+        }
+
+        fn button(
+            at: egui::Pos2,
+            button: egui::PointerButton,
+            pressed: bool,
+            modifiers: egui::Modifiers,
+        ) -> egui::Event {
+            egui::Event::PointerButton {
+                pos: at,
+                button,
+                pressed,
+                modifiers,
+            }
+        }
+
+        fn click_with(
+            &mut self,
+            app: &mut SidAcidApp,
+            at: egui::Pos2,
+            button: egui::PointerButton,
+            mods: egui::Modifiers,
+        ) {
+            self.frame(app, vec![egui::Event::PointerMoved(at)], mods);
+            self.frame(app, vec![Self::button(at, button, true, mods)], mods);
+            self.frame(app, vec![Self::button(at, button, false, mods)], mods);
+            self.frame(app, vec![], mods);
+        }
+
+        fn click(&mut self, app: &mut SidAcidApp, at: egui::Pos2, mods: egui::Modifiers) {
+            self.click_with(app, at, egui::PointerButton::Primary, mods);
+        }
+
+        fn drag(
+            &mut self,
+            app: &mut SidAcidApp,
+            from: egui::Pos2,
+            to: egui::Pos2,
+            mods: egui::Modifiers,
+        ) {
+            let primary = egui::PointerButton::Primary;
+            self.frame(app, vec![egui::Event::PointerMoved(from)], mods);
+            self.frame(app, vec![Self::button(from, primary, true, mods)], mods);
+            for k in 1..=4 {
+                let p = from + (to - from) * (k as f32 / 4.0);
+                self.frame(app, vec![egui::Event::PointerMoved(p)], mods);
+            }
+            self.frame(app, vec![Self::button(to, primary, false, mods)], mods);
+            self.frame(app, vec![], mods);
+        }
+    }
+
+    /// An app whose `uid` pattern 0 holds only `notes` (start, len, pitch).
+    fn app_with(uid: MachineUid, notes: &[(u16, u16, u8)]) -> SidAcidApp {
+        let mut doc = Document::new(Project::default());
+        doc.project.roll_mut(uid, 0).unwrap().notes = notes
+            .iter()
+            .map(|&(s, l, p)| acid_engine::project::Note::new(s, l, p, 100))
+            .collect();
+        SidAcidApp::headless(doc)
+    }
+
+    fn notes_of(app: &SidAcidApp, uid: MachineUid) -> Vec<(u16, u16, u8)> {
+        let roll = app.doc.project.roll(uid, 0).unwrap();
+        roll.notes
+            .iter()
+            .map(|n| (n.start, n.len, n.pitch))
+            .collect()
+    }
+
+    const NONE: egui::Modifiers = egui::Modifiers::NONE;
+
+    #[test]
+    fn clicking_a_note_selects_it_and_shift_click_toggles() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (a, b) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 9.5, 62));
+        m.click(&mut app, a, NONE);
+        assert_eq!(app.selection(FM), [0]);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        assert_eq!(app.selection(FM), [0, 1]);
+        m.click(&mut app, a, egui::Modifiers::SHIFT);
+        assert_eq!(app.selection(FM), [1]);
+        // Shift-click on empty space adds nothing and keeps the selection.
+        let empty = m.at(&mut app, 20.5, 61);
+        m.click(&mut app, empty, egui::Modifiers::SHIFT);
+        assert_eq!(app.selection(FM), [1]);
+        m.click(&mut app, a, NONE);
+        assert_eq!(app.selection(FM), [0]);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 62)]);
+        assert!(!app.doc.is_dirty(), "selecting edits nothing");
+        assert!(!app.doc.can_undo());
+        assert_eq!(app.view.focus, Some(FM));
+    }
+
+    #[test]
+    fn clicking_empty_space_adds_a_selected_note_one_snap_long() {
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let at = m.at(&mut app, 9.5, 61);
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 61)]);
+        assert_eq!(app.selection(FM), [1]);
+        app.doc.undo();
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60)], "one undo step");
+    }
+
+    #[test]
+    fn dragging_on_empty_space_box_selects() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62), (24, 4, 60)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (from, to) = (m.at(&mut app, 1.5, 63), m.at(&mut app, 12.5, 59));
+        m.drag(&mut app, from, to, NONE);
+        assert_eq!(app.selection(FM), [0, 1]);
+        // Shift adds the box to the selection; without it the box replaces it.
+        let (from, to) = (m.at(&mut app, 22.5, 61), m.at(&mut app, 30.5, 59));
+        m.drag(&mut app, from, to, egui::Modifiers::SHIFT);
+        assert_eq!(app.selection(FM), [0, 1, 2]);
+        m.drag(&mut app, from, to, NONE);
+        assert_eq!(app.selection(FM), [2]);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 62), (24, 4, 60)]);
+        assert!(!app.doc.is_dirty(), "a box edits nothing");
+        assert!(!app.doc.can_undo());
+    }
+
+    #[test]
+    fn dragging_the_selection_moves_every_selected_note_in_one_undo_step() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62), (24, 4, 50)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (a, b) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 9.5, 62));
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        // Two steps right (snapped) and one semitone up.
+        let to = m.at(&mut app, 10.5, 61);
+        m.drag(&mut app, a, to, NONE);
+        assert_eq!(notes_of(&app, FM), [(8, 4, 61), (16, 4, 63), (24, 4, 50)]);
+        assert_eq!(app.selection(FM), [0, 1], "the moved notes stay selected");
+        assert!(app.view.panel(FM).drag.is_none());
+        app.doc.undo();
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 60), (8, 4, 62), (24, 4, 50)],
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn alt_dragging_moves_by_single_ticks() {
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (from, to) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 4.5, 60));
+        m.drag(&mut app, from, to, egui::Modifiers::ALT);
+        assert_eq!(notes_of(&app, FM), [(3, 4, 60)]);
+    }
+
+    #[test]
+    fn ctrl_dragging_leaves_the_originals_and_moves_copies() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let a = m.at(&mut app, 1.5, 60);
+        m.click(&mut app, a, NONE);
+        let to = m.at(&mut app, 17.5, 60);
+        m.drag(&mut app, a, to, egui::Modifiers::CTRL);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 62), (16, 4, 60)]);
+        assert_eq!(app.selection(FM), [2], "the copy is selected");
+        app.doc.undo();
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 60), (8, 4, 62)],
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn resizing_one_selected_note_resizes_them_all() {
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (a, b) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 9.5, 62));
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        // From A's right edge to the step holding tick 9: A ends at 12.
+        let (edge, to) = (m.at(&mut app, 3.7, 60), m.at(&mut app, 9.5, 60));
+        m.drag(&mut app, edge, to, NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 12, 60), (8, 12, 62)]);
+        assert_eq!(app.selection(FM), [0, 1]);
+        app.doc.undo();
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 60), (8, 4, 62)],
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_selected_note_deletes_the_selection() {
+        let secondary = egui::PointerButton::Secondary;
+        let mut app = app_with(FM, &[(0, 4, 60), (8, 4, 62), (24, 4, 52)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (a, b, c) = (
+            m.at(&mut app, 1.5, 60),
+            m.at(&mut app, 9.5, 62),
+            m.at(&mut app, 25.5, 52),
+        );
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        // Another note: only it goes; the selection stays.
+        m.click_with(&mut app, c, secondary, NONE);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 62)]);
+        assert_eq!(app.selection(FM), [0, 1]);
+        app.doc.undo();
+        assert_eq!(notes_of(&app, FM).len(), 3);
+        // A selected note: the whole selection goes, in one undo step.
+        m.click_with(&mut app, a, secondary, NONE);
+        assert_eq!(notes_of(&app, FM), [(24, 4, 52)]);
+        assert!(app.selection(FM).is_empty());
+        app.doc.undo();
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60), (8, 4, 62), (24, 4, 52)]);
+    }
+
+    #[test]
+    fn moving_onto_an_acid_note_keeps_the_moved_note() {
+        let mut app = app_with(SYNTH1, &[(0, 8, 36), (16, 4, 40)]);
+        let mut m = Mouse::new(&mut app, SYNTH1, 44);
+        // Drag the note at 16 to start at tick 4, inside the first note.
+        let (from, to) = (m.at(&mut app, 17.5, 40), m.at(&mut app, 5.5, 40));
+        m.drag(&mut app, from, to, NONE);
+        assert_eq!(notes_of(&app, SYNTH1), [(0, 4, 36), (4, 4, 40)], "cut");
+        assert_eq!(app.selection(SYNTH1), [1]);
+        app.doc.undo();
+        assert_eq!(notes_of(&app, SYNTH1), [(0, 8, 36), (16, 4, 40)]);
+    }
+
+    #[test]
+    fn selected_notes_of_another_pattern_are_no_selection() {
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        let n = app.doc.project.roll(FM, 0).unwrap().notes[0];
+        app.set_selection(FM, vec![n]);
+        assert_eq!(app.selection(FM), [0]);
+        app.view.panel(FM).sel_slot = 1;
+        assert!(app.selection(FM).is_empty());
     }
 
     #[test]
@@ -1295,14 +1730,17 @@ mod tests {
     fn a_stale_audition_and_drag_are_released_once_the_pointer_is_up() {
         let mut app = fm_app();
         app.audition(FM, Some(60));
-        app.view.panel(FM).poly_drag = Some(PolyDrag::Resize { index: 0 });
+        app.view.panel(FM).drag = Some(LaneDrag::Marquee {
+            from: (0, 60),
+            add: false,
+        });
         app.pending.clear();
         app.release_stale_poly_input(true);
         assert_eq!(app.view.audition, Some((FM, 60)), "pointer still down");
-        assert!(app.view.panel(FM).poly_drag.is_some());
+        assert!(app.view.panel(FM).drag.is_some());
         app.release_stale_poly_input(false);
         assert_eq!(app.view.audition, None);
-        assert!(app.view.panels.values().all(|p| p.poly_drag.is_none()));
+        assert!(app.view.panels.values().all(|p| p.drag.is_none()));
         assert_eq!(
             app.pending.iter().map(cmd).collect::<Vec<_>>(),
             [(false, 5, 60)]
@@ -1313,14 +1751,19 @@ mod tests {
     fn a_collapsed_lane_frame_releases_a_held_key() {
         let mut app = fm_app();
         app.audition(FM, Some(60));
-        app.view.panel(FM).poly_drag = Some(PolyDrag::Resize { index: 0 });
+        let origin = Box::new(app.doc.project.fm(FM).unwrap().patterns[0].clone());
+        app.view.panel(FM).drag = Some(LaneDrag::Resize {
+            origin,
+            idx: vec![0],
+            grab: 4,
+        });
         app.doc.apply(Edit::Bpm(100.0), true);
         // The FM lane collapses: its grid isn't drawn, so only the
         // frame-level check can see that the pointer is up.
         app.doc.project.machine_mut(FM).unwrap().lane.collapsed = true;
         crate::ui::run_frames(&mut app, 1);
         assert_eq!(app.view.audition, None);
-        assert!(app.view.panels.values().all(|p| p.poly_drag.is_none()));
+        assert!(app.view.panels.values().all(|p| p.drag.is_none()));
         let offs: Vec<_> = app
             .flushed
             .iter()
@@ -1343,16 +1786,22 @@ mod tests {
         app.commit_poly(FM, 0, Some(p.clone()), false, true);
         let before = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         // The drag: move onto the first note (a live drag merges).
-        app.view.panel(FM).poly_drag = Some(PolyDrag::Move { index: i, grab: 0 });
-        move_to(&mut p, i, 2, 60);
+        app.view.panel(FM).drag = Some(LaneDrag::Move {
+            origin: Box::new(p.clone()),
+            idx: vec![i],
+            grab: (8, 60),
+        });
+        note_ops::shift(&mut p, &[i], -6, 0, LaneKind::Poly);
         app.commit_poly_frame(FM, 0, p.clone(), true, None, false);
         // The drop frame: the drag state is already cleared.
-        app.view.panel(FM).poly_drag = None;
-        app.commit_poly_frame(FM, 0, p, false, Some(i), true);
+        app.view.panel(FM).drag = None;
+        app.commit_poly_frame(FM, 0, p, false, Some(vec![i]), true);
+        let merged = app.doc.project.fm(FM).unwrap().patterns[0].clone();
+        assert_eq!(merged.notes.len(), 1, "merged");
         assert_eq!(
-            app.doc.project.fm(FM).unwrap().patterns[0].notes.len(),
-            1,
-            "merged"
+            app.selection(FM),
+            [0],
+            "the merged note is selected: {merged:?}"
         );
         app.doc.undo();
         assert_eq!(
@@ -1363,15 +1812,15 @@ mod tests {
     }
 
     #[test]
-    fn poly_drag_is_one_undo_step() {
+    fn a_drag_is_one_undo_step() {
         let mut app = fm_app();
         let mut p = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         add(&mut p, 0, 4, 60, 100);
         app.commit_poly(FM, 0, Some(p.clone()), false, true);
         let before = app.doc.project.fm(FM).unwrap().patterns[0].clone();
         assert_eq!(before, p);
-        for start in [4, 8, 12] {
-            move_to(&mut p, 0, start, 62);
+        for _ in 0..3 {
+            note_ops::shift(&mut p, &[0], 4, 0, LaneKind::Poly);
             app.commit_poly(FM, 0, Some(p.clone()), true, false);
         }
         app.commit_poly(FM, 0, None, false, true);

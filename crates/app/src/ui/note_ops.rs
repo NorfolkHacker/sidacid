@@ -8,6 +8,7 @@ use acid_engine::project::{MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP};
 
 /// Why a paste was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // used by the ruler range and clipboard (phase 3, tasks 3–4)
 pub enum PasteError {
     TooMany,
     WrongKind,
@@ -60,6 +61,7 @@ pub fn in_box(p: &NotePattern, t0: u16, t1: u16, lo: u8, hi: u8) -> Vec<usize> {
 }
 
 /// Notes starting in `[t0, t1)`.
+#[allow(dead_code)] // used by the ruler range and clipboard (phase 3, tasks 3–4)
 pub fn in_range(p: &NotePattern, t0: u16, t1: u16) -> Vec<usize> {
     (0..p.notes.len())
         .filter(|&i| (t0..t1).contains(&p.notes[i].start))
@@ -115,6 +117,7 @@ pub fn delete(p: &mut NotePattern, idx: &[usize]) {
 }
 
 /// The notes at `idx` with starts relative to `origin` (<= every start).
+#[allow(dead_code)] // used by the ruler range and clipboard (phase 3, tasks 3–4)
 pub fn copy(p: &NotePattern, idx: &[usize], origin: u16) -> Vec<Note> {
     values(p, idx)
         .into_iter()
@@ -129,6 +132,7 @@ pub fn copy(p: &NotePattern, idx: &[usize], origin: u16) -> Vec<Note> {
 /// limit are dropped), settles them against their neighbours and returns
 /// their indices. Refuses, changing nothing, when the pattern would exceed
 /// `MAX_NOTES` or a drum lane would get a pitch of 8 or more.
+#[allow(dead_code)] // used by the ruler range and clipboard (phase 3, tasks 3–4)
 pub fn paste(
     p: &mut NotePattern,
     notes: &[Note],
@@ -159,6 +163,7 @@ pub fn paste(
 
 /// Pastes a copy of the notes at `idx` right after them: the offset is
 /// their span (max end - min start) rounded up to a multiple of `snap_ticks`.
+#[allow(dead_code)] // used by the ruler range and clipboard (phase 3, tasks 3–4)
 pub fn duplicate(
     p: &mut NotePattern,
     idx: &[usize],
