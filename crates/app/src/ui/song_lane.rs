@@ -11,8 +11,9 @@
 //! selection's lengths; right-click deletes the selection, or the block
 //! under the pointer when it is not selected. Double-click empty space to
 //! place the machine's selected pattern at that bar, or a block to open
-//! its pattern in Pattern mode. Blocks never overlap: one that lands on
-//! taken steps goes to the nearest free spot.
+//! its pattern in Pattern mode. Blocks never overlap: a placed block that
+//! lands on taken steps goes to the nearest free spot, and a moved or
+//! copied selection goes together to the nearest offset where it fits.
 
 use super::lane_geom::{ZOOMS, tick_w};
 use super::song_ops::{self, BAR};
@@ -499,7 +500,11 @@ impl SidAcidApp {
                     }
                     self.set_block_selection(uid, blocks, &sel);
                     let end = self.with_lens(|lens| song::block_end(&blocks[i], uid, lens));
-                    if (geom.x_of(end) - p.x).abs() <= EDGE_PX {
+                    // A block too narrow for an edge and a middle moves;
+                    // a narrowish one keeps most of itself for moving.
+                    let w = geom.x_of(end) - geom.x_of(blocks[i].start);
+                    let edge = EDGE_PX.min(w / 4.0);
+                    if w >= 2.0 * EDGE_PX && (geom.x_of(end) - p.x).abs() <= edge {
                         SongDrag::Resize {
                             origin: blocks.to_vec(),
                             idx: sel.clone(),
@@ -524,6 +529,7 @@ impl SidAcidApp {
         {
             let step = geom.step_at(p.x);
             let fine = mods.alt;
+            let unit = if fine { 1 } else { BAR };
             let moved = match self
                 .view
                 .panels
@@ -540,11 +546,11 @@ impl SidAcidApp {
                     let dt = snap_bar(step, fine) as i64 - snap_bar(*grab, fine) as i64;
                     let new = self.with_lens(|lens| {
                         if !*copy {
-                            song_ops::shift(&mut lane, uid, idx, dt, lens)
+                            song_ops::shift(&mut lane, uid, idx, dt, unit, lens)
                         } else if dt == 0 {
                             Some(idx.clone())
                         } else {
-                            song_ops::shift_copies(&mut lane, uid, idx, dt, lens)
+                            song_ops::shift_copies(&mut lane, uid, idx, dt, unit, lens)
                         }
                     });
                     // A copy that fits nowhere: stay where the last fit was.
@@ -571,7 +577,11 @@ impl SidAcidApp {
 
         if resp.drag_stopped_by(primary) {
             match self.view.panel(uid).song_drag.take() {
-                Some(SongDrag::Move { .. } | SongDrag::Resize { .. }) => {}
+                Some(SongDrag::Move { .. } | SongDrag::Resize { .. }) => {
+                    // Dropped back where it began: no undo step, not dirty.
+                    self.doc.end_gesture();
+                    self.doc.drop_no_op_song_step();
+                }
                 Some(SongDrag::Marquee { from, add }) => {
                     if let Some(p) = pointer {
                         let to = geom.step_at(p.x);
@@ -835,6 +845,62 @@ mod tests {
         assert_eq!(app.doc.undo_depth(), 1);
         app.undo();
         assert_eq!(lane(&app), [(0, 0, None), (16, 1, None)]);
+    }
+
+    #[test]
+    fn a_two_block_move_onto_taken_space_keeps_its_spacing() {
+        let mut app = app_with(&[(0, 0), (16, 1), (32, 2)]);
+        let mut m = Mouse::new(&mut app, SYNTH1);
+        let (a, b) = (m.at(&app, 4.5), m.at(&app, 20.5));
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        // Two bars on would sit on the block at 32: the pair goes one bar
+        // further, together, with nothing taken in between.
+        let to = m.at(&app, 36.5);
+        m.drag(&mut app, a, to, NONE);
+        assert_eq!(lane(&app), [(32, 2, None), (48, 0, None), (64, 1, None)]);
+        assert_eq!(selected(&app), [48, 64]);
+        // One bar on: no offset nearer than none at all fits.
+        let mut app = app_with(&[(0, 0), (16, 1), (32, 2)]);
+        let mut m = Mouse::new(&mut app, SYNTH1);
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        let to = m.at(&app, 20.5);
+        m.drag(&mut app, a, to, NONE);
+        assert_eq!(lane(&app), [(0, 0, None), (16, 1, None), (32, 2, None)]);
+        assert!(!app.doc.is_dirty(), "nothing moved");
+    }
+
+    #[test]
+    fn a_drag_dropped_where_it_began_leaves_no_undo_step() {
+        let mut app = app_with(&[(0, 0)]);
+        let mut m = Mouse::new(&mut app, SYNTH1);
+        let primary = egui::PointerButton::Primary;
+        let (a, far) = (m.at(&app, 4.5), m.at(&app, 40.5));
+        m.frame(&mut app, vec![egui::Event::PointerMoved(a)], NONE);
+        m.frame(&mut app, vec![Mouse::button(a, primary, true, NONE)], NONE);
+        m.frame(&mut app, vec![egui::Event::PointerMoved(far)], NONE);
+        assert_eq!(lane(&app), [(32, 0, None)], "moved mid-drag");
+        m.frame(&mut app, vec![egui::Event::PointerMoved(a)], NONE);
+        m.frame(&mut app, vec![Mouse::button(a, primary, false, NONE)], NONE);
+        m.frame(&mut app, vec![], NONE);
+        assert_eq!(lane(&app), [(0, 0, None)]);
+        assert_eq!(app.doc.undo_depth(), 0, "no step");
+        assert!(!app.doc.is_dirty());
+    }
+
+    #[test]
+    fn grabbing_a_narrow_block_moves_it() {
+        let mut app = app_with(&[]);
+        app.doc.project.song.lane_mut(SYNTH1).push(Block {
+            len: Some(1),
+            ..Block::new(0, PatternRef(0))
+        });
+        let mut m = Mouse::new(&mut app, SYNTH1);
+        // 11 px wide: a press 4 px left of its right edge moves it.
+        let (from, to) = (m.at(&app, 0.6), m.at(&app, 16.6));
+        m.drag(&mut app, from, to, NONE);
+        assert_eq!(lane(&app), [(16, 0, Some(1))]);
     }
 
     #[test]

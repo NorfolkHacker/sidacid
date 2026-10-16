@@ -375,6 +375,16 @@ impl Document {
         self.undo_byte_budget = bytes;
     }
 
+    /// Drops the newest undo step when it is a song edit that would
+    /// restore the song as it is (a drag dropped back where it began).
+    pub fn drop_no_op_song_step(&mut self) {
+        if matches!(self.undo.last(), Some(Step { edit: Edit::Song { song }, .. })
+            if **song == self.project.song)
+        {
+            self.undo.pop();
+        }
+    }
+
     /// Whether `inverse` (just returned by `apply_raw`) restores what is
     /// already there: the edit changed nothing. Only cheap targets are
     /// compared; the rest always count as a change.

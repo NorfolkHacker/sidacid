@@ -499,7 +499,8 @@ impl SidAcidApp {
     /// used, even if it only moved the cursor.
     pub(crate) fn dock_key(&mut self, key: egui::Key, mods: egui::Modifiers) -> bool {
         use super::key_entry::{apply_entry, entry_key};
-        if !self.view.dock.keyboard {
+        // Song mode's lanes hold blocks: no note keys there.
+        if !self.view.dock.keyboard || self.view.mode != Mode::Pattern {
             return false;
         }
         let Some(uid) = self.focused() else {
@@ -1393,6 +1394,53 @@ mod tests {
             .collect();
         assert_eq!(starts, [16], "the block starting in the range");
         assert_eq!(app.doc.project, before, "no edit");
+    }
+
+    #[test]
+    fn note_keys_do_nothing_in_song_mode() {
+        use crate::test_rack::{FM, SYNTH1};
+        use acid_engine::project::Note;
+        let mut app = song_app();
+        for uid in [FM, SYNTH1] {
+            let p = app.doc.project.roll_mut(uid, 0).unwrap();
+            p.length = 64;
+            p.notes = vec![Note::new(16, 4, 60, 100), Note::new(40, 4, 62, 100)];
+        }
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let ruler = app.view.dock.ruler.unwrap();
+        let left = ruler.left() + app.lane_key_w();
+        let sw = song_lane::step_w(app.view.dock.zoom);
+        // A range of bars 1..3 (steps 0..48) on the ruler, dock focused.
+        let from = pos2(left + 4.5 * sw, ruler.top() + 4.0);
+        drag_by(&mut app, &ctx, from, vec2(32.0 * sw, 0.0), 4, 1.0);
+        assert_eq!(app.view.dock.range, Some((0, 48)));
+        app.view.dock.keyboard = true;
+        app.view.focus = Some(FM);
+        let before = app.doc.project.clone();
+        let cmd = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        use egui::Key;
+        for (t, ev) in [
+            cmd(Key::X),
+            egui::Event::Cut,
+            cmd(Key::D),
+            cmd(Key::V),
+            key_event(Key::Z, true, false, false),
+            key_event(Key::Delete, true, false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            frame(&mut app, &ctx, 3.0 + t as f64, vec![ev]);
+        }
+        assert_eq!(app.doc.project, before, "no pattern changed");
+        assert!(app.view.note_clip.is_none());
     }
 
     #[test]

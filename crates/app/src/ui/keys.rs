@@ -150,6 +150,9 @@ impl SidAcidApp {
         let (mut copied, mut pasted, mut cut) = (false, false, false);
         // With the dock focused the clipboard keys act on its notes.
         let notes = self.view.dock.keyboard;
+        // Song mode's dock has blocks, not notes: its clipboard keys do
+        // nothing (the ruler range there is in steps, not ticks).
+        let song_dock = notes && self.view.mode == acid_engine::sequencer::Mode::Song;
         for s in pressed {
             // Backends may send both a key and a clipboard event for one press.
             match s {
@@ -180,6 +183,12 @@ impl SidAcidApp {
                 Shortcut::Redo => {
                     self.redo();
                 }
+                Shortcut::Copy
+                | Shortcut::Paste
+                | Shortcut::Cut
+                | Shortcut::Duplicate
+                | Shortcut::SelectAll
+                    if song_dock => {}
                 Shortcut::Copy if notes => self.copy_notes(false),
                 Shortcut::Paste if notes => self.paste_notes(),
                 Shortcut::Cut if notes => self.copy_notes(true),
