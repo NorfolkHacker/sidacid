@@ -577,12 +577,16 @@ impl Sequencer {
     }
 
     /// Every track onto its block at the song position (a step start);
-    /// `cut` closes open gates as a block line does (the loop jump).
+    /// `cut` closes open gates as a block line does and starts every
+    /// track's pass afresh (the loop jump).
     fn seek_all(&mut self, song: &CompiledSong, banks: Banks<'_>, cut: bool) {
         let next = self.song_step as u64 * SUBS as u64;
         for pos in 0..MAX_MACHINES {
             if cut {
-                cut_gate(&mut self.tracks[pos]);
+                let t = &mut self.tracks[pos];
+                cut_gate(t);
+                // Never the block it plays, so the seek resets its pass.
+                t.block = None;
             }
             self.seek_track(pos, next, song, banks);
         }
@@ -591,7 +595,10 @@ impl Sequencer {
     /// Puts the track at `pos` where it would be at song tick `next` (the
     /// next tick to run, 4 per step): on the block covering it, at that
     /// tick's place in its pattern (looping inside a longer block), or
-    /// silent in a gap.
+    /// silent in a gap. Landing on the block, pattern and position the
+    /// track already plays (a resync after an edit elsewhere) keeps its
+    /// loop count, the notes played this pass and the pending ratchet
+    /// sub-hits, so ringing notes and ratchets carry on.
     fn seek_track(&mut self, pos: usize, next: u64, song: &CompiledSong, banks: Banks<'_>) {
         let step = (next / SUBS as u64).min(u32::MAX as u64) as u32;
         let t = &mut self.tracks[pos];
@@ -604,16 +611,22 @@ impl Sequencer {
             return;
         };
         let b = song.lane(pos)[i];
+        let was = (t.block, t.block_start, t.pattern, t.pos);
+        let kept = (t.trig, t.played, t.rat, t.rat_n);
         take_block(t, pos, i, &b, banks);
         let len = banks.length(pos, t.pattern).unwrap_or(1) as u64;
         let ticks = len * TICKS_PER_STEP as u64;
         let rel = next - b.start as u64 * SUBS as u64;
         t.pos = (rel % ticks) as u16;
-        // The passes straight playback from the block start would count.
-        t.trig.loops = (rel / ticks).min(u32::MAX as u64) as u32;
         // As `advance` leaves it: the step of the last tick run.
         let last = rel.checked_sub(1).map_or(0, |k| k % ticks);
         t.step = (last / TICKS_PER_STEP as u64) as usize;
+        if was == (Some(i), b.start, t.pattern, t.pos) {
+            (t.trig, t.played, t.rat, t.rat_n) = kept;
+            return;
+        }
+        // The passes straight playback from the block start would count.
+        t.trig.loops = (rel / ticks).min(u32::MAX as u64) as u32;
     }
 
     /// The song tick about to run. The step counter advances on quarter
@@ -823,8 +836,10 @@ impl Sequencer {
         let roll = &pat.roll;
         let ticks = roll.ticks();
         if t.pos >= ticks {
+            // Shrunk live past the position: wrap, counting the pass.
             t.pos = 0;
             t.rat_n = 0;
+            t.trig.loops = t.trig.loops.wrapping_add(1);
         }
         let p = t.pos;
         if t.silent {
@@ -948,8 +963,10 @@ impl Sequencer {
         let roll = &pat.roll;
         let ticks = roll.ticks();
         if t.pos >= ticks {
+            // Shrunk live past the position: wrap, counting the pass.
             t.pos = 0;
             t.rat_n = 0;
+            t.trig.loops = t.trig.loops.wrapping_add(1);
         }
         if t.silent {
             t.rat_n = 0;
@@ -1006,8 +1023,10 @@ impl Sequencer {
             };
             let ticks = pat.ticks();
             if t.pos >= ticks {
+                // Shrunk live past the position: wrap, counting the pass.
                 t.pos = 0;
                 t.rat_n = 0;
+                t.trig.loops = t.trig.loops.wrapping_add(1);
             }
             let p = t.pos;
             if p == 0 {
@@ -2968,5 +2987,115 @@ mod tests {
         assert!((16..=48).contains(&a.len()), "{}", a.len());
         assert_eq!(a, go(0));
         assert_ne!(a, go(1));
+    }
+
+    #[test]
+    fn a_resync_keeps_a_ringing_poly_note() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(0, 32, 60));
+        f.song
+            .lane_mut(MachineUid(5))
+            .push(Block::new(0, PatternRef(0)));
+        f.song.end = Some(16);
+        let mut s = song_seq();
+        s.play();
+        assert_eq!(fm(&run_ticks(&f, &mut s, 8)), [(0, true, 60)]);
+        // An edit elsewhere in the song: the track stays where it is.
+        s.resync();
+        assert_eq!(fm(&run_ticks(&f, &mut s, 32)), [(24, false, 60)]);
+    }
+
+    #[test]
+    fn a_resync_keeps_a_pending_drum_ratchet() {
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(ratcheted(0, 16, 1, 4));
+        f.song
+            .lane_mut(MachineUid(3))
+            .push(Block::new(0, PatternRef(0)));
+        f.song.end = Some(16);
+        let mut s = song_seq();
+        s.play();
+        assert_eq!(kit(&run_ticks(&f, &mut s, 2)), [(0, 1)]);
+        s.resync();
+        assert_eq!(kit(&run_ticks(&f, &mut s, 14)), [(2, 1), (6, 1), (10, 1)]);
+    }
+
+    #[test]
+    fn a_resync_onto_another_block_or_pattern_starts_afresh() {
+        let fresh = |edit: fn(&mut Fixture)| {
+            let mut f = Fixture::new();
+            f.notes[0][0].notes.push(note(0, 32, 60));
+            f.notes[0][1].notes.push(note(0, 32, 60));
+            f.song
+                .lane_mut(MachineUid(5))
+                .push(Block::new(0, PatternRef(0)));
+            f.song.end = Some(16);
+            let mut s = song_seq();
+            s.play();
+            let _ = run_ticks(&f, &mut s, 8);
+            edit(&mut f);
+            s.resync();
+            fm(&run_ticks(&f, &mut s, 32))
+        };
+        // The same notes on another pattern: a real change, so the note
+        // ringing from the old pass is let go.
+        assert_eq!(
+            fresh(|f| f.block(5, 0).pattern = PatternRef(1)),
+            [(0, false, 60)]
+        );
+        // Another block from step 1 on.
+        assert_eq!(
+            fresh(|f| {
+                f.block(5, 0).len = Some(1);
+                f.song
+                    .lane_mut(MachineUid(5))
+                    .push(Block::new(1, PatternRef(0)));
+            }),
+            [(0, false, 60)]
+        );
+    }
+
+    #[test]
+    fn a_loop_jump_still_starts_the_pass_afresh() {
+        // A two-step loop over one block of a two-step pattern: each jump
+        // lands where the pass already is, yet counts from the block start.
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.length = 2;
+        f.drums[0][0].roll.notes.push(cond(0, 0, Cond::Ratio(2, 2)));
+        f.song.lane_mut(MachineUid(3)).push(Block {
+            len: Some(8),
+            ..Block::new(0, PatternRef(0))
+        });
+        f.song.end = Some(8);
+        f.song.loop_range = Some((2, 4));
+        let mut s = song_seq();
+        s.play();
+        assert_eq!(kit(&run_ticks(&f, &mut s, 32)), [(8, 0), (16, 0), (24, 0)]);
+    }
+
+    #[test]
+    fn a_live_shrink_wrap_counts_a_pass() {
+        // Four steps, shrunk to two at tick 10: the wrap is pass 2.
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.push(cond(0, 0, Cond::Ratio(2, 2)));
+        f.notes[0][0].notes.push(Note {
+            cond: Cond::Ratio(2, 2),
+            ..note(0, 2, 60)
+        });
+        f.synths[0][0].roll.notes.push(Note {
+            cond: Cond::Ratio(2, 2),
+            ..note(0, 2, 48)
+        });
+        let mut s = new_seq();
+        s.play();
+        let ev = run_ticks(&f, &mut s, 10);
+        assert!(kit(&ev).is_empty() && fm(&ev).is_empty() && acid(&ev).is_empty());
+        f.drums[0][0].roll.length = 2;
+        f.notes[0][0].length = 2;
+        f.synths[0][0].roll.length = 2;
+        let ev = run_ticks(&f, &mut s, 1);
+        assert_eq!(kit(&ev), [(0, 0)]);
+        assert_eq!(fm(&ev), [(0, true, 60)]);
+        assert_eq!(acid(&ev), [(0, 'N')]);
     }
 }
