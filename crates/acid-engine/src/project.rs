@@ -598,6 +598,13 @@ pub struct Project {
     /// The project's key: root, scale and snap.
     #[serde(default, skip_serializing_if = "is_default_key")]
     pub key: Key,
+    /// Seed of the chance rolls (see `trig`); "Reroll" changes it.
+    #[serde(default, skip_serializing_if = "is_zero_seed")]
+    pub seed: u32,
+}
+
+fn is_zero_seed(s: &u32) -> bool {
+    *s == 0
 }
 
 fn is_default_key(k: &Key) -> bool {
@@ -622,6 +629,7 @@ impl Default for Project {
                 .collect(),
             song: Song::default(),
             key: Key::default(),
+            seed: 0,
         }
     }
 }

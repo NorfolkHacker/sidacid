@@ -25,6 +25,9 @@ pub mod sequencer;
 pub mod song;
 pub mod steps;
 pub mod synth;
+// Used by the sequencer (phase 6, task 2).
+#[allow(dead_code)]
+pub mod trig;
 pub mod va;
 
 #[cfg(test)]

@@ -430,6 +430,7 @@ impl ProjectV5 {
             globals: self.globals,
             song,
             key: Default::default(),
+            seed: 0,
         }
     }
 }
