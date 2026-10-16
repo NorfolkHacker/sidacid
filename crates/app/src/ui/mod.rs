@@ -1748,6 +1748,25 @@ mod tests {
     }
 
     #[test]
+    fn a_new_host_clears_the_dock_range_and_lane_selections_of_song_mode() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.set_mode(acid_engine::sequencer::Mode::Song);
+        app.view.dock.range = Some((0, 48));
+        app.view.dock.range_from = Some(0);
+        let note = app.doc.project.roll(SYNTH1, 0).unwrap().notes[0];
+        app.view.panel(SYNTH1).selected = vec![note];
+        app.reset_transport_view();
+        assert_eq!(app.view.mode, acid_engine::sequencer::Mode::Pattern);
+        assert_eq!(app.view.dock.range, None);
+        assert_eq!(app.view.dock.range_from, None);
+        assert!(app.view.panel(SYNTH1).selected.is_empty());
+        // Already in Pattern mode: a reset keeps them.
+        app.view.dock.range = Some((0, 48));
+        app.reset_transport_view();
+        assert_eq!(app.view.dock.range, Some((0, 48)));
+    }
+
+    #[test]
     fn a_refused_pattern_edit_says_why() {
         use acid_engine::project::{Block, PatternRef};
         use acid_engine::song::MAX_SONG_STEPS;

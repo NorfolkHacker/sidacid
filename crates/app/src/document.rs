@@ -457,7 +457,10 @@ impl Document {
         let Some(step) = self.undo.pop() else {
             return Vec::new();
         };
+        let untaken = self.refusal.take();
         let inverse = self.apply_raw(step.edit);
+        debug_assert!(self.refusal.is_none(), "history steps always fit");
+        self.refusal = untaken;
         let cmds = self.commands_for(&inverse);
         self.redo.push(Step {
             edit: inverse,
@@ -472,7 +475,10 @@ impl Document {
         let Some(step) = self.redo.pop() else {
             return Vec::new();
         };
+        let untaken = self.refusal.take();
         let inverse = self.apply_raw(step.edit);
+        debug_assert!(self.refusal.is_none(), "history steps always fit");
+        self.refusal = untaken;
         let cmds = self.commands_for(&inverse);
         self.undo.push(Step {
             edit: inverse,
@@ -799,9 +805,19 @@ impl Document {
                 uid,
                 name: std::mem::replace(&mut p.machine_mut(uid).expect(NO_MACHINE).name, name),
             },
+            // All or nothing: a refused child undoes the ones before it.
             Edit::Group(edits) => {
-                let mut inverses: Vec<Edit> =
-                    edits.into_iter().map(|e| self.apply_raw(e)).collect();
+                let mut inverses = Vec::with_capacity(edits.len());
+                for e in edits {
+                    let inverse = self.apply_raw(e);
+                    if self.refusal.is_some() {
+                        for done in inverses.into_iter().rev() {
+                            self.apply_raw(done);
+                        }
+                        return Edit::Group(Vec::new());
+                    }
+                    inverses.push(inverse);
+                }
                 inverses.reverse();
                 Edit::Group(inverses)
             }
@@ -1493,6 +1509,35 @@ mod tests {
         d.apply(length(SYNTH1, 0, 8), false);
         assert_eq!(d.take_refusal(), None, "shrinking always fits");
         assert_eq!(d.project.roll(SYNTH1, 0).unwrap().length, 8);
+    }
+
+    #[test]
+    fn a_group_with_a_refused_child_changes_nothing() {
+        use acid_engine::project::{Block, PatternRef};
+        let max = acid_engine::song::MAX_SONG_STEPS as u32;
+        let mut d = doc();
+        d.project.song.lane_mut(SYNTH1).extend([
+            Block::new(max - 32, PatternRef(0)),
+            Block::new(max - 16, PatternRef(3)),
+        ]);
+        let before = d.project.clone();
+        let cmds = d.record(Edit::Group(vec![
+            Edit::Bpm(150.0),
+            length(SYNTH1, 0, 24),
+            Edit::Swing(0.3),
+        ]));
+        assert!(cmds.is_empty());
+        assert_eq!(d.take_refusal(), Some(SONG_TOO_LONG));
+        assert_eq!(d.project, before, "the BPM edit before it is undone");
+        assert_eq!(d.undo_depth(), 0);
+        let cmds = d.apply(
+            Edit::Group(vec![Edit::Bpm(150.0), length(SYNTH1, 0, 24)]),
+            false,
+        );
+        assert!(cmds.is_empty());
+        assert_eq!(d.take_refusal(), Some(SONG_TOO_LONG));
+        assert_eq!(d.project, before);
+        assert_eq!(d.undo_depth(), 0);
     }
 
     #[test]

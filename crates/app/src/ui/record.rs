@@ -20,7 +20,7 @@ impl SidAcidApp {
     pub(crate) fn reset_transport_view(&mut self) {
         self.doc.end_gesture();
         self.doc.end_pass();
-        self.view.mode = Mode::Pattern;
+        self.switch_mode_view(Mode::Pattern);
         self.view.record = false;
         self.view.touched_knob = None;
         self.view.engine_touch = None;
@@ -32,19 +32,27 @@ impl SidAcidApp {
         self.status.playing = false;
     }
 
+    /// Sets the view's mode. A change also drops the dock's range and every
+    /// lane selection: they mean ticks in one mode, steps in the other.
+    fn switch_mode_view(&mut self, mode: Mode) {
+        if self.view.mode == mode {
+            return;
+        }
+        self.view.mode = mode;
+        self.view.dock.range = None;
+        self.view.dock.range_from = None;
+        for panel in self.view.panels.values_mut() {
+            panel.selected.clear();
+        }
+    }
+
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         if self.view.mode == mode {
             return;
         }
         self.stop_recording();
         self.view.record = false;
-        self.view.mode = mode;
-        // A range or selection means ticks in one mode, steps in the other.
-        self.view.dock.range = None;
-        self.view.dock.range_from = None;
-        for panel in self.view.panels.values_mut() {
-            panel.selected.clear();
-        }
+        self.switch_mode_view(mode);
         // A Stop while stopped would cut tails and auditions, and use up
         // the engine's "first stop after a song end only releases".
         if self.status.playing {

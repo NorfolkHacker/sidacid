@@ -140,6 +140,9 @@ pub struct Sequencer {
     /// The song changed while playing: the next step start finds every
     /// track's block afresh.
     resync_pending: bool,
+    /// Song mode: the song step was reached by playing on from the one
+    /// before (not by Play), so reaching the loop end crosses it.
+    advanced: bool,
     /// The arp clock of the tick last run, per rack position.
     clocks: [(u64, f64); MAX_MACHINES],
     /// The pattern last selected per machine; restored when song
@@ -230,6 +233,7 @@ impl Sequencer {
             seek: false,
             auto_sync: false,
             resync_pending: false,
+            advanced: false,
             clocks: [(0, 0.0); MAX_MACHINES],
             chosen: [0; MAX_MACHINES],
             ended: false,
@@ -279,6 +283,7 @@ impl Sequencer {
         self.sub = 0;
         self.samples_to_next = 0.0;
         self.ended = false;
+        self.advanced = false;
         if self.mode == Mode::Song {
             self.song_step = self.song_start;
             self.seek = true;
@@ -395,8 +400,12 @@ impl Sequencer {
             self.seek_all(song, banks, false);
             self.auto_sync = true;
         }
+        // Only crossing the (exclusive) loop end loops: a start at or
+        // past it plays on.
+        let advanced = std::mem::take(&mut self.advanced);
         if let Some((a, b)) = song.loop_range
             && a < b
+            && advanced
             && self.song_step == b
         {
             self.song_step = a;
@@ -669,6 +678,7 @@ impl Sequencer {
         }
         if self.sub == 2 && self.mode == Mode::Song {
             self.song_step = self.song_step.saturating_add(1);
+            self.advanced = true;
         }
         self.note_ticks(banks, out);
         self.sub = (self.sub + 1) % SUBS;
@@ -1603,6 +1613,40 @@ mod tests {
         f.run(&mut s, 9 * 5513);
         assert!(!s.is_playing(), "it ends at the song end");
         assert!(s.take_ended());
+    }
+
+    #[test]
+    fn starting_exactly_at_the_loop_end_plays_on() {
+        let mut f = Fixture::new();
+        f.set_bars(&[[None; 4]; 3]);
+        f.song.loop_range = Some((0, 16));
+        let mut s = song_seq();
+        s.set_song_start(16);
+        s.play();
+        f.run(&mut s, 4 * 5513);
+        assert_eq!(s.song_step(), 20, "no jump back on the first step");
+        // A resync on a later step start does not loop either.
+        s.resync();
+        f.run(&mut s, 5513);
+        assert_eq!(s.song_step(), 21);
+        f.run(&mut s, 28 * 5513);
+        assert!(!s.is_playing(), "it plays on to the song end");
+    }
+
+    #[test]
+    fn crossing_the_loop_end_with_a_resync_pending_still_loops() {
+        let mut f = Fixture::new();
+        f.set_bars(&[[None; 4]; 3]);
+        f.song.loop_range = Some((0, 16));
+        let mut s = song_seq();
+        s.play();
+        // Past the mid tick of step 15: song step 16, its start not yet run.
+        f.run(&mut s, 15 * 5513 + 3000);
+        assert_eq!(s.song_step(), 16);
+        s.resync();
+        f.run(&mut s, 3000);
+        assert!(s.is_playing());
+        assert_eq!(s.song_step(), 0, "looped back to the start");
     }
 
     #[test]
