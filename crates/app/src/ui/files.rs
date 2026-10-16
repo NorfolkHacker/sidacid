@@ -222,6 +222,9 @@ impl SidAcidApp {
         self.view.overwrite = None;
         // Gestures, selections and scroll positions start over; the snap stays.
         for panel in self.view.panels.values_mut() {
+            panel.writer = None;
+            panel.scroll_accum = 0.0;
+            panel.scroll_at = None;
             panel.drag = None;
             panel.selected.clear();
             panel.lane_scroll_y = None;

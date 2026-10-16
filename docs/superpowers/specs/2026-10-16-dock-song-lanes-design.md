@@ -20,7 +20,7 @@ manufacturer.
 | Question | Decision |
 |---|---|
 | Dock layout | Stacked lanes, one per machine, all visible, sharing one time axis |
-| Acid synth editor | The 303 step view and its switch are removed; the roll is the only editor |
+| Acid synth editor | The step view and its switch are removed; the roll is the only editor. Later reversed: the step grid is back in each acid synth's panel as a second editor of the same notes (`step_grid.rs`, `set_synth_step`), and the roll stays in the dock |
 | Step-write replacement | Keyboard entry in the roll (cursor + note keys) |
 | Song model | Per-part lanes of pattern blocks, replacing bars |
 | Pattern grows under a placed block | Later blocks on that lane are pushed right (ripple) |

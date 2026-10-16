@@ -48,13 +48,48 @@ impl SidAcidApp {
 
 impl SidAcidApp {
     /// A pattern pad click: select the pattern (recorded into the song
-    /// while recording).
+    /// while recording). A synth's step-writer stops when another pattern
+    /// is selected, so keys never land in a pattern the user did not click.
     pub(crate) fn select_pad(&mut self, uid: MachineUid, slot: u8) {
+        if self.selected(uid) != slot
+            && let Some(panel) = self.view.panels.get_mut(&uid)
+        {
+            panel.writer = None;
+        }
         let cmds = self.doc.select_pattern(uid, slot);
         self.send(cmds);
         // A ruler range picked notes from the old patterns.
         self.view.dock.range = None;
         self.view.focus = Some(uid);
         self.record_pattern_change(uid, slot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::test_rack::*;
+    use crate::ui::step_edit::StepWriter;
+
+    #[test]
+    fn selecting_another_pattern_stops_that_synths_step_writer() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        let slot = app.doc.project.machine(SYNTH1).unwrap().selected;
+        app.view.panel(SYNTH1).writer = Some(StepWriter::new(3));
+        app.select_pad(SYNTH1, slot);
+        assert!(
+            app.view.panel(SYNTH1).writer.is_some(),
+            "the same pattern: keep writing"
+        );
+        app.select_pad(KIT808, slot + 1);
+        assert!(
+            app.view.panel(SYNTH1).writer.is_some(),
+            "a drum pad leaves the synth alone"
+        );
+        app.select_pad(SYNTH1, slot + 1);
+        assert!(app.view.panel(SYNTH1).writer.is_none());
+        assert_eq!(app.doc.project.machine(SYNTH1).unwrap().selected, slot + 1);
+        assert_eq!(app.view.focus, Some(SYNTH1));
     }
 }

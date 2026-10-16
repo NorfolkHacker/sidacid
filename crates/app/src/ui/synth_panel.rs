@@ -1,4 +1,5 @@
-//! A synth panel: 303 knobs, pattern pads, length/transpose, dice (the roll is in the dock).
+//! A synth panel: knobs, pattern pads, length/transpose, dice and the step
+//! grid (the roll is in the dock).
 
 use super::SidAcidApp;
 use crate::document::Edit;
@@ -75,6 +76,14 @@ impl SidAcidApp {
                         if r2.drag_stopped() || r2.lost_focus() {
                             app.doc.end_gesture();
                         }
+                        if let Some(w) = app.view.panel(uid).writer {
+                            ui.separator();
+                            ui.label(format!(
+                                "Step-write: step {}  octave {:+}  (Esc to stop)",
+                                w.cursor + 1,
+                                w.octave
+                            ));
+                        }
                     });
                 });
             ui.horizontal(|ui| {
@@ -128,6 +137,7 @@ impl SidAcidApp {
                     }
                 }
             });
+            app.step_grid(ui, uid);
         });
     }
 }

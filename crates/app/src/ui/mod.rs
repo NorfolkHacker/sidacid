@@ -36,6 +36,8 @@ mod song_lane;
 mod song_ops;
 mod song_panel;
 mod song_tools;
+mod step_edit;
+mod step_grid;
 mod synth_panel;
 pub mod theme;
 mod tool_menu;
@@ -58,6 +60,12 @@ pub type WaveCacheEntry = (usize, usize, usize, Vec<(f32, f32)>);
 pub struct PanelState {
     /// Bank shown on the machine's pads (0..8).
     pub bank: u8,
+    /// Active step-writer on the step grid (synths).
+    pub writer: Option<step_edit::StepWriter>,
+    /// Scroll distance accumulated toward the next pitch notch (synths).
+    pub scroll_accum: f32,
+    /// Open pitch-scroll gesture on the step grid (synths).
+    pub scroll_at: Option<scroll::ScrollGesture>,
     /// The lane's mouse drag in progress (note machines).
     pub drag: Option<poly_edit::LaneDrag>,
     /// What the lane's expression strip shows.
@@ -608,6 +616,7 @@ impl SidAcidApp {
         }
         self.close_stale_tool_popup(ctx);
         self.hold_dock_focus(ctx);
+        self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
         self.record_automation();
         if self.view.was_playing && !self.status.playing && self.view.record {
@@ -1716,6 +1725,11 @@ mod tests {
             last: 0.0,
             serial: Some(0),
         };
+        for uid in [SYNTH1, SYNTH2] {
+            app.view.panel(uid).scroll_at = Some(open);
+            app.view.panel(uid).scroll_accum = 12.0;
+            app.view.panel(uid).writer = Some(step_edit::StepWriter::new(2));
+        }
         app.view.knob_scroll = Some((
             acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
             open,
@@ -1729,6 +1743,10 @@ mod tests {
         assert_eq!(panels(&mut app, &all, |p| p.bank), [1, 2, 0, 7, 0, 0]);
         assert!(app.view.touched_knob.is_none());
         assert!(app.view.knob_scroll.is_none());
+        let synths = [SYNTH1, SYNTH2];
+        assert_eq!(panels(&mut app, &synths, |p| p.scroll_at), [None; 2]);
+        assert_eq!(panels(&mut app, &synths, |p| p.scroll_accum), [0.0; 2]);
+        assert_eq!(panels(&mut app, &synths, |p| p.writer), [None; 2]);
     }
 
     #[test]

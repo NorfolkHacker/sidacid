@@ -16,6 +16,7 @@ An acid groovebox built on a sound engine modelled on a classic 8-bit home-compu
   - Saw or pulse wave, LP/BP/HP filter, hard sync.
   - Accent sweep that builds over consecutive accents, and slide/tie.
   - 3-voice detuned **unison** with stereo spread.
+  - A classic **step grid** in each synth's panel, one column per 1/16 step with rows for note, octave down/up, accent, slide and gate (click the gate row, or right-click a note, to cycle rest, note and tie). Scroll a note to change its pitch; a wheel gesture is one undo step. Click a note to step-write from there with the tracker keys: Space rests, `-` ties, A accents, F slides, `[` `]` change octave, Backspace steps back, Esc stops. The grid and the dock's roll edit the same notes. A grid edit changes only the notes under its step, so chance, ratchet, conditions and off-grid timing set in the roll stay.
 - **Two 8-bit chip drum machines:**
   - Two kits in the style of classic analog drum machines: BD, SD, LT, HT, CP, RS, CH and OH.
   - Tune, Decay, Tone and Level per instrument.
