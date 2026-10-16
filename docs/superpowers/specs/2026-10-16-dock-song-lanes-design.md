@@ -106,6 +106,12 @@ engine act on `chance`, `ratchet` and `cond`.
   `scroll.rs` (its knob wheel gestures stay) and the `SeqView` toggle (including `Edit::View` and the saved view).
   The acid roll (`pianoroll.rs`, `roll_edit.rs`) is folded into the shared
   roll editor.
+- Later restored: the step grid and its step-writer are back in each acid
+  synth's panel (`step_grid.rs`, `step_edit.rs`, the pitch-scroll gestures
+  in `scroll.rs`), as a view of the pattern's notes. Each grid edit goes
+  through `set_synth_step`, which changes only the notes under its step.
+  There is still no view toggle and no saved view: the roll stays in the
+  dock and both edit the same notes.
 
 ## 2. Bottom dock
 
@@ -152,12 +158,15 @@ engine act on `chance`, `ratchet` and `cond`.
 - The focused lane has a cursor at a step and pitch (a drum row on drum
   lanes).
 - Arrow keys move the cursor by one grid step or one semitone/row.
-- The note keys (the tracker layout of the removed step-writer,
-  `crates/app/src/ui/step_edit.rs` at commit `32308c6`: Z S X D C V G B H N J M
+- The note keys (the step-writer's tracker layout, see
+  `crates/app/src/ui/step_edit.rs`: Z S X D C V G B H N J M
   for the lower octave, Q 2 W 3 E R 5 T 6 Y 7 U I above) write a note one grid
   step long at the cursor and advance it. On drum lanes any note key writes a hit on
   the cursor's row.
 - Backspace deletes the note under the cursor. Space still plays/stops.
+- The step-writer in a synth panel and dock keyboard entry never run
+  together: clicking the dock stops the step-writer, and starting it takes
+  the keyboard from the dock.
 
 ## 3. Selection editing
 
