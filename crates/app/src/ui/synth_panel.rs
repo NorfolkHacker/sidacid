@@ -4,7 +4,7 @@ use super::SidAcidApp;
 use crate::document::Edit;
 use acid_engine::machine::{MachineType, MachineUid};
 use acid_engine::params::SynthParam;
-use acid_engine::project::{DrumPattern, PatternRef, SeqView, SynthMachine};
+use acid_engine::project::{DrumPattern, PatternRef, SynthMachine};
 use eframe::egui;
 
 const KNOBS: [(SynthParam, &str); 15] = [
@@ -51,7 +51,7 @@ impl SidAcidApp {
                         app.pattern_pads(ui, uid);
                         ui.separator();
                         let pattern = &app.synth_of(uid).patterns[slot as usize];
-                        let mut length = pattern.length;
+                        let mut length = pattern.roll.length;
                         let mut transpose = pattern.transpose;
                         let r = ui.add(
                             egui::DragValue::new(&mut length)
@@ -74,25 +74,6 @@ impl SidAcidApp {
                         }
                         if r2.drag_stopped() || r2.lost_focus() {
                             app.doc.end_gesture();
-                        }
-                        ui.separator();
-                        let view = app.synth_of(uid).view;
-                        for (v, label) in [
-                            (SeqView::Step303, "303"),
-                            (SeqView::PianoRoll, "Piano roll"),
-                        ] {
-                            if ui.selectable_label(view == v, label).clicked() && view != v {
-                                let cmds = app.doc.apply(Edit::View { uid, view: v }, false);
-                                app.send(cmds);
-                                app.view.panel(uid).writer = None;
-                            }
-                        }
-                        if let Some(w) = app.view.panel(uid).writer {
-                            ui.label(format!(
-                                "Step-write: step {}  octave {:+}  (Esc to stop)",
-                                w.cursor + 1,
-                                w.octave
-                            ));
                         }
                     });
                 });
@@ -147,10 +128,7 @@ impl SidAcidApp {
                     }
                 }
             });
-            match app.synth_of(uid).view {
-                SeqView::Step303 => app.step303(ui, uid),
-                SeqView::PianoRoll => app.piano_roll(ui, uid),
-            }
+            app.poly_roll(ui, uid);
         });
     }
 }
@@ -161,7 +139,7 @@ impl SidAcidApp {
     pub(crate) fn set_synth_length(&mut self, uid: MachineUid, slot: u8, length: u8, merge: bool) {
         let cmds = self
             .doc
-            .apply(Edit::SynthLength { uid, slot, length }, merge);
+            .apply(Edit::NoteLength { uid, slot, length }, merge);
         self.send(cmds);
         self.view.focus = Some(uid);
     }
@@ -259,7 +237,7 @@ impl SidAcidApp {
         let Some(kit) = self.doc.project.kit(uid) else {
             return;
         };
-        let length = kit.patterns[slot as usize].length;
+        let length = kit.patterns[slot as usize].roll.length;
         let pattern = acid_engine::random::drum_template(seed, length);
         let cmds = self.doc.apply(
             crate::document::Edit::DrumPattern {
@@ -314,7 +292,7 @@ mod tests {
         app.set_synth_transpose(SYNTH2, slot, -3, false);
         assert_eq!(app.view.focus, Some(SYNTH2));
         let p = &app.doc.project.synth(SYNTH2).unwrap().patterns[slot as usize];
-        assert_eq!((p.length, p.transpose), (7, -3));
+        assert_eq!((p.roll.length, p.transpose), (7, -3));
     }
 
     #[test]
@@ -330,14 +308,14 @@ mod tests {
         app.doc.undo();
         let p = &app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize];
         assert_eq!(
-            (p.length, p.transpose),
+            (p.roll.length, p.transpose),
             (8, 2),
             "one undo reverts one key press"
         );
         app.doc.undo();
         app.doc.undo();
         let p = &app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize];
-        assert_eq!((p.length, p.transpose), (7, before.transpose));
+        assert_eq!((p.roll.length, p.transpose), (7, before.transpose));
         // A drag (merge) is one step.
         app.doc.undo();
         app.set_synth_length(SYNTH1, slot, 9, true);

@@ -16,7 +16,7 @@ pub enum Shortcut {
     Paste,
 }
 
-pub fn shortcut(key: Key, modifiers: Modifiers, step_writing: bool) -> Option<Shortcut> {
+pub fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
     if modifiers.command {
         return match key {
             Key::S => Some(Shortcut::Save),
@@ -30,11 +30,11 @@ pub fn shortcut(key: Key, modifiers: Modifiers, step_writing: bool) -> Option<Sh
             _ => None,
         };
     }
-    (key == Key::Space && !step_writing).then_some(Shortcut::PlayStop)
+    (key == Key::Space).then_some(Shortcut::PlayStop)
 }
 
 /// The shortcut an input event triggers, if any. Key auto-repeat is ignored.
-fn event_shortcut(e: &egui::Event, step_writing: bool) -> Option<Shortcut> {
+fn event_shortcut(e: &egui::Event) -> Option<Shortcut> {
     match e {
         egui::Event::Key {
             key,
@@ -42,7 +42,7 @@ fn event_shortcut(e: &egui::Event, step_writing: bool) -> Option<Shortcut> {
             repeat: false,
             modifiers,
             ..
-        } => shortcut(*key, *modifiers, step_writing),
+        } => shortcut(*key, *modifiers),
         // Some platforms deliver Ctrl+C / Ctrl+V as clipboard events.
         egui::Event::Copy => Some(Shortcut::Copy),
         egui::Event::Paste(_) => Some(Shortcut::Paste),
@@ -63,24 +63,17 @@ impl SidAcidApp {
         if typing(ctx) || self.view.confirm.is_some() || self.view.message.is_some() {
             return;
         }
-        let step_writing = self.view.panels.values().any(|p| p.writer.is_some());
-        let pressed: Vec<Shortcut> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| event_shortcut(e, step_writing))
-                .collect()
-        });
+        let pressed: Vec<Shortcut> =
+            ctx.input(|i| i.events.iter().filter_map(event_shortcut).collect());
         // Space is Play/Stop here: take every Space event (presses, repeats,
         // releases) out of the frame, or the widget with keyboard focus
         // would also see it as a click, once per key repeat.
-        if !step_writing {
-            ctx.input_mut(|i| {
-                i.events.retain(|e| {
-                    !matches!(e, egui::Event::Key { key: Key::Space, modifiers, .. }
-                        if !modifiers.command)
-                })
-            });
-        }
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                !matches!(e, egui::Event::Key { key: Key::Space, modifiers, .. }
+                    if !modifiers.command)
+            })
+        });
         let (mut copied, mut pasted) = (false, false);
         for s in pressed {
             // Backends may send both a key and a clipboard event for one press.
@@ -123,27 +116,26 @@ mod tests {
     #[test]
     fn command_shortcuts() {
         let cmd = Modifiers::COMMAND;
-        assert_eq!(shortcut(Key::S, cmd, false), Some(Shortcut::Save));
-        assert_eq!(shortcut(Key::O, cmd, false), Some(Shortcut::Open));
-        assert_eq!(shortcut(Key::N, cmd, false), Some(Shortcut::New));
-        assert_eq!(shortcut(Key::Z, cmd, false), Some(Shortcut::Undo));
+        assert_eq!(shortcut(Key::S, cmd), Some(Shortcut::Save));
+        assert_eq!(shortcut(Key::O, cmd), Some(Shortcut::Open));
+        assert_eq!(shortcut(Key::N, cmd), Some(Shortcut::New));
+        assert_eq!(shortcut(Key::Z, cmd), Some(Shortcut::Undo));
         assert_eq!(
-            shortcut(Key::Z, cmd | Modifiers::SHIFT, false),
+            shortcut(Key::Z, cmd | Modifiers::SHIFT),
             Some(Shortcut::Redo)
         );
-        assert_eq!(shortcut(Key::Y, cmd, false), Some(Shortcut::Redo));
-        assert_eq!(shortcut(Key::C, cmd, true), Some(Shortcut::Copy));
-        assert_eq!(shortcut(Key::V, cmd, true), Some(Shortcut::Paste));
+        assert_eq!(shortcut(Key::Y, cmd), Some(Shortcut::Redo));
+        assert_eq!(shortcut(Key::C, cmd), Some(Shortcut::Copy));
+        assert_eq!(shortcut(Key::V, cmd), Some(Shortcut::Paste));
     }
 
     #[test]
-    fn space_plays_unless_step_writing() {
+    fn space_plays() {
         assert_eq!(
-            shortcut(Key::Space, Modifiers::NONE, false),
+            shortcut(Key::Space, Modifiers::NONE),
             Some(Shortcut::PlayStop)
         );
-        assert_eq!(shortcut(Key::Space, Modifiers::NONE, true), None);
-        assert_eq!(shortcut(Key::Z, Modifiers::NONE, false), None);
+        assert_eq!(shortcut(Key::Z, Modifiers::NONE), None);
     }
 
     #[test]
@@ -155,11 +147,8 @@ mod tests {
             repeat,
             modifiers: Modifiers::NONE,
         };
-        assert_eq!(
-            event_shortcut(&space(false), false),
-            Some(Shortcut::PlayStop)
-        );
-        assert_eq!(event_shortcut(&space(true), false), None);
+        assert_eq!(event_shortcut(&space(false)), Some(Shortcut::PlayStop));
+        assert_eq!(event_shortcut(&space(true)), None);
     }
 
     fn space(pressed: bool, repeat: bool) -> egui::Event {

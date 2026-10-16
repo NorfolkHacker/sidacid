@@ -17,20 +17,16 @@ mod note_panel;
 mod pads;
 mod params_ui;
 mod perf;
-mod pianoroll;
 mod poly_edit;
 mod polyroll;
 mod rack_header;
 mod rack_sync;
 mod record;
-mod roll_edit;
 mod sampler_load;
 mod sampler_panel;
 mod sampler_ui;
 mod scroll;
 mod song_panel;
-mod step303;
-mod step_edit;
 mod synth_panel;
 pub mod theme;
 mod transport;
@@ -52,17 +48,6 @@ pub type WaveCacheEntry = (usize, usize, usize, Vec<(f32, f32)>);
 pub struct PanelState {
     /// Bank shown on the machine's pads (0..8).
     pub bank: u8,
-    /// Active 303 step-writer (synths).
-    pub writer: Option<step_edit::StepWriter>,
-    /// Scroll distance accumulated toward the next pitch notch (synths).
-    pub scroll_accum: f32,
-    /// Open pitch-scroll gesture in the 303 editor (synths).
-    pub scroll_at: Option<scroll::ScrollGesture>,
-    /// Mouse drag in progress in the piano roll (synths).
-    pub roll_drag: Option<roll_edit::RollDrag>,
-    /// The synth pattern as it was when that drag began; every frame of
-    /// the drag is recomputed from it (see `roll_edit::drag_from_origin`).
-    pub roll_origin: Option<Box<roll_edit::RollSnapshot>>,
     /// Poly-roll drag (note machines).
     pub poly_drag: Option<poly_edit::PolyDrag>,
     pub poly_snap: poly_edit::Snap,
@@ -480,7 +465,6 @@ impl SidAcidApp {
         if self.take_audio_retry() {
             self.start_audio();
         }
-        self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);
         self.record_automation();
         if self.view.was_playing && !self.status.playing && self.view.record {
@@ -1277,9 +1261,8 @@ mod tests {
     }
 
     #[test]
-    fn piano_roll_view_draws_headless() {
-        let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.synth_mut(SYNTH1).unwrap().view = acid_engine::project::SeqView::PianoRoll;
+    fn synth_rolls_draw_headless() {
+        let doc = Document::new(acid_engine::demo::demo_project());
         let mut app = SidAcidApp::headless(doc);
         run_frames(&mut app, 2);
     }
@@ -1351,7 +1334,6 @@ mod tests {
 
     #[test]
     fn copy_paste_between_synths_is_undoable() {
-        use acid_engine::project::Gate;
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.view.focus = Some(SYNTH1);
         app.copy_pattern();
@@ -1366,9 +1348,9 @@ mod tests {
         app.send(cmds);
         assert!(
             app.doc.project.synth(SYNTH2).unwrap().patterns[9]
-                .steps
-                .iter()
-                .all(|s| s.gate == Gate::Off)
+                .roll
+                .notes
+                .is_empty()
         );
     }
 
@@ -1498,10 +1480,6 @@ mod tests {
             last: 0.0,
             serial: Some(0),
         };
-        for uid in [SYNTH1, SYNTH2] {
-            app.view.panel(uid).scroll_at = Some(open);
-            app.view.panel(uid).scroll_accum = 12.0;
-        }
         app.view.knob_scroll = Some((
             acid_engine::params::ParamId::Master(acid_engine::params::MasterParam::Level),
             open,
@@ -1514,20 +1492,7 @@ mod tests {
         let all = [SYNTH1, SYNTH2, KIT808, KIT909, FM, SAMPLER];
         assert_eq!(panels(&mut app, &all, |p| p.bank), [1, 2, 0, 7, 0, 0]);
         assert!(app.view.touched_knob.is_none());
-        let synths = [SYNTH1, SYNTH2];
-        assert_eq!(panels(&mut app, &synths, |p| p.scroll_at), [None; 2]);
         assert!(app.view.knob_scroll.is_none());
-        assert_eq!(panels(&mut app, &synths, |p| p.scroll_accum), [0.0; 2]);
-    }
-
-    #[test]
-    fn step_writer_is_dropped_when_its_synth_leaves_step_view() {
-        let mut doc = Document::new(acid_engine::demo::demo_project());
-        doc.project.synth_mut(SYNTH2).unwrap().view = acid_engine::project::SeqView::PianoRoll;
-        let mut app = SidAcidApp::headless(doc);
-        app.view.panel(SYNTH2).writer = Some(step_edit::StepWriter::new(0));
-        run_frames(&mut app, 1);
-        assert!(app.view.panel(SYNTH2).writer.is_none());
     }
 
     #[test]

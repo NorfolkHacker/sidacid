@@ -5,7 +5,8 @@ use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::{DrumParam, KitParam, MachineParam};
-use acid_engine::project::{DrumHit, DrumPattern, PatternRef};
+use acid_engine::project::{DrumPattern, PatternRef};
+use acid_engine::steps::{DrumHit, drum_hit_at, set_drum_hit};
 use eframe::egui;
 
 pub const INST_NAMES: [&str; 8] = ["BD", "SD", "LT", "HT", "CP", "RS", "CH", "OH"];
@@ -68,7 +69,7 @@ impl SidAcidApp {
                     ui.horizontal(|ui| {
                         app.pattern_pads(ui, uid);
                         ui.separator();
-                        let mut length = app.drum_pattern(uid, slot).map_or(16, |p| p.length);
+                        let mut length = app.drum_pattern(uid, slot).map_or(16, |p| p.roll.length);
                         let r = ui.add(
                             egui::DragValue::new(&mut length)
                                 .range(1..=64)
@@ -105,7 +106,7 @@ impl SidAcidApp {
         let Some(pattern) = self.drum_pattern(uid, slot).cloned() else {
             return;
         };
-        let len = pattern.length as usize;
+        let len = pattern.roll.length as usize;
         let playhead = self.playhead(uid, slot);
         let mut edits = Vec::new();
         egui::ScrollArea::horizontal()
@@ -126,7 +127,7 @@ impl SidAcidApp {
                         for (inst, name) in INST_NAMES.iter().enumerate() {
                             ui.label(*name);
                             for step in 0..len {
-                                let hit = pattern.steps[step][inst];
+                                let hit = drum_hit_at(&pattern.roll, step, inst);
                                 let (text, colour) = match hit {
                                     DrumHit::Off => ("·", ui.visuals().weak_text_color()),
                                     DrumHit::On => ("■", theme::ACID),
@@ -163,17 +164,18 @@ impl SidAcidApp {
         inst: usize,
         hit: Option<DrumHit>,
     ) {
-        let Some(current) = self.drum_pattern(uid, slot).map(|p| p.steps[step][inst]) else {
+        let Some(mut roll) = self.drum_pattern(uid, slot).map(|p| p.roll.clone()) else {
             return;
         };
-        let hit = hit.unwrap_or_else(|| cycle_hit(current));
+        let hit = hit.unwrap_or_else(|| cycle_hit(drum_hit_at(&roll, step, inst)));
+        if !set_drum_hit(&mut roll, step, inst, hit) {
+            return;
+        }
         let cmds = self.doc.apply(
-            Edit::DrumHit {
+            Edit::NotePattern {
                 uid,
                 slot,
-                step,
-                inst,
-                hit,
+                pattern: Box::new(roll),
             },
             false,
         );
@@ -186,7 +188,7 @@ impl SidAcidApp {
     pub(crate) fn set_drum_length(&mut self, uid: MachineUid, slot: u8, length: u8, merge: bool) {
         let cmds = self
             .doc
-            .apply(Edit::DrumLength { uid, slot, length }, merge);
+            .apply(Edit::NoteLength { uid, slot, length }, merge);
         self.send(cmds);
         self.view.focus = Some(uid);
     }
@@ -208,7 +210,11 @@ mod tests {
         let mut app = app();
         let slot = 5;
         let hit = |app: &SidAcidApp| {
-            app.doc.project.kit(KIT909).unwrap().patterns[slot as usize].steps[3][2]
+            drum_hit_at(
+                &app.doc.project.kit(KIT909).unwrap().patterns[slot as usize].roll,
+                3,
+                2,
+            )
         };
         assert_eq!(hit(&app), DrumHit::Off);
         app.click_drum_cell(KIT909, slot, 3, 2, None);
@@ -232,7 +238,9 @@ mod tests {
         let slot = app.doc.project.machine(KIT909).unwrap().selected;
         app.set_drum_length(KIT909, slot, 12, false);
         assert_eq!(
-            app.doc.project.kit(KIT909).unwrap().patterns[slot as usize].length,
+            app.doc.project.kit(KIT909).unwrap().patterns[slot as usize]
+                .roll
+                .length,
             12
         );
         assert_eq!(
@@ -250,7 +258,9 @@ mod tests {
         app.set_drum_length(KIT909, slot, 13, false);
         app.doc.undo();
         assert_eq!(
-            app.doc.project.kit(KIT909).unwrap().patterns[slot as usize].length,
+            app.doc.project.kit(KIT909).unwrap().patterns[slot as usize]
+                .roll
+                .length,
             12
         );
     }

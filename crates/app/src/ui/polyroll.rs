@@ -1,4 +1,4 @@
-//! Poly piano roll for the FM synth and sampler: one column per tick,
+//! Poly piano roll for every melodic machine: one column per tick,
 //! every MIDI pitch, a velocity lane underneath. Click adds a note (with
 //! the last length used), drag the body to move, drag the right edge to
 //! stretch, right-click deletes, chords stack freely. Clicking the key
@@ -12,18 +12,24 @@ use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
 use acid_engine::machine::MachineUid;
-use acid_engine::project::{NotePattern, TICKS_PER_STEP};
+use acid_engine::project::{BASE_MIDI, NotePattern, TICKS_PER_STEP};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, pos2, vec2};
 
-/// Sized like the 303's piano roll: the same step width and row height,
-/// with the same three octaves in view.
-const TICK_W: f32 = super::pianoroll::CELL_W / TICKS_PER_STEP as f32;
-const ROW_H: f32 = super::pianoroll::CELL_H;
+pub(crate) const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+/// Width of one 1/16 step and height of one pitch row.
+const STEP_W: f32 = 22.0;
+const TICK_W: f32 = STEP_W / TICKS_PER_STEP as f32;
+const ROW_H: f32 = 9.0;
+/// Three octaves in view.
+const VIEW_ROWS: usize = 36;
 const KEY_W: f32 = 30.0;
 /// The sampler's key strip is wider to fit row labels like "Amen ·05".
 const SAMPLER_KEY_W: f32 = 64.0;
 const VEL_H: f32 = 32.0;
-const VIEW_H: f32 = ROW_H * super::roll_edit::ROLL_ROWS as f32;
+const VIEW_H: f32 = ROW_H * VIEW_ROWS as f32;
 const NEW_VEL: u8 = 100;
 /// Pitch the FM roll first scrolls to: C3 (MIDI 48).
 const FM_START_PITCH: u8 = 48;
@@ -40,9 +46,13 @@ fn vel_from_y(y: f32, top: f32) -> u8 {
 }
 
 impl SidAcidApp {
-    /// Pitch the roll of note machine `uid` first centres on: for a
-    /// sampler the lowest loaded zone's base key, or C1 with none; C3 for FM.
+    /// Pitch the roll of machine `uid` first centres on: for a sampler the
+    /// lowest loaded zone's base key, or C1 with none; C2 for an acid synth
+    /// or Mono; C3 for FM.
     pub(crate) fn roll_start_pitch(&self, uid: MachineUid) -> u8 {
+        if self.doc.project.synth(uid).is_some() {
+            return BASE_MIDI as u8;
+        }
         if self.doc.project.mono(uid).is_some() {
             return MONO_START_PITCH;
         }
@@ -62,10 +72,9 @@ impl SidAcidApp {
         let is_sampler = self.doc.project.sampler(uid).is_some();
         let key_w = if is_sampler { SAMPLER_KEY_W } else { KEY_W };
         let slot = self.selected(uid);
-        let Some(bank) = self.doc.project.note_patterns(uid) else {
+        let Some(mut pattern) = self.doc.project.roll(uid, slot).cloned() else {
             return;
         };
-        let mut pattern = bank[slot as usize].clone();
         let ticks = pattern.ticks();
         let panel = self.view.panel(uid);
         let snap = panel.poly_snap;
@@ -444,6 +453,12 @@ mod tests {
     use crate::test_rack::*;
     use crate::ui::poly_edit::move_to;
     use acid_engine::project::Project;
+
+    #[test]
+    fn the_acid_synth_roll_opens_on_c2() {
+        let app = SidAcidApp::headless(Document::new(Project::default()));
+        assert_eq!(app.roll_start_pitch(SYNTH1), 36);
+    }
 
     #[test]
     fn the_mono_roll_opens_on_c2() {

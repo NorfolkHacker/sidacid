@@ -1,7 +1,25 @@
-//! Mouse-wheel gestures (303 pitch scrolls, knobs): a run of wheel edits
-//! is one undo step, closed once the wheel has rested.
+//! Mouse-wheel gestures on knobs: a run of wheel edits is one undo step,
+//! closed once the wheel has rested.
 
 use super::SidAcidApp;
+
+/// Scroll distance (points) that makes one notch.
+pub const SCROLL_NOTCH: f32 = 40.0;
+
+/// Adds `delta` to `accum` and returns the whole notches passed, keeping the remainder.
+pub fn scroll_notches(accum: &mut f32, delta: f32) -> i32 {
+    *accum += delta;
+    let mut n = 0;
+    while *accum >= SCROLL_NOTCH {
+        *accum -= SCROLL_NOTCH;
+        n += 1;
+    }
+    while *accum <= -SCROLL_NOTCH {
+        *accum += SCROLL_NOTCH;
+        n -= 1;
+    }
+    n
+}
 
 /// Seconds without wheel input that end a scroll gesture's undo step.
 pub const SCROLL_IDLE: f64 = 0.3;
@@ -24,29 +42,13 @@ impl ScrollGesture {
 }
 
 impl SidAcidApp {
-    /// Ends wheel gestures (303 pitch, knobs) once the wheel has rested.
+    /// Ends knob wheel gestures once the wheel has rested.
     /// A gesture's undo step is closed only if no other edit came after
     /// it, so another open gesture is never cut short. Returns the time
     /// until the next gesture ends, if one is still open.
     pub(crate) fn tick_scroll_gestures(&mut self, now: f64) -> Option<f64> {
         let mut next: Option<f64> = None;
         let mut wait = |left: f64| next = Some(next.map_or(left, |n: f64| n.min(left)));
-        let mut ended = Vec::new();
-        for panel in self.view.panels.values_mut() {
-            let Some(g) = panel.scroll_at else {
-                continue;
-            };
-            if let Some(left) = g.remaining(now) {
-                wait(left);
-            } else {
-                panel.scroll_at = None;
-                panel.scroll_accum = 0.0;
-                ended.push(g);
-            }
-        }
-        for g in ended {
-            self.close_scroll_step(g);
-        }
         if let Some((_, g)) = self.view.knob_scroll {
             if let Some(left) = g.remaining(now) {
                 wait(left);
@@ -69,14 +71,6 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Document;
-    use crate::test_rack::*;
-    use crate::ui::step_edit::nudge_note;
-    use crate::ui::step303::StepOp;
-
-    fn app() -> SidAcidApp {
-        SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()))
-    }
 
     #[test]
     fn a_scroll_gesture_ends_after_the_wheel_rests() {
@@ -97,34 +91,18 @@ mod tests {
     }
 
     #[test]
-    fn pitch_scrolls_close_together_are_one_undo_step() {
-        let mut app = app();
-        let slot = app.doc.project.machine(SYNTH1).unwrap().selected;
-        let start = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0];
-        let frame = |app: &mut SidAcidApp, op: Option<StepOp>, now: f64| {
-            if let Some(op) = op {
-                app.apply_step_ops(SYNTH1, slot, vec![(0, op)], now);
-            }
-            app.tick_scroll_gestures(now);
-        };
-        for t in [0.0, 0.1, 0.2] {
-            frame(&mut app, Some(StepOp::Nudge(1)), t);
-            frame(&mut app, None, t + 0.05);
-        }
-        frame(&mut app, None, 0.4);
-        assert!(app.view.panel(SYNTH1).scroll_at.is_some(), "still open");
-        frame(&mut app, None, 0.6);
-        assert!(app.view.panel(SYNTH1).scroll_at.is_none());
-        frame(&mut app, Some(StepOp::Nudge(1)), 1.6);
-        frame(&mut app, None, 2.0);
-        app.doc.undo();
-        let mid = app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0];
-        assert_eq!(mid, nudge_note(start, 3), "three notches, one step");
-        app.doc.undo();
-        assert_eq!(
-            app.doc.project.synth(SYNTH1).unwrap().patterns[slot as usize].steps[0],
-            start
-        );
-        assert!(!app.doc.can_undo());
+    fn scroll_accumulates_and_fires_notches() {
+        let mut a = 0.0;
+        assert_eq!(scroll_notches(&mut a, 15.0), 0);
+        assert_eq!(scroll_notches(&mut a, 15.0), 0);
+        assert_eq!(scroll_notches(&mut a, 15.0), 1);
+        assert_eq!(a, 5.0);
+        assert_eq!(scroll_notches(&mut a, 100.0), 2);
+        assert_eq!(a, 25.0);
+        assert_eq!(scroll_notches(&mut a, -25.0 - 85.0), -2);
+        assert_eq!(a, -25.0 + 25.0 - 85.0 + 80.0);
+        let mut b = 0.0;
+        assert_eq!(scroll_notches(&mut b, -50.0), -1);
+        assert_eq!(b, -10.0);
     }
 }

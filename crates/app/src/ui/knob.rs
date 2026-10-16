@@ -1,6 +1,6 @@
 //! Custom-painted rotary knob and click-to-cycle switch.
 
-use super::step_edit::scroll_notches;
+use super::scroll::scroll_notches;
 use super::theme;
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, Vec2, pos2, vec2};
 use std::f32::consts::PI;
