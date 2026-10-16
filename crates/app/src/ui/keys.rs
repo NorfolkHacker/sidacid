@@ -68,25 +68,54 @@ fn typing(ctx: &egui::Context) -> bool {
 impl SidAcidApp {
     /// Feed the frame's key presses (repeats too) to the dock and take the
     /// used ones out of the frame so focused widgets don't act on them.
+    /// Once a Delete/Backspace press has removed the selection, that key's
+    /// auto-repeats are used up doing nothing until it is pressed afresh,
+    /// so holding it doesn't go on to erase notes by keyboard entry.
     fn dock_keys(&mut self, ctx: &egui::Context) {
         if !self.view.dock.keyboard {
             return;
         }
-        let keys: Vec<(Key, Modifiers)> = ctx.input(|i| {
+        let erase = |k: Key| matches!(k, Key::Delete | Key::Backspace);
+        // (key, modifiers, pressed, repeat), presses and Delete releases.
+        let keys: Vec<(Key, Modifiers, bool, bool)> = ctx.input(|i| {
             i.events
                 .iter()
                 .filter_map(|e| match e {
                     egui::Event::Key {
                         key,
-                        pressed: true,
+                        pressed,
+                        repeat,
                         modifiers,
                         ..
-                    } => Some((*key, *modifiers)),
+                    } if *pressed || erase(*key) => Some((*key, *modifiers, *pressed, *repeat)),
                     _ => None,
                 })
                 .collect()
         });
-        let used: Vec<bool> = keys.iter().map(|&(k, m)| self.dock_key(k, m)).collect();
+        let mut used = Vec::new();
+        for (k, m, pressed, repeat) in keys {
+            if !pressed {
+                self.view.dock.delete_held = false;
+                continue;
+            }
+            if erase(k) && repeat && self.view.dock.delete_held {
+                used.push(true);
+                continue;
+            }
+            let had = erase(k)
+                && !m.command
+                && self
+                    .focused()
+                    .is_some_and(|uid| !self.selection(uid).is_empty());
+            let u = self.dock_key(k, m);
+            if erase(k) && !repeat {
+                self.view.dock.delete_held = had && u;
+            } else if erase(k) && had && u {
+                // A repeat that still found a selection to remove.
+                self.view.dock.delete_held = true;
+            }
+            used.push(u);
+        }
         // Releases stay: egui keys clicks off the press, so a focused widget
         // seeing a lone release is harmless.
         let mut n = 0;

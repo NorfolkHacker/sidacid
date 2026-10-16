@@ -1300,6 +1300,41 @@ mod tests {
     }
 
     #[test]
+    fn holding_delete_after_deleting_the_selection_erases_nothing_more() {
+        use crate::test_rack::FM;
+        use egui::Key;
+        let mut app = sel_app(FM, &[(0, 4, 60), (4, 4, 60), (16, 4, 62)], &[2]);
+        app.view.panel(FM).cursor = crate::ui::key_entry::Cursor { tick: 8, pitch: 60 };
+        // One context throughout: egui tracks which keys are down.
+        let ctx = egui::Context::default();
+        let mut run = |app: &mut SidAcidApp, events| {
+            let mut left = Vec::new();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                app.handle_shortcuts(ctx);
+                left = ctx.input(|i| i.events.clone());
+            });
+            left
+        };
+        let delete = |pressed, repeat| key_event(Key::Delete, pressed, repeat, false);
+        let left = run(&mut app, vec![delete(true, false), delete(true, true)]);
+        assert_eq!(
+            notes_of(&app, FM),
+            [(0, 4, 60), (4, 4, 60)],
+            "only the selection"
+        );
+        assert!(left.is_empty(), "the repeat is used up too: {left:?}");
+        run(&mut app, vec![delete(true, true)]);
+        assert_eq!(notes_of(&app, FM).len(), 2, "still held: nothing more");
+        // Let go and press again: keyboard entry erases as usual.
+        run(&mut app, vec![delete(false, false), delete(true, false)]);
+        assert_eq!(notes_of(&app, FM), [(0, 4, 60)]);
+    }
+
+    #[test]
     fn esc_clears_the_selection_and_the_range() {
         use crate::test_rack::{FM, SYNTH1};
         use egui::{Key, Modifiers};

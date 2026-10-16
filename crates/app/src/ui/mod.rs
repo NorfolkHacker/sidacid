@@ -102,6 +102,9 @@ pub struct DockState {
     pub lanes_offset: f32,
     /// A time range picked on the ruler (ticks, end exclusive).
     pub range: Option<(u16, u16)>,
+    /// Delete/Backspace is held after its press removed the selection:
+    /// its auto-repeats are swallowed, not passed on to keyboard entry.
+    pub delete_held: bool,
 }
 
 impl Default for DockState {
@@ -119,6 +122,7 @@ impl Default for DockState {
             lanes: None,
             lanes_offset: 0.0,
             range: None,
+            delete_held: false,
         }
     }
 }
