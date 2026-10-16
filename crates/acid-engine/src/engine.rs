@@ -961,7 +961,7 @@ mod tests {
     }
 
     /// A full rack of `types` at its busiest: dense patterns on every slot
-    /// (every drum hit; on note machines 256 notes over 128 pitches that
+    /// (every drum hit; on note machines 512 notes over 128 pitches that
     /// all end and restart on each wrap; synth lanes) and a song lane on
     /// every param.
     fn dense_rack(types: &[MachineType]) -> Project {

@@ -4,7 +4,7 @@
 //! a drum hit is a one-step note whose pitch is the instrument.
 
 use crate::params::DRUM_INSTRUMENTS;
-use crate::project::{BASE_MIDI, Note, NotePattern, STEPS, TICKS_PER_STEP, steps_of};
+use crate::project::{BASE_MIDI, MAX_NOTES, Note, NotePattern, STEPS, TICKS_PER_STEP, steps_of};
 use serde::{Deserialize, Serialize};
 
 /// Velocity of acid and drum notes. Their engines ignore it.
@@ -157,9 +157,14 @@ pub fn drum_hit_at(roll: &NotePattern, step: usize, inst: usize) -> DrumHit {
 }
 
 /// Sets a grid cell: removes `inst`'s hits starting in `step` and, unless
-/// `hit` is Off, adds one on the step. False when the cell already was `hit`.
+/// `hit` is Off, adds one on the step. False (nothing changed) when the cell
+/// already was `hit`, or when adding would exceed `MAX_NOTES`.
 pub fn set_drum_hit(roll: &mut NotePattern, step: usize, inst: usize, hit: DrumHit) -> bool {
     if step >= STEPS || inst >= DRUM_INSTRUMENTS || drum_hit_at(roll, step, inst) == hit {
+        return false;
+    }
+    let removed = roll.notes.iter().filter(|n| in_step(n, step, inst)).count();
+    if hit != DrumHit::Off && roll.notes.len() - removed >= MAX_NOTES {
         return false;
     }
     roll.notes.retain(|n| !in_step(n, step, inst));
@@ -343,5 +348,37 @@ mod tests {
         assert_eq!(drum_hit_at(&roll, 2, 1), DrumHit::On);
         assert!(set_drum_hit(&mut roll, 2, 1, DrumHit::Off));
         assert!(roll.notes.iter().all(|n| n.pitch != 1));
+    }
+
+    #[test]
+    fn a_full_drum_grid_fits_a_note_pattern() {
+        let g = DrumGrid {
+            steps: vec![[DrumHit::On; DRUM_INSTRUMENTS]; STEPS],
+            length: 64,
+        };
+        let roll = g.to_roll();
+        assert_eq!(roll.notes.len(), STEPS * DRUM_INSTRUMENTS);
+        assert!(roll.is_well_formed());
+    }
+
+    #[test]
+    fn set_drum_hit_refuses_to_exceed_the_note_cap() {
+        let mut roll = DrumGrid {
+            steps: vec![[DrumHit::On; DRUM_INSTRUMENTS]; STEPS],
+            length: 64,
+        }
+        .to_roll();
+        roll.notes.truncate(MAX_NOTES);
+        // Free cell would need a new note: refused.
+        roll.notes.pop();
+        roll.notes.push(Note::new(0, 4, 100, 100)); // filler off the drum pitches
+        assert_eq!(roll.notes.len(), MAX_NOTES);
+        assert!(!set_drum_hit(&mut roll, 63, 7, DrumHit::On));
+        assert_eq!(roll.notes.len(), MAX_NOTES);
+        // An occupied cell can still be replaced or cleared.
+        assert!(set_drum_hit(&mut roll, 0, 0, DrumHit::Accent));
+        assert_eq!(roll.notes.len(), MAX_NOTES);
+        assert!(set_drum_hit(&mut roll, 0, 0, DrumHit::Off));
+        assert!(set_drum_hit(&mut roll, 63, 7, DrumHit::On));
     }
 }

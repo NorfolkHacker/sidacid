@@ -28,8 +28,9 @@ pub const BANK_SIZE: usize = 16;
 pub const BASE_MIDI: i32 = 36;
 /// Note-pattern resolution: ticks per 1/16 step.
 pub const TICKS_PER_STEP: u16 = 4;
-/// Most notes one note pattern may hold.
-pub const MAX_NOTES: usize = 256;
+/// Most notes one note pattern may hold: a full 64-step pattern on all
+/// eight drums.
+pub const MAX_NOTES: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParamLane {
