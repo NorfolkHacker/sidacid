@@ -49,19 +49,22 @@ impl Snap {
 }
 
 /// A mouse drag in progress in a lane. Move and resize recompute the
-/// pattern from `origin` (the pattern when the drag started, after any
-/// copies) every frame, so deltas never accumulate.
+/// pattern from `origin` (pattern `slot` when the drag started, after any
+/// copies) every frame, so deltas never accumulate; they are dropped if
+/// the machine selects another pattern meanwhile.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LaneDrag {
     /// The notes at `idx` follow the pointer from `grab` (tick, row pitch).
     Move {
         origin: Box<NotePattern>,
+        slot: u8,
         idx: Vec<usize>,
         grab: (u16, u8),
     },
     /// The notes at `idx` stretch with the grabbed note's end (`grab`).
     Resize {
         origin: Box<NotePattern>,
+        slot: u8,
         idx: Vec<usize>,
         grab: u16,
     },

@@ -586,6 +586,17 @@ impl SidAcidApp {
         let snap = self.view.dock.snap;
         let primary = egui::PointerButton::Primary;
         let mods = ui.input(|i| i.modifiers);
+        let slot = self.selected(uid);
+        // Another pattern was picked under a move or resize (a pad, a song
+        // step): its origin belongs to the old one, so the drag is dropped
+        // with nothing more committed, and its undo step is closed.
+        if let Some(LaneDrag::Move { slot: s, .. } | LaneDrag::Resize { slot: s, .. }) =
+            &self.view.panel(uid).drag
+            && *s != slot
+        {
+            self.view.panel(uid).drag = None;
+            self.doc.end_gesture();
+        }
         let pointer = resp
             .interact_pointer_pos()
             .or_else(|| ui.input(|i| i.pointer.latest_pos()));
@@ -671,6 +682,7 @@ impl SidAcidApp {
                     if !drums && geom.near_right_edge(&grabbed, p.x) {
                         Some(LaneDrag::Resize {
                             origin: Box::new(pattern.clone()),
+                            slot,
                             idx: sel.clone(),
                             grab: grabbed.start.saturating_add(grabbed.len),
                         })
@@ -687,6 +699,7 @@ impl SidAcidApp {
                             frame.changed = true;
                             Some(LaneDrag::Move {
                                 origin: Box::new(pattern.clone()),
+                                slot,
                                 idx: sel.clone(),
                                 grab: from,
                             })
@@ -694,6 +707,7 @@ impl SidAcidApp {
                     } else {
                         Some(LaneDrag::Move {
                             origin: Box::new(pattern.clone()),
+                            slot,
                             idx: sel.clone(),
                             grab: from,
                         })
@@ -719,14 +733,18 @@ impl SidAcidApp {
             };
             let floor = |t: u16| if mods.alt { t } else { snap.floor(t) };
             let moved = match &self.view.panel(uid).drag {
-                Some(LaneDrag::Move { origin, idx, grab }) => {
+                Some(LaneDrag::Move {
+                    origin, idx, grab, ..
+                }) => {
                     let mut p = (**origin).clone();
                     let dt = step as i32 - floor(grab.0) as i32;
                     let dp = pitch as i32 - grab.1 as i32;
                     note_ops::shift(&mut p, idx, dt, dp, kind);
                     Some((p, idx.clone()))
                 }
-                Some(LaneDrag::Resize { origin, idx, grab }) => {
+                Some(LaneDrag::Resize {
+                    origin, idx, grab, ..
+                }) => {
                     let mut p = (**origin).clone();
                     note_ops::resize(&mut p, idx, (step + unit) as i32 - *grab as i32);
                     Some((p, idx.clone()))
@@ -1523,6 +1541,35 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_is_dropped_when_the_pattern_changes_under_it() {
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        let other = app.doc.project.roll(FM, 1).unwrap().clone();
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (from, to) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 17.5, 60));
+        let primary = egui::PointerButton::Primary;
+        m.frame(&mut app, vec![egui::Event::PointerMoved(from)], NONE);
+        m.frame(
+            &mut app,
+            vec![Mouse::button(from, primary, true, NONE)],
+            NONE,
+        );
+        let mid = from + (to - from) * 0.5;
+        m.frame(&mut app, vec![egui::Event::PointerMoved(mid)], NONE);
+        assert!(app.view.panel(FM).drag.is_some());
+        // A pattern pad (or a song step) picks pattern 1 mid-drag.
+        app.doc.project.machine_mut(FM).unwrap().selected = 1;
+        m.frame(&mut app, vec![egui::Event::PointerMoved(to)], NONE);
+        assert!(app.view.panel(FM).drag.is_none(), "the drag let go");
+        m.frame(
+            &mut app,
+            vec![Mouse::button(to, primary, false, NONE)],
+            NONE,
+        );
+        m.frame(&mut app, vec![], NONE);
+        assert_eq!(app.doc.project.roll(FM, 1).unwrap(), &other, "untouched");
+    }
+
+    #[test]
     fn selected_notes_of_another_pattern_are_no_selection() {
         let mut app = app_with(FM, &[(0, 4, 60)]);
         let n = app.doc.project.roll(FM, 0).unwrap().notes[0];
@@ -1872,6 +1919,7 @@ mod tests {
         let origin = Box::new(app.doc.project.fm(FM).unwrap().patterns[0].clone());
         app.view.panel(FM).drag = Some(LaneDrag::Resize {
             origin,
+            slot: 0,
             idx: vec![0],
             grab: 4,
         });
@@ -1906,6 +1954,7 @@ mod tests {
         // The drag: move onto the first note (a live drag merges).
         app.view.panel(FM).drag = Some(LaneDrag::Move {
             origin: Box::new(p.clone()),
+            slot: 0,
             idx: vec![i],
             grab: (8, 60),
         });
