@@ -242,6 +242,11 @@ pub struct ViewState {
     pub renaming: Option<(MachineUid, String)>,
     /// Rack control clicked while the rack was drawn; applied after it.
     pub rack_action: Option<rack_header::RackAction>,
+    /// The Fill button: held down now, and latched by a Shift-click.
+    pub fill_held: bool,
+    pub fill_latched: bool,
+    /// The Fill button as last drawn.
+    pub fill_rect: Option<egui::Rect>,
 }
 
 pub struct SidAcidApp {
@@ -423,6 +428,7 @@ impl SidAcidApp {
         // allow one client stream per device.
         self.audio = None;
         self.rack_for_new_host();
+        self.resend_fill();
     }
 
     /// Queues commands for the audio thread. Repeated values for the same

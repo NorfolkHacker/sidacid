@@ -239,6 +239,7 @@ impl SidAcidApp {
         // The new engine goes to the running host (or, with none, the
         // count runs as if it did; see `rack_sync`).
         self.rack_for_replaced_engine();
+        self.resend_fill();
         // Panels of machines the new project lacks.
         self.view
             .panels

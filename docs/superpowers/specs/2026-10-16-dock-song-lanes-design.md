@@ -311,6 +311,23 @@ engine act on `chance`, `ratchet` and `cond`.
   expression strip can show chance and ratchet.
 - Notes with chance < 100 or a condition get a dashed outline and a
   badge ("50%", "1:4", "×3").
+- **Evaluation order:** at a note's start tick its condition is checked
+  first; only if it passes is the chance rolled (a failed condition
+  rolls no dice). A note that doesn't play emits nothing: on acid it is
+  a gap (an open gate releases at its normal point, and a slide into it
+  doesn't hold); on poly it holds no pitch, so a played note on the same
+  pitch releases at its own end.
+- **Conditional notes:** a note is conditional when its `cond` isn't
+  `Always` or its chance is below 100. Only conditional notes set the
+  track's previous result that `Pre` / `NotPre` read; plain notes leave
+  it as it is. The result is whether the note played after both checks,
+  so a failed condition counts as "didn't play". It starts false.
+- **Loop count resets:** each track's count (and its previous result)
+  goes back to 0 on Play, at each song block's start, and when a queued
+  pattern switch lands. A seek (playing from a song position, a machine
+  joining mid-play) derives the count: the passes straight playback
+  from the block start (Song mode) or from Play (Pattern mode) would
+  have made.
 
 ## 7. Note tools menu
 

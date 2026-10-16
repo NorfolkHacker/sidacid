@@ -39,13 +39,21 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - **Snap to scale:** new, typed and dragged notes and Up/Down transposes land on scale degrees (Shift+Up/Down still moves an octave).
   - **Fold:** each melodic lane has a Fold toggle that hides off-scale rows. Rows that hold notes stay visible, and the keyboard cursor always stays on a shown row (a hidden pitch counts as the row below it).
   - Each lane has a header (collapse, pattern label, Strip toggle) and a handle to change its height.
-  - An expression strip per lane: velocity, or accent and slide on the bass synths, or accent on the drums. The drum accent strip accents every hit on a step; double-click a hit to toggle its own accent.
+  - An expression strip per lane: velocity, or accent and slide on the bass synths, or accent on the drums. The drum accent strip accents every hit on a step; double-click a hit to toggle its own accent. With the strip open, the lane header switches it between that view (Vel, Acc/Slide or Acc), Chance and Ratchet; the Chance and Ratchet strips draw a bar per note, edited by click or drag like velocity.
+  - **Note inspector:** in Pattern mode, with notes selected in the focused lane, the dock header edits them all at once: Vel (not on the bass synths), Chance, Ratchet, Cond, and Accent (bass synths and drums) and Slide (bass synths). A field the notes differ in shows "–". Each change is one undo step and the notes stay selected. **Reroll**, next to Chance, gives every chance in the project new dice (one undo step).
+  - Notes with a chance below 100 % or a condition get a dashed outline, and a badge when wide enough to show it: the condition ("1:4", "1st", "!1st", "F", "!F", "P", "!P"), the chance ("50%") and the ratchet ("×3").
   - Type notes with the keyboard: click a lane to focus it, then use the tracker layout (Z S X D C V G B H N J M and Q 2 W 3 E R 5 T 6 Y 7 U I). Arrows move the cursor and Backspace steps back and deletes. Clicking outside the dock turns keyboard entry off.
   - Select notes: click one (Shift-click toggles), or drag on empty space to box-select (Shift adds). Drag the selection to move it; Ctrl-drag moves copies, and Alt moves in single 1/64 ticks. Drag a note's right edge to resize the whole selection. Right-click deletes (the whole selection if the note is selected).
   - Drag along the ruler, above the thumb strip, to select a time range across every lane; a click on the ruler clears it.
   - With the dock focused: Left/Right nudge the selection one snap (Alt: one tick); Up/Down transpose a semitone, or move a drum row (Shift: an octave, melodic lanes only); Delete or Backspace removes it; Esc clears it; Ctrl+A selects the whole lane.
   - Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste notes at the cursor (with nothing selected Ctrl+C copies the whole lane and Ctrl+X does nothing), and Ctrl+D duplicates right after the selection. With a ruler range these act on every lane at once, pasting back into the same machines, and Ctrl+D repeats the block. Without dock focus, Ctrl+C / Ctrl+V copy whole patterns as before.
   - The rack above keeps the knobs, pads, Len/Trans and dice.
+- **Chance, ratchet and conditions** (every note, on every machine):
+  - **Chance** (0–100 %): how likely the note is to play on each pass. The dice are fixed by the project's seed, so a project plays, re-renders and exports the same every time until you Reroll.
+  - **Ratchet** (1–8): the note re-triggers that many times, evenly spaced inside its length. On the bass synths each hit is a fresh gate, and a slide applies after the last hit.
+  - **Conditions:** Always; 1:2 … 8:8 (a:b plays on pass a of every b passes of its pattern); First and Not first (the first pass or every other); Fill and Not fill (while Fill is on, or off); Pre and Not pre (whether the lane's previous conditional note played). A note's condition is checked first, then its chance.
+  - Each lane counts the passes of its pattern from Play, from the start of its song block, and from a queued pattern switch.
+  - **Fill:** the transport's Fill button is on while held; Shift-click latches it on or off. It lights while on.
 - **Patterns:** 128 per machine, in banks A–H × 16. Each pattern is up to 64 steps, and a pattern switch queues to the next loop.
 - **Mixer and effects:**
   - Six channels with per-channel distortion (2× oversampled) and compressor, level, pan, mute and solo.
