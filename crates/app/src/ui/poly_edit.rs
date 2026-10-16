@@ -4,7 +4,6 @@
 
 use acid_engine::project::{MAX_NOTES, Note, NotePattern, TICKS_PER_STEP};
 
-#[allow(dead_code)] // variants, ALL and label are used by the dock (phase 2, tasks 5-6)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Snap {
     Quarter,
@@ -15,7 +14,6 @@ pub enum Snap {
     Tick,
 }
 
-#[allow(dead_code)] // ALL and label are used by the dock (phase 2, task 5)
 impl Snap {
     pub const ALL: [Snap; 5] = [
         Snap::Quarter,

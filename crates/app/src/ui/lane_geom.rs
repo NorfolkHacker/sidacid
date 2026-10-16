@@ -108,7 +108,6 @@ impl LaneGeom {
 /// The horizontal scroll that keeps a playhead at content x `playhead_x`
 /// in a view `view_w` wide: unchanged while it sits left of the last
 /// quarter of the view, else moved so it sits a quarter in.
-#[allow(dead_code)] // used by the dock (phase 2, tasks 5-6)
 pub fn follow_scroll(scroll_x: f32, view_w: f32, playhead_x: f32) -> f32 {
     let margin = view_w / 4.0;
     if playhead_x >= scroll_x && playhead_x <= scroll_x + view_w - margin {

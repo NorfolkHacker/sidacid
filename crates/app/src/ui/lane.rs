@@ -1020,6 +1020,46 @@ mod tests {
     }
 
     #[test]
+    fn right_clicking_a_drum_hit_deletes_it_in_one_undo_step() {
+        let mut app = kit_with_hits(&[0, 1]);
+        let ctx = egui::Context::default();
+        let origin = kit_frame(&mut app, &ctx, 0.0, vec![]);
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let at = pos2(
+            origin.x + app.lane_key_w() + 9.0 * tw,
+            origin.y + HEADER_H + 7.0 * DRUM_ROW_H + DRUM_ROW_H / 2.0,
+        );
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let before = app.doc.project.roll(KIT808, 0).unwrap().clone();
+        kit_frame(&mut app, &ctx, 1.0, vec![egui::Event::PointerMoved(at)]);
+        kit_frame(&mut app, &ctx, 1.1, vec![button(true)]);
+        kit_frame(&mut app, &ctx, 1.2, vec![button(false)]);
+        kit_frame(&mut app, &ctx, 1.3, vec![]);
+        let pitches: Vec<_> = app
+            .doc
+            .project
+            .roll(KIT808, 0)
+            .unwrap()
+            .notes
+            .iter()
+            .map(|n| n.pitch)
+            .collect();
+        assert_eq!(pitches, [1], "only the BD under the pointer goes");
+        assert_eq!(app.view.focus, Some(KIT808));
+        app.doc.undo();
+        assert_eq!(
+            app.doc.project.roll(KIT808, 0).unwrap(),
+            &before,
+            "one undo step"
+        );
+    }
+
+    #[test]
     fn double_clicking_a_drum_hit_toggles_its_accent() {
         let mut app = kit_with_hits(&[0, 1]);
         let ctx = egui::Context::default();
@@ -1189,14 +1229,14 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_panel_frame_releases_a_held_key() {
+    fn a_collapsed_lane_frame_releases_a_held_key() {
         let mut app = fm_app();
         app.audition(FM, Some(60));
         app.view.panel(FM).poly_drag = Some(PolyDrag::Resize { index: 0 });
         app.doc.apply(Edit::Bpm(100.0), true);
-        // The FM panel collapses: its roll isn't drawn, so only the
+        // The FM lane collapses: its grid isn't drawn, so only the
         // frame-level check can see that the pointer is up.
-        app.view.force_open.push(("fm", false));
+        app.doc.project.machine_mut(FM).unwrap().lane.collapsed = true;
         crate::ui::run_frames(&mut app, 1);
         assert_eq!(app.view.audition, None);
         assert!(app.view.panels.values().all(|p| p.poly_drag.is_none()));

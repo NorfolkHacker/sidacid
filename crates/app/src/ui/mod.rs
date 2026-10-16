@@ -1,9 +1,11 @@
-//! The SidAcid window: transport bar on top, a scrolling rack of machine
-//! panels below. The UI owns the project (`Document`); every change goes
+//! The SidAcid window: transport bar on top, the editor dock (every
+//! machine's lane) at the bottom, a scrolling rack of machine panels
+//! between. The UI owns the project (`Document`); every change goes
 //! to the audio thread as `Command`s through `AudioLink`.
 
 mod alg_diagram;
 mod audio_settings;
+mod dock;
 mod drum_panel;
 mod files;
 mod fm_panel;
@@ -80,14 +82,14 @@ pub struct DockState {
     pub zoom: usize,
     pub scroll_x: f32,
     /// The dock scrolls to follow the playhead.
-    #[allow(dead_code)] // used by the dock (phase 2, tasks 5-6)
     pub follow: bool,
     pub snap: poly_edit::Snap,
     /// The dock has keyboard focus.
     pub keyboard: bool,
     /// The divider above the dock is being dragged.
-    #[allow(dead_code)] // used by the dock (phase 2, task 6)
     pub resizing: bool,
+    /// Where the dock was drawn this frame.
+    pub rect: Option<egui::Rect>,
 }
 
 impl Default for DockState {
@@ -99,6 +101,7 @@ impl Default for DockState {
             snap: poly_edit::Snap::Step,
             keyboard: false,
             resizing: false,
+            rect: None,
         }
     }
 }
@@ -533,14 +536,16 @@ impl SidAcidApp {
                 });
             });
         }
+        self.dock(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| self.rack(ui));
         });
+        self.dock_focus_after_draw(ctx);
         self.dialogs(ctx);
         self.audio_settings_window(ctx);
-        // A collapsed panel stops drawing its roll, so a key or drag held
+        // A collapsed lane stops drawing its grid, so a key or drag held
         // when it collapsed would never see its release.
         self.release_stale_poly_input(ctx.input(|i| i.pointer.any_down()));
         self.tick_queued_save(ctx);
@@ -1314,6 +1319,9 @@ mod tests {
             .push(Note::new(4, 300, 36, 20));
         doc.project.sampler_mut(SAMPLER).unwrap().patterns[0].length = 4;
         let mut app = SidAcidApp::headless(doc);
+        // The rolls are the dock's lanes: shut rack panels don't hide them.
+        app.view.force_open.push(("fm", false));
+        app.view.force_open.push(("sampler", false));
         run_frames(&mut app, 3);
         assert_eq!(
             panels(&mut app, &[FM, SAMPLER], |p| p.lane_scroll_y.is_some()),
@@ -1331,6 +1339,7 @@ mod tests {
         roll.notes.push(first);
         roll.notes.push(Note::new(4, 4, 39, 100));
         let mut app = SidAcidApp::headless(doc);
+        app.view.force_open.push(("synth", false));
         run_frames(&mut app, 1);
         assert_eq!(
             panels(&mut app, &[SYNTH1], |p| p.lane_scroll_y.is_some()),

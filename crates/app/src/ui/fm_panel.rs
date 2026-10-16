@@ -1,6 +1,6 @@
 //! The FM panel: algorithm diagram, global knobs, operator editor with
 //! envelope sketch, LFO / pitch EG / effects, the voice browser, and the
-//! pattern row with the poly piano roll.
+//! pattern row (the roll is the FM lane in the dock).
 
 use super::alg_diagram::{env_points, layout};
 use super::fm_voices::{FmBrowser, starter};
@@ -124,8 +124,6 @@ impl SidAcidApp {
                 });
             app.fm_voice_browser(ui, uid);
             app.note_pattern_row(ui, uid);
-            let width = ui.available_width();
-            app.lane(ui, uid, width);
         });
     }
 

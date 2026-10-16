@@ -1,6 +1,6 @@
 //! The Mono panel: the synth's knobs grouped in front-panel order (VCO,
 //! Source, VCF, Env; then LFO, Porta, Arp, Drift, Chorus), an envelope
-//! sketch, the patch browser, and the pattern row with the poly piano roll.
+//! sketch, the patch browser, and the pattern row (the roll is in the dock).
 
 use super::knob::CELL;
 use super::mono_patches::STARTER;
@@ -112,8 +112,6 @@ impl SidAcidApp {
             });
             app.mono_patch_browser(ui, uid);
             app.note_pattern_row(ui, uid);
-            let width = ui.available_width();
-            app.lane(ui, uid, width);
         });
     }
 
@@ -281,9 +279,9 @@ mod tests {
         let find = |drawn: &[(String, egui::Rect)], f: &dyn Fn(&str) -> bool| {
             drawn.iter().find(|(t, _)| f(t)).map(|(_, r)| *r)
         };
-        // Scroll with the pointer in the rack's left gutter, clear of knobs,
-        // step grids and rolls (which take the wheel themselves).
-        let pointer = pos2(12.0, h * 0.6);
+        // Scroll with the pointer in the rack's left gutter, clear of knobs
+        // and of the dock below the rack (its lanes take the wheel).
+        let pointer = pos2(12.0, h * 0.25);
         for _ in 0..400 {
             let drawn = frame(&mut app, vec![]);
             let head = find(&drawn, &|t| t.starts_with(&title));
@@ -361,9 +359,9 @@ mod tests {
                 let t = i as f32 / 300.0;
                 let events = if i % 20 == 19 {
                     // Scroll the rack a little, with the pointer in the left
-                    // gutter where nothing takes the wheel.
+                    // gutter where nothing takes the wheel (above the dock).
                     vec![
-                        egui::Event::PointerMoved(pos2(12.0, size.y * 0.6)),
+                        egui::Event::PointerMoved(pos2(12.0, size.y * 0.25)),
                         egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: vec2(0.0, wheel),

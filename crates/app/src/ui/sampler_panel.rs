@@ -1,6 +1,6 @@
 //! The sampler panel: global knobs, 16 slot pads, the selected slot's
 //! controls and waveform with draggable markers, its knobs, and the
-//! pattern row with the poly roll. Audio files can be dropped on it.
+//! pattern row (the roll is in the dock). Audio files can be dropped on it.
 
 use super::sampler_ui::{
     Marker, frame_to_x, key_name, markers, nearest_marker, peaks, set_marker, x_to_frame, zone_text,
@@ -64,8 +64,6 @@ impl SidAcidApp {
                 }
             });
             app.note_pattern_row(ui, uid);
-            let width = ui.available_width();
-            app.lane(ui, uid, width);
         });
         self.sampler_drop(ui, uid);
         self.release_pad_note(ui);

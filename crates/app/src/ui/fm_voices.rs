@@ -201,10 +201,10 @@ mod tests {
             };
             ctx.run(input, |ctx| app.ui(ctx)).shapes
         };
-        // Scroll the rack (pointer on its right edge, clear of the lanes,
-        // which take the wheel for themselves)
-        // until the FM header is on screen, then let the scroll settle.
-        let pointer = egui::pos2(634.0, 700.0);
+        // Scroll the rack (pointer on its right edge, above the dock,
+        // whose lanes take the wheel for themselves) until the FM header
+        // is in the rack's view, then let the scroll settle.
+        let pointer = egui::pos2(634.0, 300.0);
         let mut header = None;
         for _ in 0..200 {
             let shapes = frame(
@@ -219,7 +219,7 @@ mod tests {
                 ],
             );
             header = text_y(&shapes, "FM   A01");
-            if header.is_some_and(|y| y < 900.0) {
+            if header.is_some_and(|y| y < 450.0) {
                 break;
             }
         }

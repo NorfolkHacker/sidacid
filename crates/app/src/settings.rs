@@ -41,7 +41,6 @@ impl Default for UiSettings {
 }
 
 impl UiSettings {
-    #[allow(dead_code)] // used by the dock (phase 2, task 6)
     /// `dock_frac` held to 0.15..=0.85; anything non-finite is the default.
     pub fn clamped_dock_frac(&self) -> f32 {
         if self.dock_frac.is_finite() {

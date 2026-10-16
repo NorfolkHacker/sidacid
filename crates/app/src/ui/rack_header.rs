@@ -5,7 +5,7 @@
 //! whole rack has been drawn (`rack_action_after_draw`): the rack must not
 //! change while its panels are being drawn from it.
 
-use super::SidAcidApp;
+use super::{SidAcidApp, theme};
 use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
 use eframe::egui::{self, collapsing_header::CollapsingState};
 
@@ -150,10 +150,15 @@ impl SidAcidApp {
             self.rename_box(ui, uid, title);
         } else {
             // Only the arrow toggles the panel: a double-click here renames
-            // and must leave the panel as it was.
+            // and must leave the panel as it was. The focused machine's
+            // title is lit, like its lane's outline in the dock.
+            let mut text = egui::RichText::new(title).strong();
+            if self.focused() == Some(uid) {
+                text = text.color(theme::ACID);
+            }
             let r = ui
                 .add(
-                    egui::Label::new(egui::RichText::new(title).strong())
+                    egui::Label::new(text)
                         .sense(egui::Sense::click())
                         .selectable(false),
                 )

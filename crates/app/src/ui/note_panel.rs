@@ -1,4 +1,4 @@
-//! The note-pattern row (pads, length, snap) shared by the FM and Sampler panels.
+//! The note-pattern row (pads, length) shared by the FM, Sampler and Mono panels.
 
 use super::SidAcidApp;
 use crate::document::Edit;
@@ -6,7 +6,7 @@ use acid_engine::machine::MachineUid;
 use eframe::egui;
 
 impl SidAcidApp {
-    /// Pattern pads, length and snap for a note machine (FM or Sampler).
+    /// Pattern pads and length for a note machine (FM, Sampler or Mono).
     pub(crate) fn note_pattern_row(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let slot = self.selected(uid);
         egui::ScrollArea::horizontal()
