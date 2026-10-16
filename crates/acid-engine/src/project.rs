@@ -954,6 +954,30 @@ mod tests {
         p.validate().unwrap();
     }
 
+    /// A real v4 save (written by the v4 code): the demo project plus a
+    /// Mono machine with one note, and Synth 2 in the old piano roll view.
+    #[test]
+    fn a_v4_save_loads_as_the_demo_on_notes() {
+        let text = include_str!("../tests/fixtures/v4_demo.sidacid");
+        assert!(text.contains("version: 4,") && text.contains("view: PianoRoll"));
+        let p = Project::from_ron(text).unwrap();
+        assert_eq!(p.version, PROJECT_VERSION);
+        assert_eq!(PROJECT_VERSION, 5);
+        let demo = crate::demo::demo_project();
+        assert_eq!(p.machines[..6], demo.machines[..6]);
+        assert_eq!(p.song, demo.song);
+        let mono = &p.machines[6];
+        assert_eq!(
+            (mono.name.as_str(), mono.machine_type()),
+            ("Mono", MachineType::Mono)
+        );
+        let MachineBody::Mono(m) = &mono.body else {
+            unreachable!()
+        };
+        assert_eq!(m.patterns[0].notes, [Note::new(0, 8, 48, 100)]);
+        p.validate().unwrap();
+    }
+
     #[test]
     fn v5_round_trips() {
         for p in [Project::default(), crate::demo::demo_project()] {
