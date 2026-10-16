@@ -500,7 +500,8 @@ impl SidAcidApp {
             self.view.focus = Some(uid);
             self.view.dock.keyboard = true;
             if p.x >= geom.left {
-                self.view.dock.range = None;
+                // With the selections the range made in the other lanes.
+                self.drop_range();
             }
             let cursor = &mut self.view.panel(uid).cursor;
             cursor.pitch = geom.pitch_at_clamped(p.y);

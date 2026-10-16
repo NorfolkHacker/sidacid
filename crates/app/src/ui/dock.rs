@@ -227,6 +227,8 @@ impl SidAcidApp {
             (((x - left + scroll_x) / tw).max(0.0) as u32).min(u16::MAX as u32) as u16
         };
         if picker.clicked() {
+            // Only the band goes: the selections it made stay (the plan),
+            // so a click on the ruler doesn't lose them.
             self.view.dock.range = None;
         } else if picker.dragged() {
             let origin = ui.input(|i| i.pointer.press_origin());
@@ -375,7 +377,7 @@ impl SidAcidApp {
 
     /// Forgets the ruler range and the selections it made in the other
     /// lanes; the focused lane keeps its own, which the caller handles.
-    fn drop_range(&mut self) {
+    pub(crate) fn drop_range(&mut self) {
         if self.view.dock.range.take().is_none() {
             return;
         }
@@ -1092,6 +1094,24 @@ mod tests {
         let lanes = app.view.dock.lanes.unwrap();
         press(&mut app, &ctx, pos2(left + 200.0, lanes.top() + 50.0), 3.0);
         assert_eq!(app.view.dock.range, None, "a lane click clears it");
+    }
+
+    #[test]
+    fn a_lane_press_drops_the_selections_the_range_made() {
+        use crate::test_rack::{FM, SYNTH1};
+        let mut app = range_app();
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        app.view.dock.range = Some((12, 32));
+        app.select_range(12, 32);
+        assert_eq!(app.selection(FM), vec![1]);
+        // A press in Synth 1's grid (the top lane), clear of its notes.
+        let left = app.view.dock.ruler.unwrap().left() + app.lane_key_w();
+        let lanes = app.view.dock.lanes.unwrap();
+        press(&mut app, &ctx, pos2(left + 200.0, lanes.top() + 50.0), 1.0);
+        assert_eq!(app.view.focus, Some(SYNTH1));
+        assert_eq!(app.view.dock.range, None);
+        assert!(app.selection(FM).is_empty(), "the other lane let go");
     }
 
     #[test]
