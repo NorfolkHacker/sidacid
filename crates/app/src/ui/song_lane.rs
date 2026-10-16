@@ -812,6 +812,7 @@ mod tests {
     fn a_placed_block_lands_on_the_nearest_free_spot() {
         // Bar 2 (16..32) is free only from 24: the new block goes after.
         let mut app = app_with(&[(0, 0), (8, 1)]);
+        app.doc.project.roll_mut(SYNTH1, 0).unwrap().length = 8;
         app.doc.project.roll_mut(SYNTH1, 1).unwrap().length = 16;
         let mut m = Mouse::new(&mut app, SYNTH1);
         let at = m.at(&app, 26.5);

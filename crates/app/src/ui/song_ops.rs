@@ -56,21 +56,47 @@ pub struct GroupLane<'a> {
 }
 
 /// Whether every moved block of `lanes`, moved by `d` steps, starts at or
-/// after 0, ends by `MAX_SONG_STEPS` and overlaps no block that stays.
+/// after 0, ends by `MAX_SONG_STEPS` and overlaps no block that stays nor
+/// another moved block (each lane's moved blocks are sorted by start).
 fn group_fits(lanes: &[GroupLane<'_>], d: i64, lens: Lens<'_>) -> bool {
     let max = MAX_SONG_STEPS as i64;
     lanes.iter().all(|l| {
-        l.moved.iter().all(|m| {
-            let s = m.start as i64 + d;
-            let e = s + (song::block_end(m, l.uid, lens) - m.start) as i64;
-            if s < 0 || e > max {
-                return false;
-            }
-            // Ends of a sorted lane without overlaps are sorted too.
-            let i = l.rest.partition_point(|x| (x.start as i64) < e);
-            i == 0 || (song::block_end(&l.rest[i - 1], l.uid, lens) as i64) <= s
-        })
+        // Moving all by one offset keeps how they overlap each other.
+        let apart = l
+            .moved
+            .windows(2)
+            .all(|w| song::block_end(&w[0], l.uid, lens) <= w[1].start);
+        apart
+            && l.moved.iter().all(|m| {
+                let s = m.start as i64 + d;
+                let e = s + (song::block_end(m, l.uid, lens) - m.start) as i64;
+                if s < 0 || e > max {
+                    return false;
+                }
+                // Ends of a sorted lane without overlaps are sorted too.
+                let i = l.rest.partition_point(|x| (x.start as i64) < e);
+                i == 0 || (song::block_end(&l.rest[i - 1], l.uid, lens) as i64) <= s
+            })
     })
+}
+
+/// Lays a sorted clip out with machine `uid`'s pattern lengths: a block
+/// that would run into the next one of the clip is cut to end there
+/// (`len: Some`). A `len: None` block lasts whatever its pattern lasts on
+/// the machine it lands on, which may be longer than where it was copied
+/// from. Returns whether any block was cut.
+pub fn fit_clip(clip: &mut [Block], uid: MachineUid, lens: Lens<'_>) -> bool {
+    let mut cut = false;
+    for k in 1..clip.len() {
+        let next = clip[k].start;
+        let b = &mut clip[k - 1];
+        if song::block_end(b, uid, lens) > next {
+            // Two blocks at one start can't be fitted; `group_fits` refuses them.
+            b.len = Some(next.saturating_sub(b.start).clamp(1, u16::MAX as u32) as u16);
+            cut = true;
+        }
+    }
+    cut
 }
 
 /// The one offset that moves every lane's group: the nearest to `want`
@@ -387,6 +413,24 @@ mod tests {
         assert_eq!(group_offset(&lanes, 32, BAR, &lens), Some(32));
         assert_eq!(group_offset(&lanes, 48, BAR, &lens), Some(64));
         assert_eq!(group_offset(&lanes[..1], 16, BAR, &lens), Some(32));
+    }
+
+    #[test]
+    fn blocks_moved_together_never_overlap_each_other() {
+        // Pattern 2 lasts 32 steps: the second block starts inside it.
+        let clip = vec![b(0, 2), b(16, 0)];
+        let mut lane = vec![b(64, 0)];
+        assert_eq!(paste(&mut lane, UID, &clip, 0, BAR, &lens), None);
+        assert_eq!(starts(&lane), [64], "refused, the lane untouched");
+    }
+
+    #[test]
+    fn fit_clip_cuts_a_block_running_into_the_next() {
+        let mut clip = vec![b(0, 2), b(16, 0), b(32, 1)];
+        assert!(fit_clip(&mut clip, UID, &lens));
+        assert_eq!(clip[0].len, Some(16), "cut to end at the next block");
+        assert_eq!((clip[1].len, clip[2].len), (None, None), "the rest fit");
+        assert!(!fit_clip(&mut clip, UID, &lens), "already fits");
     }
 
     #[test]

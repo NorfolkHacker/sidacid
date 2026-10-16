@@ -16,6 +16,13 @@ impl SidAcidApp {
             },
             merge,
         );
+        // Every song tool keeps blocks apart; a song that doesn't
+        // validate would save but never load back.
+        debug_assert!(
+            self.doc.project.validate_lanes().is_ok(),
+            "a song edit left lanes that don't validate: {:?}",
+            self.doc.project.validate_lanes()
+        );
         self.send(cmds);
     }
 

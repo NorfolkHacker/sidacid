@@ -2456,6 +2456,61 @@ mod tests {
         assert!(song_lane_of(&app, FM).is_empty(), "one undo step");
     }
 
+    /// The song still validates (it would save and load back).
+    fn assert_song_valid(app: &SidAcidApp) {
+        app.doc.project.validate().expect("the song validates");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a song edit left lanes that don't validate")]
+    fn a_song_edit_with_overlapping_blocks_is_caught_in_debug_builds() {
+        let mut app = song_app();
+        let mut s = app.doc.project.song.clone();
+        s.lane_mut(crate::test_rack::SYNTH1)[1].start = 8;
+        app.apply_song(s, false);
+    }
+
+    #[test]
+    fn pasting_onto_a_machine_with_longer_patterns_cuts_the_clip_to_fit() {
+        use crate::test_rack::{FM, SYNTH1};
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        app.doc.project.roll_mut(FM, 0).unwrap().length = 32;
+        pick(&mut app, SYNTH1, &[0, 16]);
+        key_with(&mut app, Key::C, Modifiers::COMMAND);
+        app.view.focus = Some(FM);
+        app.view.song_cursor = 0;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert_eq!(song_lane_of(&app, FM), [(0, 0, Some(16)), (16, 1, None)]);
+        assert_eq!(
+            app.view.status_line.as_deref(),
+            Some("A pasted block was shortened to fit before the next one")
+        );
+        assert_song_valid(&app);
+    }
+
+    #[test]
+    fn pasting_after_a_pattern_grew_cuts_the_clip_to_fit() {
+        use crate::test_rack::SYNTH1;
+        use acid_engine::project::{Block, PatternRef};
+        use egui::{Key, Modifiers};
+        let mut app = song_keys_app();
+        pick(&mut app, SYNTH1, &[0, 16]);
+        key_with(&mut app, Key::C, Modifiers::COMMAND);
+        // Pattern 0 grows to 24 steps; the song ripples, the clip doesn't.
+        app.doc.project.roll_mut(SYNTH1, 0).unwrap().length = 24;
+        *app.doc.project.song.lane_mut(SYNTH1) = vec![
+            Block::new(0, PatternRef(0)),
+            Block::new(24, PatternRef(1)),
+            Block::new(56, PatternRef(2)),
+        ];
+        app.view.song_cursor = 128;
+        key_with(&mut app, Key::V, Modifiers::COMMAND);
+        assert_eq!(&synth1(&app)[3..], [(128, 0, Some(16)), (144, 1, None)]);
+        assert_song_valid(&app);
+    }
+
     #[test]
     fn ctrl_x_cuts_blocks_in_one_undo_step() {
         use crate::test_rack::SYNTH1;

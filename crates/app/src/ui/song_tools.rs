@@ -443,15 +443,24 @@ impl SidAcidApp {
     }
 
     /// Puts each `(uid, clip)` onto its lane of `s`, all by the one offset
-    /// nearest `want` on the bar grid at which every clip fits. Returns
-    /// that offset and the pasted blocks of each lane; `None`, `s`
-    /// untouched, with a message, when there is no such offset.
+    /// nearest `want` on the bar grid at which every clip fits. Each clip
+    /// is first laid out with its target machine's pattern lengths: a
+    /// block that would now run into the next is cut to end there, and
+    /// the status line says so. Returns that offset and the pasted blocks
+    /// of each lane; `None`, `s` untouched, with a message, when there is
+    /// no such offset.
     fn paste_group(
         &mut self,
         s: &mut Song,
         targets: &LaneBlocks,
         want: u32,
     ) -> Option<(i64, LaneBlocks)> {
+        let mut targets = targets.clone();
+        let cut = self.with_lens(|lens| {
+            targets.iter_mut().fold(false, |cut, (uid, clip)| {
+                song_ops::fit_clip(clip, *uid, lens) | cut
+            })
+        });
         let d = {
             let groups: Vec<GroupLane<'_>> = targets
                 .iter()
@@ -468,10 +477,14 @@ impl SidAcidApp {
             return None;
         };
         let mut pasted = Vec::new();
-        for (uid, clip) in targets {
+        for (uid, clip) in &targets {
             let (lane, idx) = song_ops::with_moved(s.lane(*uid), clip, d);
             pasted.push((*uid, song_ops::values(&lane, &idx)));
             *s.lane_mut(*uid) = lane;
+        }
+        if cut {
+            *self.status_line_mut() =
+                Some("A pasted block was shortened to fit before the next one".into());
         }
         Some((d, pasted))
     }

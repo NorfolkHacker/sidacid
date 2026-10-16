@@ -824,7 +824,7 @@ impl Project {
     /// Checks the song's lanes, length and loop: lanes on rack machines,
     /// one each; blocks sorted, never overlapping, on patterns in range
     /// and within `MAX_SONG_STEPS`.
-    fn validate_lanes(&self) -> Result<(), ProjectError> {
+    pub fn validate_lanes(&self) -> Result<(), ProjectError> {
         let bad = |m: &str| Err(ProjectError::Invalid(m.into()));
         let max = crate::song::MAX_SONG_STEPS as u32;
         let lens = crate::song::lens_of(self);
