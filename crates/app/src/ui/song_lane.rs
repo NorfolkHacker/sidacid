@@ -97,6 +97,16 @@ pub(crate) fn snap_bar(step: u32, fine: bool) -> u32 {
     if fine { step } else { step / BAR * BAR }
 }
 
+/// The whole bars a ruler drag from step `a` to step `b` picks (either
+/// order): from the first one's start to the last one's end, held to the
+/// song limit (`MAX_SONG_STEPS` is a whole number of bars).
+pub(crate) fn bar_range(a: u32, b: u32) -> (u16, u16) {
+    let last = MAX_SONG_STEPS as u32 - BAR;
+    let lo = snap_bar(a.min(b), false).min(last);
+    let hi = snap_bar(a.max(b), false).min(last) + BAR;
+    (lo as u16, hi as u16)
+}
+
 impl SidAcidApp {
     /// Runs `f` with the project's pattern lengths.
     pub(crate) fn with_lens<R>(&self, f: impl FnOnce(Lens<'_>) -> R) -> R {
@@ -626,6 +636,17 @@ mod tests {
 
     const NONE: egui::Modifiers = egui::Modifiers::NONE;
     const W: f32 = 800.0;
+
+    #[test]
+    fn a_ruler_range_stops_at_the_song_limit() {
+        let max = MAX_SONG_STEPS as u32;
+        assert_eq!(bar_range(40, 3), (0, 48), "whole bars, either order");
+        assert_eq!(bar_range(16, 65_000), (16, max as u16), "end clamped");
+        assert_eq!(bar_range(16, max - 1), (16, max as u16), "the last bar");
+        let (lo, hi) = bar_range(65_000, 70_000);
+        assert!(lo < hi && hi as u32 == max, "past the limit: the last bar");
+        assert_eq!(lo as u32, max - BAR);
+    }
 
     /// Mouse gestures on one machine's song lane, with egui's clock.
     struct Mouse {

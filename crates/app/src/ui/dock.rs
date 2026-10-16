@@ -389,12 +389,10 @@ impl SidAcidApp {
             && let (Some(from), Some(p)) =
                 (self.view.dock.range_from, picker.interact_pointer_pos())
         {
-            let a = snap_bar(from as u32, false);
-            let b = snap_bar(geom(self.view.dock.scroll_x).step_at(p.x), false);
-            let lo = a.min(b);
-            let hi = (a.max(b) + BAR).min(u16::MAX as u32);
-            self.view.dock.range = Some((lo as u16, hi as u16));
-            self.select_song_range(lo, hi);
+            let to = geom(self.view.dock.scroll_x).step_at(p.x);
+            let (lo, hi) = song_lane::bar_range(from as u32, to);
+            self.view.dock.range = Some((lo, hi));
+            self.select_song_range(lo as u32, hi as u32);
         }
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, theme::GRID_DARK);
