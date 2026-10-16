@@ -8,14 +8,16 @@
 //! long), drag the body to move, drag the right edge to stretch (not on
 //! drum lanes), right-click deletes, chords stack freely. The acid synths
 //! keep one note at a time and get accent and slide lanes instead of
-//! velocity; drum lanes get an accent lane. Clicking the key strip of an
-//! FM, Mono or sampler lane auditions the pitch.
+//! velocity; drum lanes get an accent lane, and double-clicking a drum
+//! hit toggles its accent. Clicking the key strip of an FM, Mono or
+//! sampler lane auditions the pitch.
 
-use super::key_entry::{Cursor, LaneKind};
+use super::key_entry::LaneKind;
 use super::lane_geom::{LaneGeom, Rows, ZOOMS, tick_w};
+use super::poly_edit::Snap;
 use super::poly_edit::{
     Flag, PolyDrag, add, delete, make_mono, move_to, note_at, resize, resolve_overlaps,
-    set_velocity_in, toggle_flag,
+    set_velocity_in, toggle_accent_in, toggle_flag,
 };
 use super::{SidAcidApp, theme};
 use crate::document::Edit;
@@ -27,7 +29,7 @@ use acid_engine::project::{
 };
 use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Sense, Shape, Stroke,
-    StrokeKind, UiBuilder, Vec2, pos2, vec2,
+    StrokeKind, UiBuilder, pos2, vec2,
 };
 
 pub(crate) const NOTE_NAMES: [&str; 12] = [
@@ -412,6 +414,15 @@ impl SidAcidApp {
                 theme::ACID.gamma_multiply(0.35 + 0.65 * note.vel as f32 / 127.0)
             };
             grid.rect_filled(r, 2.0, fill);
+            if acid && note.accent {
+                grid.line_segment(
+                    [
+                        pos2(r.left(), r.top() + 1.0),
+                        pos2(r.right(), r.top() + 1.0),
+                    ],
+                    Stroke::new(2.0_f32, theme::ACCENT),
+                );
+            }
             if acid
                 && note.slide
                 && let Some(next) = pattern
@@ -456,16 +467,19 @@ impl SidAcidApp {
         {
             key_down = geom.pitch_at(p.y).filter(|_| kind == LaneKind::Poly);
         }
-        if (resp.clicked() || resp.secondary_clicked() || resp.drag_started())
-            && let Some(p) = pointer
-            && p.x >= geom.left
+        let pressed = resp.clicked() || resp.secondary_clicked() || resp.drag_started();
+        if let Some(p) = pointer
+            && (pressed || (resp.is_pointer_button_down_on() && p.x < geom.left))
         {
+            // A press anywhere focuses the lane; on the key strip it moves
+            // only the cursor's pitch.
             self.view.focus = Some(uid);
             self.view.dock.keyboard = true;
-            self.view.panel(uid).cursor = Cursor {
-                tick: snap.floor(geom.tick_at_clamped(p.x)),
-                pitch: geom.pitch_at_clamped(p.y),
-            };
+            let cursor = &mut self.view.panel(uid).cursor;
+            cursor.pitch = geom.pitch_at_clamped(p.y);
+            if p.x >= geom.left {
+                cursor.tick = snap.floor(geom.tick_at_clamped(p.x));
+            }
         }
         if resp.clicked()
             && let Some(p) = pointer
@@ -478,6 +492,16 @@ impl SidAcidApp {
                 make_mono(&mut pattern, i);
             }
             frame.changed |= added.is_some();
+            frame.finished = true;
+        }
+        if drums
+            && resp.double_clicked()
+            && let Some(p) = pointer
+            && let Some((tick, pitch)) = cell_at(p)
+            && let Some(i) = note_at(&pattern, tick, pitch)
+        {
+            pattern.notes[i].accent = !pattern.notes[i].accent;
+            frame.changed = true;
             frame.finished = true;
         }
         if resp.secondary_clicked()
@@ -562,8 +586,7 @@ impl SidAcidApp {
                     }
                 }
                 LaneKind::Drums => {
-                    let (label, flag) = ("Acc", Flag::Accent);
-                    flag_strip(ui, &geom, width, &mut pattern, label, flag, &mut frame);
+                    drum_accent_strip(ui, &geom, width, snap, &mut pattern, &mut frame)
                 }
             }
         }
@@ -586,7 +609,10 @@ impl SidAcidApp {
     fn lane_wheel(&mut self, ui: &egui::Ui, uid: MachineUid, melodic: bool, max_y: f32) {
         let (delta, shift) = ui.input(|i| (i.raw_scroll_delta, i.modifiers.shift));
         let (mut dx, mut dy) = (delta.x, delta.y);
-        if shift && dx == 0.0 {
+        // Shift turns a vertical wheel horizontal (egui mostly does this
+        // already); the vertical axis is then used up too.
+        let shifted = shift && dx == 0.0 && dy != 0.0;
+        if shifted {
             (dx, dy) = (dy, 0.0);
         }
         if dx != 0.0 {
@@ -596,9 +622,16 @@ impl SidAcidApp {
             let y = self.view.panel(uid).lane_scroll_y.get_or_insert(0.0);
             *y = (*y - dy).clamp(0.0, max_y);
         }
+        // Consume only the axes used: the horizontal always, the vertical
+        // not on a drum lane, which leaves it to the area it sits in.
+        let take_y = melodic || shifted;
         ui.input_mut(|i| {
-            i.raw_scroll_delta = Vec2::ZERO;
-            i.smooth_scroll_delta = Vec2::ZERO;
+            i.raw_scroll_delta.x = 0.0;
+            i.smooth_scroll_delta.x = 0.0;
+            if take_y {
+                i.raw_scroll_delta.y = 0.0;
+                i.smooth_scroll_delta.y = 0.0;
+            }
         });
     }
 
@@ -633,9 +666,9 @@ impl SidAcidApp {
         }
         if (lresp.clicked() || lresp.dragged())
             && let Some(p) = lresp.interact_pointer_pos()
-            && p.x >= geom.left
+            && let Some(tick) = geom.tick_at(p.x)
         {
-            let from = snap.floor(geom.tick_at_clamped(p.x));
+            let from = snap.floor(tick);
             frame.changed |= set_velocity_in(
                 pattern,
                 from,
@@ -834,9 +867,48 @@ fn flag_strip(
     }
     if lresp.clicked()
         && let Some(p) = lresp.interact_pointer_pos()
-        && p.x >= geom.left
+        && let Some(tick) = geom.tick_at(p.x)
     {
-        frame.changed |= toggle_flag(pattern, geom.tick_at_clamped(p.x), flag);
+        frame.changed |= toggle_flag(pattern, tick, flag);
+        frame.finished = true;
+    }
+}
+
+/// A drum lane's accent row: a snap cell is marked when any hit starting
+/// in it is accented; a click accents every hit starting in the cell, or
+/// clears them when all already are.
+fn drum_accent_strip(
+    ui: &mut egui::Ui,
+    geom: &LaneGeom,
+    width: f32,
+    snap: Snap,
+    pattern: &mut NotePattern,
+    frame: &mut Frame,
+) {
+    let (lane, lresp) = strip_row(ui, geom, width, FLAG_H, Sense::click(), "Acc");
+    let painter = ui.painter_at(lane);
+    let cell_w = snap.ticks() as f32 * geom.tick_w;
+    for note in pattern
+        .notes
+        .iter()
+        .filter(|n| n.accent && n.start < geom.ticks)
+    {
+        let x = geom.x_of(snap.floor(note.start));
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(x, lane.top() + 1.0),
+                pos2(x + (cell_w - 1.0).max(2.0), lane.bottom() - 1.0),
+            ),
+            0.0,
+            theme::ACCENT,
+        );
+    }
+    if lresp.clicked()
+        && let Some(p) = lresp.interact_pointer_pos()
+        && let Some(tick) = geom.tick_at(p.x)
+    {
+        let from = snap.floor(tick);
+        frame.changed |= toggle_accent_in(pattern, from, from + snap.ticks());
         frame.finished = true;
     }
 }
@@ -849,6 +921,157 @@ mod tests {
     use crate::ui::key_entry::LaneKind;
     use crate::ui::poly_edit::move_to;
     use acid_engine::project::Project;
+
+    /// Runs one frame of KIT808's lane in a 1000x800 screen at `time`;
+    /// returns where the lane's top-left corner was drawn.
+    fn kit_frame(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::Pos2 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut origin = pos2(0.0, 0.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                origin = ui.cursor().min;
+                app.lane(ui, KIT808, 800.0);
+            });
+        });
+        origin
+    }
+
+    #[test]
+    fn clicking_a_scrolled_drum_lane_adds_one_hit_under_the_pointer() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.view.dock.scroll_x = 22.0; // one step at zoom 1
+        let before = app.doc.project.roll(KIT808, 0).unwrap().clone();
+        let ctx = egui::Context::default();
+        let origin = kit_frame(&mut app, &ctx, 0.0, vec![]);
+        // Tick 9 (step 2, scrolled one step left), instrument 0 (bottom row).
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let x = origin.x + app.lane_key_w() + 9.0 * tw - 22.0 + 1.0;
+        let y = origin.y + HEADER_H + 7.0 * DRUM_ROW_H + DRUM_ROW_H / 2.0;
+        let at = pos2(x, y);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        kit_frame(&mut app, &ctx, 0.1, vec![egui::Event::PointerMoved(at)]);
+        kit_frame(&mut app, &ctx, 0.2, vec![button(true)]);
+        kit_frame(&mut app, &ctx, 0.3, vec![button(false)]);
+        kit_frame(&mut app, &ctx, 0.4, vec![]);
+        let roll = app.doc.project.roll(KIT808, 0).unwrap();
+        let added: Vec<_> = roll
+            .notes
+            .iter()
+            .filter(|n| !before.notes.contains(n))
+            .collect();
+        assert_eq!(added.len(), 1, "one hit added: {:?}", roll.notes);
+        assert_eq!((added[0].start, added[0].len), (8, 4), "snapped to step 2");
+        assert_eq!(added[0].pitch, 0);
+        assert_eq!(app.view.focus, Some(KIT808));
+        assert!(app.view.dock.keyboard);
+        app.doc.undo();
+        assert_eq!(app.doc.project.roll(KIT808, 0).unwrap(), &before);
+    }
+
+    /// Clicks (`clicks` times, quickly) at `at` in KIT808's lane, from
+    /// egui time `time` on.
+    fn click_kit(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        at: egui::Pos2,
+        clicks: usize,
+        mut time: f64,
+    ) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        kit_frame(app, ctx, time, vec![egui::Event::PointerMoved(at)]);
+        for _ in 0..clicks {
+            for pressed in [true, false] {
+                time += 0.05;
+                kit_frame(app, ctx, time, vec![button(pressed)]);
+            }
+        }
+        kit_frame(app, ctx, time + 0.05, vec![]);
+    }
+
+    /// A kit app whose pattern 0 holds only hits at tick 8 on `insts`.
+    fn kit_with_hits(insts: &[u8]) -> SidAcidApp {
+        let mut doc = Document::new(Project::default());
+        let roll = doc.project.roll_mut(KIT808, 0).unwrap();
+        roll.notes = insts
+            .iter()
+            .map(|&i| acid_engine::project::Note::new(8, 4, i, 100))
+            .collect();
+        SidAcidApp::headless(doc)
+    }
+
+    #[test]
+    fn double_clicking_a_drum_hit_toggles_its_accent() {
+        let mut app = kit_with_hits(&[0, 1]);
+        let ctx = egui::Context::default();
+        let origin = kit_frame(&mut app, &ctx, 0.0, vec![]);
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let at = pos2(
+            origin.x + app.lane_key_w() + 9.0 * tw,
+            origin.y + HEADER_H + 7.0 * DRUM_ROW_H + DRUM_ROW_H / 2.0,
+        );
+        click_kit(&mut app, &ctx, at, 2, 1.0);
+        let accents = |app: &SidAcidApp| {
+            let roll = app.doc.project.roll(KIT808, 0).unwrap();
+            roll.notes.iter().map(|n| n.accent).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            accents(&app),
+            [true, false],
+            "only the BD under the pointer"
+        );
+        app.doc.undo();
+        assert_eq!(accents(&app), [false, false], "one undo step");
+    }
+
+    #[test]
+    fn the_drum_accent_strip_accents_every_hit_in_the_cell() {
+        let mut app = kit_with_hits(&[0, 1]);
+        // A hit in the last cell, which a click past the end must not reach.
+        let last = acid_engine::project::Note::new(60, 4, 2, 100);
+        app.doc
+            .project
+            .roll_mut(KIT808, 0)
+            .unwrap()
+            .notes
+            .push(last);
+        let ctx = egui::Context::default();
+        let origin = kit_frame(&mut app, &ctx, 0.0, vec![]);
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let height = LaneView::default().clamped_height() as f32;
+        let at = pos2(
+            origin.x + app.lane_key_w() + 9.0 * tw,
+            origin.y + HEADER_H + height + FLAG_H / 2.0,
+        );
+        click_kit(&mut app, &ctx, at, 1, 1.0);
+        let roll = app.doc.project.roll(KIT808, 0).unwrap();
+        let accents: Vec<_> = roll.notes.iter().map(|n| n.accent).collect();
+        assert_eq!(accents, [true, true, false], "both hits in the cell");
+        // Past the pattern end the strip does nothing.
+        let end = pos2(origin.x + app.lane_key_w() + 70.0 * tw, at.y);
+        let before = app.doc.project.roll(KIT808, 0).unwrap().clone();
+        click_kit(&mut app, &ctx, end, 1, 2.0);
+        assert_eq!(app.doc.project.roll(KIT808, 0).unwrap(), &before);
+    }
 
     #[test]
     fn every_machine_kind_has_a_lane_kind() {

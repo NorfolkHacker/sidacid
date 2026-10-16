@@ -237,6 +237,22 @@ pub fn toggle_flag(p: &mut NotePattern, tick: u16, flag: Flag) -> bool {
     true
 }
 
+/// The drum accent strip: flips accent on every hit starting in
+/// `from..to`, clearing them all if they are all accented, else accenting
+/// them all. False when no hit starts there.
+pub fn toggle_accent_in(p: &mut NotePattern, from: u16, to: u16) -> bool {
+    let inside = |n: &Note| (from..to).contains(&n.start);
+    let mut hits = p.notes.iter().filter(|n| inside(n)).peekable();
+    if hits.peek().is_none() {
+        return false;
+    }
+    let accent = !hits.all(|n| n.accent);
+    for n in p.notes.iter_mut().filter(|n| inside(n)) {
+        n.accent = accent;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +302,21 @@ mod tests {
         assert!(!p.notes[0].accent);
         assert!(!toggle_flag(&mut p, 12, Flag::Slide), "no note at 12");
         assert_eq!(note_covering(&p, 3), None);
+    }
+
+    #[test]
+    fn accent_in_a_cell_accents_all_then_clears_all() {
+        // Two hits start in 4..8; the long one at 0 covers it, not starting there.
+        let mut p = notes_pat(&[(4, 4, 0), (6, 1, 2), (0, 12, 1)]);
+        p.notes[1].accent = true;
+        assert!(toggle_accent_in(&mut p, 4, 8), "mixed: all accented");
+        assert!(p.notes[0].accent && p.notes[1].accent);
+        assert!(!p.notes[2].accent, "a hit covering the cell is untouched");
+        assert!(toggle_accent_in(&mut p, 4, 8), "all accented: cleared");
+        assert!(!p.notes[0].accent && !p.notes[1].accent);
+        assert!(!p.notes[2].accent);
+        assert!(!toggle_accent_in(&mut p, 8, 12), "no hit starts there");
+        assert!(!p.notes[2].accent);
     }
 
     #[test]
