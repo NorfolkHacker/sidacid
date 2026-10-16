@@ -4,7 +4,8 @@
 //!
 //! Back deletes the note covering the cursor; failing that it steps the
 //! cursor back one grid cell and deletes the note covering or starting in
-//! that cell, so Back right after typing undoes the last note.
+//! that cell (else the latest note starting there on any row, moving the
+//! cursor to its row), so repeated Back unwinds typing.
 
 use super::poly_edit::{Snap, add, make_mono, note_at};
 use acid_engine::params::DRUM_INSTRUMENTS;
@@ -139,11 +140,22 @@ pub fn apply_entry(
             if hit.is_none() {
                 let ct = cell_tick(cell, -1, cells) * s;
                 cursor.tick = ct;
-                hit = note_at(roll, ct, pitch).or_else(|| {
-                    roll.notes
-                        .iter()
-                        .rposition(|n| n.pitch == pitch && n.start >= ct && n.start < ct + s)
-                });
+                hit = note_at(roll, ct, pitch)
+                    .or_else(|| {
+                        roll.notes
+                            .iter()
+                            .rposition(|n| n.pitch == pitch && n.start >= ct && n.start < ct + s)
+                    })
+                    // Nothing on this row: unwind the latest note typed in the
+                    // cell, on any row, and follow it.
+                    .or_else(|| {
+                        let i = roll
+                            .notes
+                            .iter()
+                            .rposition(|n| n.start >= ct && n.start < ct + s)?;
+                        cursor.pitch = roll.notes[i].pitch;
+                        Some(i)
+                    });
             }
             match hit {
                 Some(i) => {
@@ -306,7 +318,7 @@ mod tests {
     #[test]
     fn back_after_typing_undoes_the_notes() {
         let mut roll = empty();
-        let mut c = Cursor { tick: 4, pitch: 48 };
+        let mut c = Cursor { tick: 0, pitch: 60 };
         apply_entry(
             &mut roll,
             &mut c,
@@ -317,11 +329,11 @@ mod tests {
         apply_entry(
             &mut roll,
             &mut c,
-            EntryKey::Note(0),
+            EntryKey::Note(2),
             LaneKind::Poly,
             Snap::Step,
         );
-        assert_eq!(c.tick, 12);
+        assert_eq!(c, Cursor { tick: 8, pitch: 62 });
         assert!(apply_entry(
             &mut roll,
             &mut c,
@@ -337,7 +349,24 @@ mod tests {
             Snap::Step
         ));
         assert!(roll.notes.is_empty());
-        assert_eq!(c.tick, 4);
+        assert_eq!(c, Cursor { tick: 0, pitch: 60 });
+    }
+
+    #[test]
+    fn back_prefers_the_cursor_row_in_a_cell() {
+        let mut roll = empty();
+        roll.notes.push(Note::new(4, 4, 60, 100));
+        roll.notes.push(Note::new(4, 4, 65, 100)); // added later, other row
+        let mut c = Cursor { tick: 8, pitch: 60 };
+        assert!(apply_entry(
+            &mut roll,
+            &mut c,
+            EntryKey::Back,
+            LaneKind::Poly,
+            Snap::Step
+        ));
+        assert_eq!(roll.notes, vec![Note::new(4, 4, 65, 100)]);
+        assert_eq!(c, Cursor { tick: 4, pitch: 60 });
     }
 
     #[test]
