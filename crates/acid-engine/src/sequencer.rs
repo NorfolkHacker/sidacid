@@ -379,7 +379,8 @@ impl Sequencer {
     }
 
     /// Song mode, each step's first tick: a pending seek or resync finds
-    /// every track's block, the loop jumps back, the song ends (releasing
+    /// every track's block, the loop jumps back (when playback reaches its
+    /// end, so a start past it plays on), the song ends (releasing
     /// what sounds; returns false), then each track starts the block
     /// starting now or goes silent at its block's end, then automation.
     fn song_step_start(
@@ -396,7 +397,7 @@ impl Sequencer {
         }
         if let Some((a, b)) = song.loop_range
             && a < b
-            && self.song_step >= b
+            && self.song_step == b
         {
             self.song_step = a;
             self.seek_all(song, banks, true);
@@ -472,6 +473,8 @@ impl Sequencer {
         let Some(i) = compiled_block_at(song, pos, step, banks) else {
             t.block = None;
             t.silent = true;
+            t.step = 0;
+            t.pos = 0;
             return;
         };
         let b = song.lane(pos)[i];
@@ -1584,6 +1587,36 @@ mod tests {
         assert!(s.is_playing());
         assert_eq!(s.song_bar(), 1, "jumped back to the loop start");
         assert_eq!(s.song_step(), 16);
+    }
+
+    #[test]
+    fn starting_past_the_loop_end_plays_on_to_the_song_end() {
+        let mut f = Fixture::new();
+        f.set_bars(&[[None; 4]; 3]);
+        f.song.loop_range = Some((0, 16));
+        let mut s = song_seq();
+        s.set_song_start(32);
+        s.play();
+        f.run(&mut s, 8 * 5513);
+        assert!(s.is_playing());
+        assert_eq!(s.song_step(), 40, "no jump to the loop start");
+        f.run(&mut s, 9 * 5513);
+        assert!(!s.is_playing(), "it ends at the song end");
+        assert!(s.take_ended());
+    }
+
+    #[test]
+    fn a_track_seeked_into_a_gap_restarts_its_playhead() {
+        let mut f = Fixture::new();
+        f.set_bars(&[[Some(0), None, None, None]; 2]);
+        let mut s = song_seq();
+        s.play();
+        f.run(&mut s, 5 * 5513);
+        assert_eq!(s.playhead(0), 5);
+        f.song.lane_mut(MachineUid(1)).remove(0);
+        s.resync();
+        f.run(&mut s, 5513);
+        assert_eq!(s.playhead(0), 0, "silent in the gap, at its start");
     }
 
     #[test]

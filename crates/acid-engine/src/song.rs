@@ -253,7 +253,9 @@ pub fn place(
 /// `len: None` blocks grows, and later blocks move right only as far as
 /// needed to clear the block in front (a gap absorbs growth first),
 /// cascading down the lane. Shrinking leaves gaps; `Some` blocks never
-/// ripple. Other blocks' lengths come from `lens`.
+/// ripple. Other blocks' lengths come from `lens`. Returns `false`, the
+/// lane untouched, when some block would end past `MAX_SONG_STEPS`.
+#[must_use]
 pub fn ripple(
     blocks: &mut [Block],
     uid: MachineUid,
@@ -261,19 +263,29 @@ pub fn ripple(
     old_len: u32,
     new_len: u32,
     lens: Lens<'_>,
-) {
+) -> bool {
     if new_len <= old_len {
-        return;
+        return true;
     }
+    let max = MAX_SONG_STEPS as u32;
+    let mut starts = Vec::with_capacity(blocks.len());
     let mut front = 0;
-    for b in blocks.iter_mut() {
-        b.start = b.start.max(front);
+    for b in blocks.iter() {
+        let start = b.start.max(front);
         front = if b.len.is_none() && b.pattern.0 == slot {
-            b.start.saturating_add(new_len)
+            start.saturating_add(new_len)
         } else {
-            block_end(b, uid, lens)
+            block_end(&Block { start, ..*b }, uid, lens)
         };
+        if front > max {
+            return false;
+        }
+        starts.push(start);
     }
+    for (b, start) in blocks.iter_mut().zip(starts) {
+        b.start = start;
+    }
+    true
 }
 
 /// Inserts `n` steps at step `at` on every lane: blocks and automation
@@ -311,7 +323,8 @@ pub fn insert_time(song: &mut Song, at: u32, n: u32, lens: Lens<'_>) {
 }
 
 /// Removes steps `a..b` from every lane and closes the gap: blocks
-/// starting inside go, a block running into `a` is cut to end there,
+/// starting inside go, a block running into `a` is cut to end there (one
+/// running through the whole range shrinks by its size, keeping its tail),
 /// later blocks and automation move left, points inside go (and lanes
 /// left empty), the song's end follows, and a loop whose start or last
 /// step is inside is cleared.
@@ -325,8 +338,13 @@ pub fn delete_time(song: &mut Song, a: u32, b: u32, lens: Lens<'_>) {
         for x in blocks.iter_mut() {
             if x.start >= b {
                 x.start -= d;
-            } else if block_end(x, *uid, lens) > a {
-                x.len = Some((a - x.start) as u16);
+            } else {
+                let end = block_end(x, *uid, lens);
+                if end >= b {
+                    x.len = Some((end - x.start - d) as u16);
+                } else if end > a {
+                    x.len = Some((a - x.start) as u16);
+                }
             }
         }
     }
@@ -589,14 +607,14 @@ mod tests {
     fn a_growing_pattern_pushes_later_blocks_right_in_a_cascade() {
         // Slot 0 grows from 16 to 24; the lens still says 16.
         let mut lane = vec![b(0, 0), b(16, 3), b(32, 3), b(64, 3)];
-        ripple(&mut lane, U, 0, 16, 24, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 24, &lens));
         assert_eq!(
             shape(&lane),
             [(0, 0, None), (24, 3, None), (40, 3, None), (64, 3, None)],
             "the gap before 64 absorbs the rest"
         );
         let mut lane = vec![b(0, 0), b(16, 0), b(32, 3)];
-        ripple(&mut lane, U, 0, 16, 24, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 24, &lens));
         assert_eq!(
             shape(&lane),
             [(0, 0, None), (24, 0, None), (48, 3, None)],
@@ -607,23 +625,53 @@ mod tests {
     #[test]
     fn a_gap_absorbs_growth_first() {
         let mut lane = vec![b(0, 0), b(20, 3)];
-        ripple(&mut lane, U, 0, 16, 20, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 20, &lens));
         assert_eq!(shape(&lane), [(0, 0, None), (20, 3, None)]);
-        ripple(&mut lane, U, 0, 20, 22, &lens);
+        assert!(ripple(&mut lane, U, 0, 20, 22, &lens));
         assert_eq!(shape(&lane), [(0, 0, None), (22, 3, None)]);
     }
 
     #[test]
     fn shrinking_leaves_a_gap_and_fixed_blocks_never_ripple() {
         let mut lane = vec![b(0, 0), b(16, 3)];
-        ripple(&mut lane, U, 0, 16, 8, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 8, &lens));
         assert_eq!(shape(&lane), [(0, 0, None), (16, 3, None)]);
         let mut lane = vec![fixed(0, 0, 16), b(16, 3)];
-        ripple(&mut lane, U, 0, 16, 32, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 32, &lens));
         assert_eq!(shape(&lane), [(0, 0, Some(16)), (16, 3, None)]);
         let mut lane = vec![b(0, 5), b(16, 3)];
-        ripple(&mut lane, U, 0, 16, 32, &lens);
+        assert!(ripple(&mut lane, U, 0, 16, 32, &lens));
         assert_eq!(shape(&lane), [(0, 5, None), (16, 3, None)], "other pattern");
+    }
+
+    #[test]
+    fn a_ripple_past_the_song_limit_is_refused_and_changes_nothing() {
+        let max = MAX_SONG_STEPS as u32;
+        let mut lane = vec![b(max - 32, 0), b(max - 16, 3)];
+        assert!(!ripple(&mut lane, U, 0, 16, 24, &lens));
+        assert_eq!(shape(&lane), [(max - 32, 0, None), (max - 16, 3, None)]);
+        let mut lane = vec![b(max - 40, 0), b(max - 24, 3)];
+        assert!(ripple(&mut lane, U, 0, 16, 24, &lens), "it just fits");
+        assert_eq!(shape(&lane), [(max - 40, 0, None), (max - 16, 3, None)]);
+    }
+
+    #[test]
+    fn delete_time_cuts_a_block_ending_inside_and_shrinks_one_through_it() {
+        let mut song = Song::default();
+        song.lane_mut(U).push(b(0, 1)); // 0..32
+        song.lane_mut(MachineUid(3)).push(fixed(0, 0, 12)); // 0..12
+        song.lane_mut(MachineUid(4)).push(b(0, 1)); // 0..32, ends at b
+        delete_time(&mut song, 8, 16, &lens);
+        assert_eq!(shape(song.lane(U)), [(0, 1, Some(24))], "keeps its tail");
+        assert_eq!(
+            shape(song.lane(MachineUid(3))),
+            [(0, 0, Some(8))],
+            "cut at a"
+        );
+        let mut song = Song::default();
+        song.lane_mut(U).push(b(0, 1));
+        delete_time(&mut song, 16, 32, &lens);
+        assert_eq!(shape(song.lane(U)), [(0, 1, Some(16))], "ending at b");
     }
 
     fn three_block_song() -> (Song, ParamId) {
@@ -694,7 +742,11 @@ mod tests {
             [(0, 0, Some(8)), (24, 0, None)],
             "cut at 8, the block at 16 removed, 40 moved to 24"
         );
-        assert_eq!(shape(song.lane(MachineUid(3))), [(4, 1, Some(4))]);
+        assert_eq!(
+            shape(song.lane(MachineUid(3))),
+            [(4, 1, Some(24))],
+            "a block through the whole range shrinks by it, keeping its tail"
+        );
         assert_eq!(keys(&song, id), [4, 14]);
         assert!(lane(&song, other).is_none(), "an emptied lane is pruned");
         assert_eq!(
