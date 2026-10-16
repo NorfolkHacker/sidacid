@@ -362,6 +362,15 @@ impl Sequencer {
             let t = &mut self.tracks[pos];
             t.step = 0;
             t.pos = 0;
+            // A note cut by the bar line: the hold check closes the gate
+            // on the bar's first tick unless a note starts there (as v4).
+            if t.gate_open && (t.gate_left > 0 || t.hold_left > 0) {
+                if t.gate_left > 0 {
+                    t.prev_slide = false;
+                }
+                t.gate_left = 0;
+                t.hold_left = 1;
+            }
             match bar.patterns[pos] {
                 Some(PatternRef(slot)) if (slot as usize) < bank_len => {
                     t.pattern = slot;
@@ -1761,6 +1770,45 @@ mod tests {
             "step 15 ties into the wrap, so only the song end closes it: {ev:?}"
         );
         assert!(!s.is_playing());
+    }
+
+    // A bar lasts as long as its longest pattern, so a shorter acid
+    // pattern can be cut mid-note by the bar line: the note ends there,
+    // as in v4 (sample 88200 at 120 BPM), unless one starts on it.
+    #[test]
+    fn a_note_cut_by_the_bar_line_ends_on_it() {
+        let mut f = Fixture::new();
+        let tie = SynthStep {
+            gate: Gate::Tie,
+            ..on(0)
+        };
+        set_steps(&mut f.synths[0][0], 6, &[(3, on(3)), (4, tie), (5, tie)]);
+        f.drums[0][0].roll.length = 16;
+        let bar = song_bar([Some(0), None, Some(0), None]);
+        f.song.bars = vec![bar.clone(), bar];
+        let mut s = song_seq();
+        s.play();
+        // Up to the next bar's first note (step 19 = sample 104738).
+        let ev: Vec<_> = synth_events(&f.run(&mut s, 104_000))
+            .into_iter()
+            .filter(|(p, _)| *p >= 82_000)
+            .collect();
+        assert_eq!(
+            ev,
+            vec![
+                (
+                    82_688,
+                    SeqEvent::Note {
+                        slot: 0,
+                        midi: 39,
+                        accent: false,
+                        legato: false
+                    }
+                ),
+                (88_200, SeqEvent::NoteOff { slot: 0 }),
+            ],
+            "{ev:?}"
+        );
     }
 
     #[test]
