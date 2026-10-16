@@ -167,10 +167,28 @@ impl SidAcidApp {
             if song {
                 ui.separator();
                 self.song_tools(ui);
-            } else {
-                self.inspector(ui);
             }
         });
+        if !song {
+            // A row of its own, there with or without a selection, so the
+            // lanes don't move when the inspector comes and goes.
+            ui.horizontal_wrapped(|ui| {
+                ui.set_min_height(ui.spacing().interact_size.y);
+                self.inspector(ui);
+            });
+        } else {
+            self.inspector_closed(None);
+        }
+    }
+
+    /// Closes the undo step of an inspector number that was being dragged
+    /// or typed into (`view.dock.inspector_open`) once it no longer is
+    /// (`open`): released, unfocused, or no longer drawn.
+    fn inspector_closed(&mut self, open: Option<egui::Id>) {
+        let was = std::mem::replace(&mut self.view.dock.inspector_open, open);
+        if was.is_some() && was != open {
+            self.doc.end_gesture();
+        }
     }
 
     /// The note inspector: the focused lane's selected notes' velocity
@@ -179,17 +197,20 @@ impl SidAcidApp {
     /// in shows "–". A change applies to every selected note as one undo
     /// step (a drag on a number is one step), and they stay selected.
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        let Some(uid) = self.focused() else {
-            return;
+        let uid = self.focused();
+        let idx = uid.map(|u| self.selection(u)).unwrap_or_default();
+        let (Some(uid), false) = (uid, idx.is_empty()) else {
+            ui.label(
+                RichText::new("Select notes to edit them here")
+                    .small()
+                    .weak(),
+            );
+            return self.inspector_closed(None);
         };
-        let idx = self.selection(uid);
         let slot = self.selected(uid);
         let Some(pattern) = self.doc.project.roll(uid, slot) else {
-            return;
+            return self.inspector_closed(None);
         };
-        if idx.is_empty() {
-            return;
-        }
         let notes = note_ops::values(pattern, &idx);
         let kind = self.lane_kind(uid);
         // Test builds note where each tool sits.
@@ -200,7 +221,8 @@ impl SidAcidApp {
         #[cfg(not(test))]
         let note = |_: &str, _: &egui::Response| {};
         let mut edit: Option<Field> = None;
-        let (mut dragging, mut finished) = (false, false);
+        // The number that changed, and the one being dragged or typed into.
+        let (mut changed_id, mut open): (Option<egui::Id>, Option<egui::Id>) = (None, None);
         let mut number = |ui: &mut egui::Ui,
                           name: &str,
                           get: fn(&Note) -> u8,
@@ -221,13 +243,13 @@ impl SidAcidApp {
             let r = ui.add(dv);
             if r.changed() {
                 edit = Some(field(v));
-                dragging |= r.dragged();
-                finished |= !r.dragged();
+                changed_id = Some(r.id);
             }
-            finished |= r.drag_stopped();
+            if r.dragged() || r.has_focus() {
+                open = Some(r.id);
+            }
             r
         };
-        ui.separator();
         if kind != LaneKind::Acid {
             let r = number(ui, "Vel", |n| n.vel, (1, 127), ("", ""), Field::Vel);
             note("Vel", &r);
@@ -265,7 +287,6 @@ impl SidAcidApp {
                     note(&format!("Cond {}", note_ops::cond_label(c)), &item);
                     if item.clicked() {
                         edit = Some(Field::Cond(c));
-                        finished = true;
                     }
                 }
             });
@@ -281,7 +302,6 @@ impl SidAcidApp {
                 let r = ui.selectable_label(shared == Some(true), text);
                 if r.clicked() {
                     edit = Some(field(shared != Some(true)));
-                    finished = true;
                 }
                 r
             };
@@ -300,7 +320,16 @@ impl SidAcidApp {
         if changed {
             self.set_selection(uid, note_ops::values(&p, &idx));
         }
-        self.commit_poly(uid, slot, changed.then_some(p), dragging, finished);
+        // A change to the open number (or, on the frame it is let go of,
+        // to the one that was open) merges into its step; any other change
+        // is a step of its own.
+        let was = self.view.dock.inspector_open;
+        let merge = changed_id.is_some() && (changed_id == open || changed_id == was);
+        if was.is_some() && was != open && changed_id != was {
+            self.doc.end_gesture();
+        }
+        self.commit_poly(uid, slot, changed.then_some(p), merge, changed && !merge);
+        self.inspector_closed(open);
         if reroll.clicked() {
             self.reroll();
         }
@@ -3240,5 +3269,173 @@ mod tests {
         }
         let rows = [tool(&app, "Snap to scale"), tool(&app, "Slide")].map(|r| r.unwrap().top());
         assert!(rows[1] > rows[0], "the header wrapped onto a second row");
+    }
+
+    /// One frame of the whole app in a `w` x 800 window.
+    fn frame_w(
+        app: &mut SidAcidApp,
+        ctx: &egui::Context,
+        w: f32,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(w, 800.0))),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+    }
+
+    #[test]
+    fn selecting_a_note_does_not_move_the_lanes() {
+        use crate::test_rack::SYNTH1;
+        let mut app = sel_app(SYNTH1, &[(0, 4, 36)], &[]);
+        app.view.dock.follow = false;
+        let ctx = egui::Context::default();
+        frame_w(&mut app, &ctx, 1024.0, 0.0, vec![]);
+        let top = app.view.dock.lanes.unwrap().top();
+        let all = app.doc.project.roll(SYNTH1, 0).unwrap().notes.clone();
+        app.set_selection(SYNTH1, all);
+        frame_w(&mut app, &ctx, 1024.0, 1.0, vec![]);
+        assert!(tool(&app, "Chance").is_some(), "the inspector shows");
+        assert_eq!(app.view.dock.lanes.unwrap().top(), top, "selected");
+        app.set_selection(SYNTH1, Vec::new());
+        frame_w(&mut app, &ctx, 1024.0, 2.0, vec![]);
+        assert_eq!(app.view.dock.lanes.unwrap().top(), top, "cleared");
+    }
+
+    #[test]
+    fn a_level_drag_of_a_fresh_note_keeps_its_pitch_at_1024() {
+        use crate::test_rack::SYNTH1;
+        use crate::ui::lane::{HEADER_H, ROW_H};
+        let mut app = sel_app(SYNTH1, &[(0, 4, 36)], &[]);
+        app.view.dock.follow = false;
+        let ctx = egui::Context::default();
+        frame_w(&mut app, &ctx, 1024.0, 0.0, vec![]);
+        let left = app.view.dock.ruler.unwrap().left() + app.lane_key_w();
+        let lanes = app.view.dock.lanes.unwrap();
+        let scroll = app.view.panel(SYNTH1).lane_scroll_y.unwrap();
+        let tw = tick_w(ZOOMS[app.view.dock.zoom]);
+        let from = pos2(
+            left + 1.5 * tw,
+            lanes.top() + HEADER_H + (127 - 36) as f32 * ROW_H - scroll + ROW_H / 2.0,
+        );
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut t = 1.0;
+        let mut tick = |app: &mut SidAcidApp, events| {
+            frame_w(app, &ctx, 1024.0, t, events);
+            t += 1.0 / 60.0;
+        };
+        tick(&mut app, vec![egui::Event::PointerMoved(from)]);
+        tick(&mut app, vec![button(from, true)]);
+        for i in 1..=8 {
+            tick(
+                &mut app,
+                vec![egui::Event::PointerMoved(from + vec2(5.0 * i as f32, 0.0))],
+            );
+        }
+        tick(&mut app, vec![button(from + vec2(40.0, 0.0), false)]);
+        tick(&mut app, vec![]);
+        let n = app.doc.project.roll(SYNTH1, 0).unwrap().notes[0];
+        assert_eq!(n.pitch, 36, "moved sideways only");
+        assert!(n.start > 0, "it moved");
+    }
+
+    #[test]
+    fn losing_the_selection_mid_drag_closes_the_inspector_step() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62)], &[0]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let at = tool(&app, "Chance").unwrap().center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, &ctx, 1.0, vec![egui::Event::PointerMoved(at)]);
+        frame(&mut app, &ctx, 1.1, vec![button(at, true)]);
+        for i in 1..=4 {
+            let p = at - vec2(20.0 * i as f32, 0.0);
+            frame(
+                &mut app,
+                &ctx,
+                1.1 + 0.05 * i as f64,
+                vec![egui::Event::PointerMoved(p)],
+            );
+        }
+        assert!(app.doc.project.roll(FM, 0).unwrap().notes[0].chance < 100);
+        assert_eq!(app.doc.undo_depth(), 1);
+        // The selection goes while the button is still down.
+        app.set_selection(FM, Vec::new());
+        frame(&mut app, &ctx, 1.5, vec![]);
+        frame(
+            &mut app,
+            &ctx,
+            1.6,
+            vec![button(at - vec2(80.0, 0.0), false)],
+        );
+        // A merging edit of the same pattern must start its own step.
+        let mut p = app.doc.project.roll(FM, 0).unwrap().clone();
+        p.notes[1].vel = 10;
+        app.commit_poly(FM, 0, Some(p), true, true);
+        assert_eq!(app.doc.undo_depth(), 2, "the drag's step was closed");
+    }
+
+    #[test]
+    fn typing_a_chance_is_one_undo_step() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60), (8, 4, 62)], &[0, 1]);
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Chance", 0.0);
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        frame(&mut app, &ctx, 1.1, vec![select_all]);
+        frame(&mut app, &ctx, 1.2, vec![egui::Event::Text("4".into())]);
+        frame(&mut app, &ctx, 1.3, vec![egui::Event::Text("2".into())]);
+        frame(
+            &mut app,
+            &ctx,
+            1.4,
+            vec![key(egui::Key::Enter, true), key(egui::Key::Enter, false)],
+        );
+        frame(&mut app, &ctx, 1.5, vec![]);
+        assert_eq!(chances(&app, FM), [42, 42]);
+        assert_eq!(app.doc.undo_depth(), 1, "one step for the typed value");
+    }
+
+    #[test]
+    fn two_chance_drags_are_two_undo_steps() {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, &[(0, 4, 60)], &[0]);
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, 0.0, vec![]);
+        let at = tool(&app, "Chance").unwrap().center();
+        drag_by(&mut app, &ctx, at, vec2(-60.0, 0.0), 6, 1.0);
+        let first = chances(&app, FM)[0];
+        let at = tool(&app, "Chance").unwrap().center();
+        drag_by(&mut app, &ctx, at, vec2(-60.0, 0.0), 6, 5.0);
+        assert!(chances(&app, FM)[0] < first, "the second drag moved it on");
+        assert_eq!(app.doc.undo_depth(), 2);
     }
 }

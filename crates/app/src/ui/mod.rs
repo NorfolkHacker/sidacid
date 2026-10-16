@@ -119,6 +119,9 @@ pub struct DockState {
     /// The tick (Song mode: step) a ruler range drag was pressed on, fixed
     /// at the press so the start holds while the lanes scroll under it.
     pub range_from: Option<u16>,
+    /// The inspector number being dragged or typed into, whose edits
+    /// merge into one undo step.
+    pub inspector_open: Option<egui::Id>,
     /// Tests only: where each Song-mode header tool was drawn this frame.
     #[cfg(test)]
     pub tool_rects: Vec<(String, egui::Rect)>,
@@ -141,6 +144,7 @@ impl Default for DockState {
             range: None,
             delete_held: false,
             range_from: None,
+            inspector_open: None,
             #[cfg(test)]
             tool_rects: Vec::new(),
         }

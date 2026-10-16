@@ -1208,7 +1208,8 @@ impl SidAcidApp {
         let hi = bar.range().1 as f32;
         for note in pattern.notes.iter().filter(|n| n.start < geom.ticks) {
             let x = geom.x_of(note.start);
-            let h = VEL_H * bar.get(note) as f32 / hi;
+            // At least a stub, so a note at chance 0 still shows.
+            let h = (VEL_H * bar.get(note) as f32 / hi).max(2.0);
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(x, lane.bottom() - h),
@@ -1226,7 +1227,7 @@ impl SidAcidApp {
             && let Some(tick) = geom.tick_at(p.x)
         {
             let from = snap.floor(tick);
-            let to = from + snap.ticks();
+            let to = (from + snap.ticks()).min(geom.ticks);
             let v = bar.value_at(p.y, lane.top());
             frame.changed |= if bar == Bar::Vel {
                 set_velocity_in(pattern, from, to, v)
@@ -2892,5 +2893,46 @@ mod tests {
         assert_eq!(dashes(&mut app, FM), 0, "a ratchet alone is not dashed");
         let (texts, _) = painted(&mut app, FM);
         assert!(texts.iter().any(|t| t == "×3"), "but badged");
+    }
+
+    #[test]
+    fn a_strip_cell_stops_at_the_pattern_end() {
+        let mut app = app_with(FM, &[(0, 4, 60), (12, 4, 62)]);
+        app.doc.project.roll_mut(FM, 0).unwrap().length = 3;
+        app.view.dock.snap = Snap::Quarter;
+        app.view.panel(FM).strip_mode = StripMode::Chance;
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let at = strip_at(&app, m.origin, 1.0, 0.5);
+        m.click(&mut app, at, NONE);
+        let roll = app.doc.project.roll(FM, 0).unwrap();
+        let chances: Vec<_> = roll.notes.iter().map(|n| n.chance).collect();
+        assert_eq!(chances, [50, 100], "the hidden note past the end stays");
+    }
+
+    #[test]
+    fn a_muted_note_still_shows_in_the_chance_strip() {
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        app.view.panel(FM).strip_mode = StripMode::Chance;
+        app.doc.project.roll_mut(FM, 0).unwrap().notes[0].chance = 0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let mut origin = pos2(0.0, 0.0);
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                origin = ui.cursor().min;
+                app.lane(ui, FM, 800.0);
+            });
+        });
+        let height = LaneView::default().clamped_height() as f32;
+        let strip_bottom = origin.y + HEADER_H + height + VEL_H;
+        let bar = out.shapes.iter().any(|c| {
+            matches!(&c.shape, Shape::Rect(r)
+                if r.fill == theme::ACID && (r.rect.bottom() - strip_bottom).abs() < 0.5
+                    && r.rect.height() >= 1.0)
+        });
+        assert!(bar, "a stub for chance 0");
     }
 }
