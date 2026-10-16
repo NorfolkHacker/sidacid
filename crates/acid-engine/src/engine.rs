@@ -2585,6 +2585,50 @@ mod tests {
     }
 
     #[test]
+    fn held_ratchet_hits_cross_render_blocks_on_acid_and_poly() {
+        // An x8 one-step note on the acid and on the sampler: rendered in
+        // one go or in 37-sample blocks (held hits outlive a block), the
+        // same; the second hit lands half a tick in. (The FM's envelopes
+        // step per 32-sample block from each render call, so its output
+        // depends on the blocks regardless of ratchets.)
+        for (uid, pitch) in [(MachineUid(1), 48), (MachineUid(6), 37)] {
+            let project = |ratchet: u8| {
+                let mut p = sampler_project();
+                p.bpm = 120.0;
+                p.swing = 0.0;
+                let roll = p.roll_mut(uid, 0).unwrap();
+                roll.notes.clear();
+                roll.notes.push(crate::project::Note {
+                    ratchet,
+                    ..crate::project::Note::new(0, 4, pitch, 100)
+                });
+                p
+            };
+            let whole = |p: &Project| {
+                let mut e = Engine::from_project(SR, p);
+                e.play();
+                render(&mut e, 0.1).0
+            };
+            let chunked = |p: &Project| {
+                let mut e = Engine::from_project(SR, p);
+                e.play();
+                let mut l = vec![0.0; (0.1 * SR) as usize];
+                let mut r = l.clone();
+                for (cl, cr) in l.chunks_mut(37).zip(r.chunks_mut(37)) {
+                    e.process(cl, cr);
+                }
+                l
+            };
+            let x8 = project(8);
+            let a = whole(&x8);
+            assert_eq!(a, chunked(&x8), "{uid:?}");
+            let half_tick = 60.0 / 120.0 / 16.0 * SR as f64 / 2.0;
+            let first = whole(&project(1)).iter().zip(&a).position(|(x, y)| x != y);
+            assert_eq!(first, Some(half_tick.ceil() as usize), "{uid:?}");
+        }
+    }
+
+    #[test]
     fn chance_renders_the_same_every_time_and_follows_the_seed() {
         let plain = crate::demo::demo_project();
         let mut p = plain.clone();

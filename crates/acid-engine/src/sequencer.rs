@@ -78,6 +78,23 @@ pub enum SeqEvent {
     },
 }
 
+impl SeqEvent {
+    /// The rack position a machine event goes to.
+    fn slot_mut(&mut self) -> Option<&mut usize> {
+        match self {
+            SeqEvent::Note { slot, .. }
+            | SeqEvent::NoteOff { slot }
+            | SeqEvent::Drum { slot, .. }
+            | SeqEvent::PolyOn { slot, .. }
+            | SeqEvent::PolyOff { slot, .. } => Some(slot),
+            SeqEvent::Param { .. }
+            | SeqEvent::ParamRestore { .. }
+            | SeqEvent::Automation { .. }
+            | SeqEvent::AutomationReset { .. } => None,
+        }
+    }
+}
+
 /// Sequencer ticks per step: the step's quarters.
 const SUBS: u8 = 4;
 // Note tracks advance one tick per sequencer tick.
@@ -136,6 +153,22 @@ impl Pending {
             .map(|e| e.0.max(0.0).ceil() as usize)
             .min()
             .unwrap_or(usize::MAX)
+    }
+
+    /// Follows a rack edit: each held event goes to its machine's new
+    /// position (`new_of`, by old position); a removed machine's are
+    /// dropped.
+    fn remap(&mut self, new_of: &[Option<usize>; MAX_MACHINES]) {
+        self.evs.retain_mut(|(_, ev)| match ev.slot_mut() {
+            Some(slot) => match new_of.get(*slot).copied().flatten() {
+                Some(new) => {
+                    *slot = new;
+                    true
+                }
+                None => false,
+            },
+            None => true,
+        });
     }
 
     /// Moves the events due now to `out`, in the order they were sent.
@@ -779,6 +812,18 @@ impl Sequencer {
         selected: &[u8; MAX_MACHINES],
     ) {
         let (old_tracks, old_chosen) = (self.tracks, self.chosen);
+        // Held-back hits follow their machines (they can outlive a render
+        // block, and so meet a rack edit).
+        let mut new_of = [None; MAX_MACHINES];
+        for (pos, old) in map.iter().enumerate() {
+            if let Some(o) = *old
+                && o < MAX_MACHINES
+                && banks.slots[pos].is_some()
+            {
+                new_of[o] = Some(pos);
+            }
+        }
+        self.pending.remap(&new_of);
         for pos in 0..MAX_MACHINES {
             let in_rack = banks.slots[pos].is_some();
             let old = map[pos].filter(|&o| o < MAX_MACHINES && in_rack);
@@ -1046,7 +1091,8 @@ impl Sequencer {
                     && let Some(g) = t.gate_due
                     && g <= at
                 {
-                    check(t, g, out, later);
+                    // An earlier hit's gate (never the last, so it closes).
+                    let _ = check(t, g, out, later);
                 }
                 let legato = from == 0 && at == 0 && t.prev_slide && t.gate_open;
                 emit(
@@ -1082,7 +1128,8 @@ impl Sequencer {
             && let Some(g) = t.gate_due
             && g < FINE
         {
-            check(t, g, out, later);
+            // Past this tick's start: a hold it starts can't end now.
+            let _ = check(t, g, out, later);
         }
         if p.is_multiple_of(TICKS_PER_STEP) {
             let step = (p / TICKS_PER_STEP) as usize;
@@ -1140,6 +1187,10 @@ impl Sequencer {
         } else {
             let p = t.pos;
             let (mut on, mut accent) = (0u8, 0u8);
+            // Hits between ticks: (at, instrument, accent), merged as on
+            // the tick (each instrument once per sample, accents joined).
+            let mut off_tick = [(0u32, 0u8, false); RATCHETS * 7];
+            let mut off_n = 0;
             // Hits starting now that play, then the ratchet sub-hits due:
             // on the tick in instrument order, between ticks held back.
             for (i, n) in roll.notes.iter().enumerate() {
@@ -1166,19 +1217,31 @@ impl Sequencer {
                         if n.accent {
                             accent |= 1 << n.pitch;
                         }
-                    } else {
-                        later.push(
-                            at,
-                            SeqEvent::Drum {
-                                slot: pos,
-                                inst: n.pitch as usize,
-                                accent: n.accent,
-                            },
-                        );
+                    } else if let Some(h) = off_tick[..off_n]
+                        .iter_mut()
+                        .find(|h| (h.0, h.1) == (at, n.pitch))
+                    {
+                        h.2 |= n.accent;
+                    } else if off_n < off_tick.len() {
+                        off_tick[off_n] = (at, n.pitch, n.accent);
+                        off_n += 1;
                     }
                 }
             }
             t.retire_ratchets(&roll.notes, p, ticks);
+            // In time, then instrument order (closed hat before open hat
+            // on a shared sample, so the choke works as on the tick).
+            off_tick[..off_n].sort_unstable_by_key(|h| (h.0, h.1));
+            for &(at, inst, accent) in &off_tick[..off_n] {
+                later.push(
+                    at,
+                    SeqEvent::Drum {
+                        slot: pos,
+                        inst: inst as usize,
+                        accent,
+                    },
+                );
+            }
             for inst in 0..DRUM_INSTRUMENTS {
                 if on & (1 << inst) != 0 {
                     out.push(SeqEvent::Drum {
@@ -3204,6 +3267,143 @@ mod tests {
                 (at_ticks(3.0), 'O')
             ]
         );
+    }
+
+    #[test]
+    fn held_back_drum_hits_go_in_instrument_order_and_merge() {
+        // An open hat stored before a closed hat, both x2 on one tick:
+        // their second hits share a sample and go closed hat first. Two
+        // x2 kicks there play once, accented if either is.
+        let mut f = Fixture::new();
+        f.drums[0][0].roll.notes.extend([
+            ratcheted(0, 1, 7, 2),
+            ratcheted(0, 1, 6, 2),
+            ratcheted(0, 1, 0, 2),
+            Note {
+                accent: true,
+                ..ratcheted(0, 1, 0, 2)
+            },
+        ]);
+        let mut s = new_seq();
+        s.play();
+        let half = at_ticks(0.5);
+        let later: Vec<(usize, bool)> = f
+            .run(&mut s, 1000)
+            .into_iter()
+            .filter_map(|(t, e)| match e {
+                SeqEvent::Drum {
+                    slot: 2,
+                    inst,
+                    accent,
+                } if t == half => Some((inst, accent)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(later, [(0, true), (6, false), (7, false)]);
+    }
+
+    /// Per (slot, pitch): every acid or poly start is released by the end.
+    fn nothing_hangs(ev: &[(usize, SeqEvent)]) {
+        let mut acid = [false; MAX_MACHINES];
+        let mut poly = std::collections::HashSet::new();
+        for &(_, e) in ev {
+            match e {
+                SeqEvent::Note { slot, .. } => acid[slot] = true,
+                SeqEvent::NoteOff { slot } => acid[slot] = false,
+                SeqEvent::PolyOn { slot, pitch, .. } => {
+                    poly.insert((slot, pitch));
+                }
+                SeqEvent::PolyOff { slot, pitch } => {
+                    poly.remove(&(slot, pitch));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(acid, [false; MAX_MACHINES], "an acid gate hangs");
+        assert!(poly.is_empty(), "poly notes hang: {poly:?}");
+    }
+
+    #[test]
+    fn held_back_hits_follow_a_rack_swap() {
+        // Acid A at 0 plays an x3 one-step note; its last gate-off is held
+        // back to 11/3 ticks when the rack swaps A and the empty B.
+        let mut f = Fixture::new();
+        f.synths[0][0].roll.notes.push(ratcheted(0, 4, 48, 3));
+        let mut s = new_seq();
+        s.play();
+        let mut ev = f.run(&mut s, at_ticks(3.0) + 1);
+        assert!(s.samples_to_due() < usize::MAX, "a gate-off is held back");
+        let mut map: RackMap = std::array::from_fn(Some);
+        map.swap(0, 1);
+        let song = CompiledSong::default();
+        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        let after = f.run(&mut s, 1500);
+        assert_eq!(acid_at(&after), [], "nothing reaches B, now at position 0");
+        assert!(
+            after
+                .iter()
+                .any(|(_, e)| matches!(e, SeqEvent::NoteOff { slot: 1 })),
+            "A, now at 1, gets its gate-off"
+        );
+        // Positions as A's: the swap moved A's events to slot 1.
+        for e in &mut ev {
+            if let Some(slot) = e.1.slot_mut().filter(|s| **s == 0) {
+                *slot = 1;
+            }
+        }
+        ev.extend(after);
+        nothing_hangs(&ev);
+    }
+
+    #[test]
+    fn held_back_poly_hits_follow_or_leave_with_their_machine() {
+        let poly_hits = |f: &mut Fixture| {
+            f.notes[0][0].notes.push(ratcheted(0, 4, 60, 8));
+        };
+        // Moved: the FM at 4 swaps with the sampler at 5 mid-tick.
+        let mut f = Fixture::new();
+        poly_hits(&mut f);
+        let mut s = new_seq();
+        s.play();
+        let mut ev = f.run(&mut s, 1);
+        let mut map: RackMap = std::array::from_fn(Some);
+        map.swap(4, 5);
+        let song = CompiledSong::default();
+        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        let after = f.run(&mut s, 3000);
+        assert!(
+            after
+                .iter()
+                .all(|(_, e)| !matches!(e, SeqEvent::PolyOn { slot: 4, .. })),
+            "the sampler, now at 4, gets none of the FM's hits"
+        );
+        assert!(
+            after
+                .iter()
+                .any(|(_, e)| matches!(e, SeqEvent::PolyOn { slot: 5, .. }))
+        );
+        for e in &mut ev {
+            if let Some(slot) = e.1.slot_mut().filter(|s| **s == 4) {
+                *slot = 5;
+            }
+        }
+        ev.extend(after);
+        nothing_hangs(&ev);
+
+        // Removed, and a fresh machine added in its place: the old FM's
+        // held hits are dropped, so the newcomer holds nothing.
+        let mut f = Fixture::new();
+        poly_hits(&mut f);
+        let mut s = new_seq();
+        s.play();
+        let _ = f.run(&mut s, 1);
+        assert!(s.samples_to_due() < usize::MAX);
+        let mut map: RackMap = std::array::from_fn(Some);
+        map[4] = None;
+        f.notes[0][0].notes.clear();
+        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        assert_eq!(s.samples_to_due(), usize::MAX, "dropped");
+        nothing_hangs(&f.run(&mut s, 3000));
     }
 
     #[test]
