@@ -26,6 +26,16 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - 12-voice poly, or mono with glide.
   - Filter, chorus and phaser, plus a Vintage switch for 12-bit grit.
   - A 16-voice starter bank, and **DX7 .syx import** (32-voice banks or single voices).
+- **Mono synth**, a virtual-analog mono voice:
+  - One band-limited saw and pulse oscillator, a phase-locked sub oscillator (one octave down square, two octaves down square, or a two-octave-down 25% pulse) and a noise source, each with its own level. Range switch (-12 / 0 / +12 / +24 semitones) and fine Tune.
+  - Pulse width from the PW knob, the LFO or the envelope. The LFO can also modulate pitch (VCO Mod).
+  - 4-pole (24 dB/oct) resonant ladder low-pass filter that self-oscillates at full resonance. Cutoff is moved by the envelope, the LFO, key tracking and velocity.
+  - One ADSR envelope with a Trigger switch (every note, only after a gap, or each LFO cycle) and a VCA switch (envelope or gate). Velocity can scale both filter and volume.
+  - LFO with triangle, square, sample-and-hold or noise waves.
+  - Glide (portamento) set to Off, On or Auto (only between overlapping notes), with its own time. Monophonic, last-note priority.
+  - **Arpeggiator** over the held notes: Up, Up-Down or Down, over 1 to 3 octaves, at 1/4, 1/8, 1/8T, 1/16, 1/16T or 1/32. It follows the transport and restarts at each song block.
+  - Drift (slow pitch and cutoff wander), a stereo chorus (rate, depth, mix) and Volume.
+  - A 14-patch starter bank (basses, leads, zaps, a noise snare, an arp pluck, a sweep and a pad) plus **Randomise**, a new sound that always plays and keeps volume, arp, drift and chorus. Loading a patch is one undo step. Panel shows an envelope sketch.
 - **Sampler** with 16 slots:
   - **Slice mode** for breaks: chop into 4/8/16/32 equal slices or by detected transients, drag the slice markers, and use choke and tempo lock.
   - **Chromatic mode** for voices and stabs: root key, start/end, and a crossfaded loop.
