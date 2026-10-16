@@ -1418,6 +1418,29 @@ mod tests {
     }
 
     #[test]
+    fn resizing_an_acid_run_keeps_every_note() {
+        let mut app = app_with(SYNTH1, &[(0, 4, 40), (4, 4, 41), (8, 4, 42)]);
+        let mut m = Mouse::new(&mut app, SYNTH1, 44);
+        let (a, b, c) = (
+            m.at(&mut app, 1.5, 40),
+            m.at(&mut app, 5.5, 41),
+            m.at(&mut app, 9.5, 42),
+        );
+        m.click(&mut app, a, NONE);
+        m.click(&mut app, b, egui::Modifiers::SHIFT);
+        m.click(&mut app, c, egui::Modifiers::SHIFT);
+        // From the first note's right edge one step on: every note +4.
+        let (edge, to) = (m.at(&mut app, 3.7, 40), m.at(&mut app, 5.5, 40));
+        m.drag(&mut app, edge, to, NONE);
+        assert_eq!(
+            notes_of(&app, SYNTH1),
+            [(0, 4, 40), (4, 4, 41), (8, 8, 42)],
+            "each note is cut by the next, none removed"
+        );
+        assert_eq!(app.selection(SYNTH1), [0, 1, 2]);
+    }
+
+    #[test]
     fn selected_notes_of_another_pattern_are_no_selection() {
         let mut app = app_with(FM, &[(0, 4, 60)]);
         let n = app.doc.project.roll(FM, 0).unwrap().notes[0];

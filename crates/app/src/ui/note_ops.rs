@@ -192,8 +192,11 @@ fn remap(alive: &[bool]) -> Vec<Option<usize>> {
 }
 
 /// Settles edited notes against their neighbours and returns the touched
-/// notes' new indices. Acid: in ascending start order each touched note
-/// runs `make_mono` (cutting or removing what it overlaps). Poly/Drums:
+/// notes' new indices. Acid: in descending start order each touched note
+/// runs `make_mono` (cutting or removing what it overlaps), so a touched
+/// note only ever cuts the touched note sounding into it and never removes
+/// a later one; of touched notes sharing a start the first stored stays,
+/// the rest go (one note at a time). Poly/Drums:
 /// each touched note absorbs the same-pitch notes it overlaps (union span;
 /// it keeps its own other fields).
 pub fn settle(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<usize> {
@@ -202,8 +205,13 @@ pub fn settle(p: &mut NotePattern, touched: &[usize], kind: LaneKind) -> Vec<usi
         .copied()
         .filter(|&i| i < p.notes.len())
         .collect();
-    ids.sort_by_key(|&i| (p.notes[i].start, i));
+    ids.sort_unstable();
     ids.dedup();
+    if kind == LaneKind::Acid {
+        ids.sort_by_key(|&i| (std::cmp::Reverse(p.notes[i].start), i));
+    } else {
+        ids.sort_by_key(|&i| (p.notes[i].start, i));
+    }
     // Current index of each id, `None` once the note was removed.
     let mut at: Vec<Option<usize>> = ids.iter().map(|&i| Some(i)).collect();
     for k in 0..ids.len() {
@@ -408,5 +416,99 @@ mod tests {
             .collect();
         assert_eq!(got, [(0, 6, 60), (3, 2, 62)]);
         assert_eq!(q.notes.len(), 4);
+    }
+
+    #[test]
+    fn resizing_a_legato_acid_run_keeps_every_note() {
+        let mut p = pat(&[(0, 4, 40), (4, 4, 41), (8, 4, 42)]);
+        resize(&mut p, &[0, 1, 2], 4);
+        let idx = settle(&mut p, &[0, 1, 2], LaneKind::Acid);
+        assert_eq!(spans(&p), vec![(0, 4, 40), (4, 4, 41), (8, 8, 42)]);
+        assert_eq!(idx, [0, 1, 2], "every touched note stays selected");
+        // Untouched notes are still cut and removed by touched ones.
+        let mut q = pat(&[(0, 4, 40), (4, 2, 50), (8, 4, 41), (10, 2, 51)]);
+        resize(&mut q, &[0, 2], 4);
+        settle(&mut q, &[0, 2], LaneKind::Acid);
+        assert_eq!(spans(&q), vec![(0, 8, 40), (8, 8, 41)]);
+    }
+
+    #[test]
+    fn a_chord_pasted_into_an_acid_lane_keeps_one_note_per_start() {
+        let mut p = pat(&[(0, 16, 36)]);
+        let chord = vec![
+            Note::new(0, 4, 60, 100),
+            Note::new(0, 4, 64, 100),
+            Note::new(4, 4, 67, 100),
+        ];
+        let idx = paste(&mut p, &chord, 8, LaneKind::Acid).unwrap();
+        assert_eq!(spans(&p), vec![(0, 8, 36), (8, 4, 60), (12, 4, 67)]);
+        let got: Vec<u8> = idx.iter().map(|&i| p.notes[i].pitch).collect();
+        assert_eq!(got, [60, 67], "the first chord note wins its start");
+    }
+
+    #[test]
+    fn settling_does_not_merge_touching_or_hidden_notes() {
+        let mut p = pat(&[(0, 4, 60), (4, 4, 60)]);
+        settle(&mut p, &[1], LaneKind::Poly);
+        assert_eq!(spans(&p), vec![(0, 4, 60), (4, 4, 60)], "end == start");
+        // 16 steps = 64 ticks; a note at 100 is past the end.
+        let mut q = pat(&[(60, 50, 60), (100, 4, 60)]);
+        settle(&mut q, &[0], LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(60, 50, 60), (100, 4, 60)], "hidden");
+    }
+
+    #[test]
+    fn the_absorbing_note_keeps_its_own_fields() {
+        let mut p = pat(&[(0, 4, 60), (2, 4, 60)]);
+        p.notes[1].vel = 30;
+        p.notes[1].accent = true;
+        let idx = settle(&mut p, &[1], LaneKind::Poly);
+        assert_eq!(p.notes.len(), 1);
+        let n = p.notes[idx[0]];
+        assert_eq!((n.start, n.len, n.vel, n.accent), (0, 6, 30, true));
+    }
+
+    #[test]
+    fn a_group_stops_at_the_last_tick_and_an_outside_group_only_comes_back() {
+        let mut p = pat(&[(250, 4, 60), (240, 4, 62)]);
+        shift(&mut p, &[0, 1], 10, 0, LaneKind::Poly);
+        assert_eq!(spans(&p), vec![(245, 4, 62), (255, 4, 60)], "held at 255");
+        let mut q = pat(&[(10, 4, 60), (300, 4, 62)]);
+        shift(&mut q, &[0, 1], 5, 0, LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(10, 4, 60), (300, 4, 62)], "not outward");
+        shift(&mut q, &[0, 1], -5, 0, LaneKind::Poly);
+        assert_eq!(spans(&q), vec![(5, 4, 60), (295, 4, 62)], "inward");
+    }
+
+    #[test]
+    fn paste_drops_notes_past_the_last_tick_and_caps_only_the_kept() {
+        let clip = vec![Note::new(0, 4, 60, 100), Note::new(10, 4, 62, 100)];
+        let mut p = pat(&[]);
+        let idx = paste(&mut p, &clip, 250, LaneKind::Poly).unwrap();
+        assert_eq!(spans(&p), vec![(250, 4, 60)], "260 dropped");
+        assert_eq!(idx, [0]);
+        let mut edge = pat(&[]);
+        paste(&mut edge, &clip, 246, LaneKind::Poly).unwrap();
+        assert_eq!(edge.notes.len(), 1, "a start of exactly 256 is dropped");
+        let mut full = pat(&[]);
+        full.notes = vec![Note::new(0, 1, 1, 1); MAX_NOTES - 1];
+        assert!(
+            paste(&mut full, &clip, 250, LaneKind::Poly).is_ok(),
+            "only the kept note counts"
+        );
+        assert_eq!(full.notes.len(), MAX_NOTES);
+    }
+
+    #[test]
+    fn duplicate_without_a_snap_goes_straight_after() {
+        for snap in [0, 1] {
+            let mut p = pat(&[(0, 4, 60), (4, 3, 62)]);
+            let idx = duplicate(&mut p, &[0, 1], snap, LaneKind::Poly).unwrap();
+            assert_eq!(
+                values(&p, &idx).iter().map(|n| n.start).collect::<Vec<_>>(),
+                [7, 11],
+                "snap {snap}"
+            );
+        }
     }
 }
