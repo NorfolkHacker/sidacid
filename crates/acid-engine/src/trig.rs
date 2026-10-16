@@ -13,7 +13,7 @@ pub struct TrackTrig {
 }
 
 // Fixed odd 64-bit multipliers (golden-ratio and splitmix-family constants)
-// that spread seed, rack position, loop count and note index before mixing.
+// that spread seed, rack position, loop count and note key before mixing.
 const K1: u64 = 0x9E37_79B9_7F4A_7C15;
 const K2: u64 = 0xBF58_476D_1CE4_E5B9;
 const K3: u64 = 0x94D0_49BB_1331_11EB;
@@ -30,9 +30,15 @@ pub fn is_conditional(n: &Note) -> bool {
     n.cond != Cond::Always || n.chance < 100
 }
 
-/// Does the note at `index` play this pass? Condition first; only if it
-/// passes is the chance rolled. A conditional note's result becomes `t.pre`.
-pub fn plays(n: &Note, index: usize, pos: usize, seed: u32, fill: bool, t: &mut TrackTrig) -> bool {
+/// What a note's chance roll is keyed by: its start and pitch, so it
+/// keeps its dice when other notes are added, deleted or reordered.
+pub fn note_key(n: &Note) -> u64 {
+    (n.start as u64) << 8 | n.pitch as u64
+}
+
+/// Does the note play this pass? Condition first; only if it passes is
+/// the chance rolled. A conditional note's result becomes `t.pre`.
+pub fn plays(n: &Note, pos: usize, seed: u32, fill: bool, t: &mut TrackTrig) -> bool {
     if !is_conditional(n) {
         return true;
     }
@@ -46,16 +52,16 @@ pub fn plays(n: &Note, index: usize, pos: usize, seed: u32, fill: bool, t: &mut 
         Cond::Pre => t.pre,
         Cond::NotPre => !t.pre,
     };
-    let ok = cond && (n.chance >= 100 || roll(seed, pos, t.loops, index) < n.chance as u64);
+    let ok = cond && (n.chance >= 100 || roll(seed, pos, t.loops, note_key(n)) < n.chance as u64);
     t.pre = ok;
     ok
 }
 
-fn roll(seed: u32, pos: usize, loops: u32, index: usize) -> u64 {
+fn roll(seed: u32, pos: usize, loops: u32, key: u64) -> u64 {
     let x = (seed as u64)
         ^ (pos as u64).wrapping_mul(K1)
         ^ (loops as u64).wrapping_mul(K2)
-        ^ (index as u64).wrapping_mul(K3);
+        ^ key.wrapping_mul(K3);
     mix(x) % 100
 }
 
@@ -96,7 +102,7 @@ mod tests {
 
     fn at_loop(n: &Note, loops: u32, fill: bool, pre: bool) -> (bool, TrackTrig) {
         let mut t = TrackTrig { loops, pre };
-        (plays(n, 0, 0, 0, fill, &mut t), t)
+        (plays(n, 0, 0, fill, &mut t), t)
     }
 
     #[test]
@@ -130,7 +136,7 @@ mod tests {
         let b: Vec<bool> = (0..1000)
             .map(|l| {
                 t.loops = l;
-                plays(&n, 0, 0, 7, false, &mut t)
+                plays(&n, 0, 7, false, &mut t)
             })
             .collect();
         assert_ne!(a, b);

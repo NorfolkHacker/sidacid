@@ -686,15 +686,27 @@ impl Engine {
         let Some(pos) = self.position(uid).filter(|_| i < PATTERNS) else {
             return false;
         };
+        // The track's per-note state follows the notes to their new
+        // indices (`p` holds the old pattern after the swap).
+        let seq = &mut self.seq;
         let swapped = match (&mut self.slots[pos].patterns, p) {
             (SlotPatterns::Synth(bank), PatternData::Synth(p)) if p.is_well_formed() => {
-                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+                bank.get_mut(i).map(|stored| {
+                    std::mem::swap(stored, p);
+                    seq.follow_notes(pos, index, &p.roll.notes, &stored.roll.notes);
+                })
             }
             (SlotPatterns::Drum(bank), PatternData::Drum(p)) if p.is_well_formed() => {
-                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+                bank.get_mut(i).map(|stored| {
+                    std::mem::swap(stored, p);
+                    seq.follow_notes(pos, index, &p.roll.notes, &stored.roll.notes);
+                })
             }
             (SlotPatterns::Notes(bank), PatternData::Notes(p)) if p.is_well_formed() => {
-                bank.get_mut(i).map(|stored| std::mem::swap(stored, p))
+                bank.get_mut(i).map(|stored| {
+                    std::mem::swap(stored, p);
+                    seq.follow_notes(pos, index, &p.notes, &stored.notes);
+                })
             }
             _ => None,
         };
@@ -2626,6 +2638,33 @@ mod tests {
             let first = whole(&project(1)).iter().zip(&a).position(|(x, y)| x != y);
             assert_eq!(first, Some(half_tick.ceil() as usize), "{uid:?}");
         }
+    }
+
+    #[test]
+    fn a_pattern_edit_keeps_a_ringing_note_that_moved_index() {
+        // FM: A 0-1 step, a skipped note, B 0-8 steps. Deleting A at
+        // step 2 moves B to the skipped note's index; B keeps sounding.
+        use crate::project::Note;
+        let mut p = Project::default();
+        p.bpm = 120.0;
+        let pat = |notes: Vec<Note>| NotePattern {
+            notes,
+            ..NotePattern::default()
+        };
+        let skipped = Note {
+            chance: 0,
+            ..Note::new(0, 4, 50, 100)
+        };
+        let (a, b) = (Note::new(0, 4, 60, 100), Note::new(0, 32, 64, 100));
+        *p.roll_mut(MachineUid(5), 0).unwrap() = pat(vec![a, skipped, b]);
+        let mut e = Engine::from_project(SR, &p);
+        e.play();
+        render(&mut e, 0.3);
+        assert_eq!(e.fm().sounding(), vec![64]);
+        let mut edit = PatternData::Notes(pat(vec![skipped, b]));
+        assert!(e.swap_pattern(MachineUid(5), 0, &mut edit));
+        render(&mut e, 0.3);
+        assert_eq!(e.fm().sounding(), vec![64], "B still rings");
     }
 
     #[test]

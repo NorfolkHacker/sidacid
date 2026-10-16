@@ -305,6 +305,27 @@ fn sub_tick_ratchets_do_not_allocate() {
 }
 
 #[test]
+fn edits_that_move_ringing_notes_do_not_allocate() {
+    // Reordered copies of the playing FM and kit patterns, swapped in
+    // mid-pass: the played notes and pending ratchets follow them.
+    let p = chance_project();
+    let mut e = Engine::from_project(SR, &p);
+    let mut fm = p.roll(FM, 0).unwrap().clone();
+    fm.notes.reverse();
+    let mut fm = PatternData::Notes(fm);
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    e.play();
+    render_seconds(&mut e, &mut l, &mut r, 0.3);
+    let n = count_allocs(|| {
+        for _ in 0..4 {
+            assert!(e.swap_pattern(FM, 0, &mut fm));
+            render_seconds(&mut e, &mut l, &mut r, 0.2);
+        }
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn song_mode_with_automation_does_not_allocate() {
     let mut e = Engine::from_project(SR, &busy_project());
     let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);

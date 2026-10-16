@@ -381,6 +381,25 @@ fn note_starting(roll: &NotePattern, pos: u16) -> Option<(usize, &Note)> {
         .find(|(_, n)| n.start == pos && pos < roll.ticks())
 }
 
+/// The index in `new` of note `i` of `old` after an edit: the nearest note
+/// with its start and pitch (a note moved or re-pitched counts as gone)
+/// that `taken` doesn't already claim. Looks outward from `i`, so an edit
+/// that shifts indices a little costs little.
+fn follow(old: &[Note], new: &[Note], i: usize, taken: impl Fn(usize) -> bool) -> Option<usize> {
+    let n = old.get(i)?;
+    let same = |j: usize| {
+        new.get(j)
+            .is_some_and(|m| m.start == n.start && m.pitch == n.pitch)
+            && !taken(j)
+    };
+    (0..new.len().max(i + 1)).find_map(|d| {
+        [i.checked_sub(d), (d > 0).then_some(i + d)]
+            .into_iter()
+            .flatten()
+            .find(|&j| same(j))
+    })
+}
+
 /// Advances a step-free track one tick; at the pattern's end it wraps,
 /// counting a loop, or takes a queued pattern, starting its count afresh.
 fn advance(t: &mut Track, ticks: u16) {
@@ -874,6 +893,45 @@ impl Sequencer {
     }
 
     /// Selects pattern `slot` for the track at rack position `pos`.
+    /// Pattern `pattern` of the machine at `pos` was edited from `old` to
+    /// `new` notes: if its track plays it, the per-note state (played
+    /// this pass, ratchets to come) follows each note to its new index
+    /// (see `follow`), so an edit elsewhere in the pattern neither cuts
+    /// nor re-triggers a note. Real-time safe.
+    pub fn follow_notes(&mut self, pos: usize, pattern: u8, old: &[Note], new: &[Note]) {
+        let Some(t) = self.tracks.get_mut(pos).filter(|t| t.pattern == pattern) else {
+            return;
+        };
+        let mut played = [0u64; MAX_NOTES / 64];
+        let has = |p: &[u64; MAX_NOTES / 64], j: usize| {
+            p.get(j / 64).is_some_and(|w| w & (1 << (j % 64)) != 0)
+        };
+        for (w, &bits) in t.played.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let i = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(j) = follow(old, new, i, |j| has(&played, j))
+                    && let Some(word) = played.get_mut(j / 64)
+                {
+                    *word |= 1 << (j % 64);
+                }
+            }
+        }
+        t.played = played;
+        let (mut rat, mut rat_n) = ([0u16; RATCHETS], 0);
+        for &i in &t.rat[..t.rat_n as usize] {
+            if let Some(j) = follow(old, new, i as usize, |j| {
+                rat[..rat_n].iter().any(|&r| r as usize == j)
+            }) && let Ok(j) = u16::try_from(j)
+            {
+                rat[rat_n] = j;
+                rat_n += 1;
+            }
+        }
+        (t.rat, t.rat_n) = (rat, rat_n as u8);
+    }
+
     pub fn select(&mut self, pos: usize, slot: u8) {
         self.chosen[pos] = slot;
         if self.mode == Mode::Song && self.playing {
@@ -1057,7 +1115,7 @@ impl Sequencer {
         // (never legato).
         let mut playing = None;
         if let Some((i, n)) = note_starting(roll, p)
-            && trig::plays(n, i, pos, seed, fill, &mut t.trig)
+            && trig::plays(n, pos, seed, fill, &mut t.trig)
         {
             t.rat_n = 0;
             if n.ratchet > 1 {
@@ -1195,7 +1253,7 @@ impl Sequencer {
             // on the tick in instrument order, between ticks held back.
             for (i, n) in roll.notes.iter().enumerate() {
                 let (from, all) = if n.start == p {
-                    if !trig::plays(n, i, pos, seed, fill, &mut t.trig) {
+                    if !trig::plays(n, pos, seed, fill, &mut t.trig) {
                         continue;
                     }
                     if n.ratchet > 1 {
@@ -1313,7 +1371,7 @@ impl Sequencer {
             // between ticks, held back as a release and a start.
             for (i, n) in pat.notes.iter().enumerate() {
                 let (from, all) = if n.start == p {
-                    if !trig::plays(n, i, m, seed, fill, &mut t.trig) {
+                    if !trig::plays(n, m, seed, fill, &mut t.trig) {
                         continue;
                     }
                     t.mark_played(i);
@@ -1354,7 +1412,7 @@ impl Sequencer {
 /// state as it will be then (a pass on, if that end wraps). The note's
 /// own start decides again; should that differ, the gate closes there.
 fn next_plays(roll: &NotePattern, t: &Track, p: u16, pos: usize, seed: u32, fill: bool) -> bool {
-    note_starting(roll, t.cur_end).is_some_and(|(i, n)| {
+    note_starting(roll, t.cur_end).is_some_and(|(_, n)| {
         let mut tt = t.trig;
         if t.cur_end < p {
             if t.queued.is_some() {
@@ -1363,7 +1421,7 @@ fn next_plays(roll: &NotePattern, t: &Track, p: u16, pos: usize, seed: u32, fill
                 tt.loops = tt.loops.wrapping_add(1);
             }
         }
-        trig::plays(n, i, pos, seed, fill, &mut tt)
+        trig::plays(n, pos, seed, fill, &mut tt)
     })
 }
 
@@ -3404,6 +3462,140 @@ mod tests {
         s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
         assert_eq!(s.samples_to_due(), usize::MAX, "dropped");
         nothing_hangs(&f.run(&mut s, 3000));
+    }
+
+    /// Edits the FM's pattern 0 mid-pass as the engine does: the notes
+    /// change and the track follows them.
+    fn edit_fm(f: &mut Fixture, s: &mut Sequencer, edit: impl FnOnce(&mut Vec<Note>)) {
+        let old = f.notes[0][0].notes.clone();
+        edit(&mut f.notes[0][0].notes);
+        s.follow_notes(4, 0, &old, &f.notes[0][0].notes);
+    }
+
+    #[test]
+    fn deleting_an_earlier_note_keeps_a_ringing_poly_note() {
+        // A at 0-2, a skipped note, B at 1-9 (ringing from tick 1); A is
+        // deleted at tick 3, so B takes the skipped note's old index.
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.extend([
+            note(0, 2, 60),
+            Note {
+                chance: 0,
+                ..note(0, 1, 50)
+            },
+            note(1, 8, 64),
+        ]);
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| {
+            n.remove(0);
+        });
+        ev.extend(
+            run_ticks(&f, &mut s, 9)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(
+            fm(&ev),
+            [(0, true, 60), (1, true, 64), (2, false, 60), (9, false, 64)],
+            "B neither cut nor re-triggered"
+        );
+    }
+
+    #[test]
+    fn inserting_before_a_ringing_poly_note_keeps_it() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.push(note(1, 8, 64));
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 3);
+        edit_fm(&mut f, &mut s, |n| {
+            n.insert(0, note(12, 2, 60));
+            n.insert(0, note(0, 1, 50));
+        });
+        ev.extend(
+            run_ticks(&f, &mut s, 13)
+                .into_iter()
+                .map(|(t, e)| (t + 3, e)),
+        );
+        assert_eq!(
+            fm(&ev),
+            [
+                (1, true, 64),
+                (9, false, 64),
+                (12, true, 60),
+                (14, false, 60)
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_ratchet_hits_follow_their_note() {
+        // An x4 four-step snare; a note inserted before it mid-note keeps
+        // its later hits coming (not handed to the note now at its index).
+        let mut f = Fixture::new();
+        f.drums[0][0]
+            .roll
+            .notes
+            .extend([note(8, 1, 3), ratcheted(0, 16, 1, 4)]);
+        let mut s = new_seq();
+        s.play();
+        let mut ev = run_ticks(&f, &mut s, 2);
+        let old = f.drums[0][0].roll.notes.clone();
+        f.drums[0][0].roll.notes.insert(0, note(14, 1, 2));
+        s.follow_notes(2, 0, &old, &f.drums[0][0].roll.notes);
+        ev.extend(
+            run_ticks(&f, &mut s, 14)
+                .into_iter()
+                .map(|(t, e)| (t + 2, e)),
+        );
+        assert_eq!(kit(&ev), [(0, 1), (4, 1), (8, 1), (8, 3), (12, 1), (14, 2)]);
+    }
+
+    #[test]
+    fn an_insert_keeps_a_chance_notes_dice() {
+        // A 50 % hat over 32 passes of a one-step kit; a note inserted
+        // before it on the first tick of the run changes nothing.
+        let hat = Note {
+            chance: 50,
+            ..note(2, 1, 6)
+        };
+        let run = |insert: bool| {
+            let mut f = one_step_kit(&[hat]);
+            let mut s = new_seq();
+            s.play();
+            let mut ev = run_ticks(&f, &mut s, 1);
+            if insert {
+                let old = f.drums[0][0].roll.notes.clone();
+                f.drums[0][0].roll.notes.insert(0, note(3, 1, 0));
+                s.follow_notes(2, 0, &old, &f.drums[0][0].roll.notes);
+            }
+            ev.extend(
+                run_ticks(&f, &mut s, 127)
+                    .into_iter()
+                    .map(|(t, e)| (t + 1, e)),
+            );
+            kit(&ev)
+                .into_iter()
+                .filter(|h| h.1 == 6)
+                .collect::<Vec<_>>()
+        };
+        let plain = run(false);
+        assert!((8..=24).contains(&plain.len()), "{}", plain.len());
+        assert_eq!(run(true), plain);
+    }
+
+    #[test]
+    fn an_edit_to_another_pattern_leaves_the_track_alone() {
+        let mut f = Fixture::new();
+        f.notes[0][0].notes.extend([note(0, 2, 60), note(1, 8, 64)]);
+        let mut s = new_seq();
+        s.play();
+        let _ = run_ticks(&f, &mut s, 3);
+        let before = s.tracks[4].played;
+        s.follow_notes(4, 1, &f.notes[0][0].notes, &[]);
+        assert_eq!(s.tracks[4].played, before);
     }
 
     #[test]

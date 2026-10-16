@@ -295,9 +295,12 @@ engine act on `chance`, `ratchet` and `cond`.
 ## 6. Chance, ratchet and trig conditions
 
 - **Chance:** 0–100%. Decided by a hash of the project seed, rack
-  position, the track's loop count and the note index, so playback,
-  re-render and WAV export are repeatable. No allocation on the audio
-  thread (covered by `tests/no_alloc.rs`).
+  position, the track's loop count and the note's start and pitch, so
+  playback, re-render and WAV export are repeatable and a note keeps its
+  dice when other notes are added, deleted or reordered. A pattern edit
+  while playing carries each note's per-pass state (played, pending
+  ratchet hits) to its new index, matched by start and pitch. No
+  allocation on the audio thread (covered by `tests/no_alloc.rs`).
 - **Ratchet:** 1–8 re-triggers inside the note's length, evenly
   spaced at exact fractions (`start + k·len/n`), not snapped to the
   1/64 grid: a hit between ticks is sent that many samples into its
