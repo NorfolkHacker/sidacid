@@ -13,6 +13,12 @@ pub enum PasteError {
     WrongKind,
 }
 
+/// What the user is told when an edit would pass `MAX_NOTES` (paste,
+/// duplicate and Ctrl-drag alike).
+pub fn too_many_notes() -> String {
+    format!("That would put more than {MAX_NOTES} notes in the pattern")
+}
+
 fn end(n: &Note) -> u16 {
     n.start.saturating_add(n.len)
 }

@@ -678,8 +678,7 @@ impl SidAcidApp {
                         // Copies move; the originals stay.
                         let copies = note_ops::values(pattern, sel);
                         if pattern.notes.len() + copies.len() > MAX_NOTES {
-                            self.view.message =
-                                Some(format!("A pattern holds at most {MAX_NOTES} notes."));
+                            self.view.message = Some(note_ops::too_many_notes());
                             None
                         } else {
                             let first = pattern.notes.len();
@@ -1373,6 +1372,24 @@ mod tests {
             [(0, 4, 60), (8, 4, 62)],
             "one undo step"
         );
+    }
+
+    #[test]
+    fn ctrl_dragging_past_the_note_cap_is_refused() {
+        use acid_engine::project::{MAX_NOTES, Note};
+        let mut app = app_with(FM, &[(0, 4, 60)]);
+        let p = app.doc.project.roll_mut(FM, 0).unwrap();
+        p.notes
+            .extend((1..MAX_NOTES).map(|i| Note::new(8 + (i % 200) as u16, 1, 20, 100)));
+        let before = app.doc.project.clone();
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let (a, to) = (m.at(&mut app, 1.5, 60), m.at(&mut app, 1.5, 62));
+        m.drag(&mut app, a, to, egui::Modifiers::CTRL);
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("That would put more than 512 notes in the pattern")
+        );
+        assert_eq!(app.doc.project, before);
     }
 
     #[test]

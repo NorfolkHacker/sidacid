@@ -242,19 +242,18 @@ impl SidAcidApp {
             // Only the band goes: the selections it made stay (the plan),
             // so a click on the ruler doesn't lose them.
             self.view.dock.range = None;
-        } else if picker.dragged() {
-            if let (Some(from), Some(p)) =
+        } else if picker.dragged()
+            && let (Some(from), Some(p)) =
                 (self.view.dock.range_from, picker.interact_pointer_pos())
-            {
-                let snap = self.view.dock.snap;
-                let scroll = self.view.dock.scroll_x;
-                let a = snap.floor(from);
-                let b = snap.floor(tick_at(p.x, scroll));
-                let lo = a.min(b);
-                let hi = a.max(b).saturating_add(snap.ticks());
-                self.view.dock.range = Some((lo, hi));
-                self.select_range(lo, hi);
-            }
+        {
+            let snap = self.view.dock.snap;
+            let scroll = self.view.dock.scroll_x;
+            let a = snap.floor(from);
+            let b = snap.floor(tick_at(p.x, scroll));
+            let lo = a.min(b);
+            let hi = a.max(b).saturating_add(snap.ticks());
+            self.view.dock.range = Some((lo, hi));
+            self.select_range(lo, hi);
         }
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, theme::GRID_DARK);
@@ -491,13 +490,10 @@ impl SidAcidApp {
 
     /// Shows why a paste was refused.
     fn paste_refused(&mut self, e: PasteError) {
-        self.view.message = Some(
-            match e {
-                PasteError::TooMany => "That paste would put more than 512 notes in the pattern",
-                PasteError::WrongKind => "Melodic notes can't be pasted onto drums",
-            }
-            .into(),
-        );
+        self.view.message = Some(match e {
+            PasteError::TooMany => super::note_ops::too_many_notes(),
+            PasteError::WrongKind => "Melodic notes can't be pasted onto drums".into(),
+        });
     }
 
     /// Copies to the note clipboard: with a ruler range, every lane's notes
@@ -1369,7 +1365,7 @@ mod tests {
         app.view.panel(FM).cursor = crate::ui::key_entry::Cursor { tick: 8, pitch: 60 };
         // One context throughout: egui tracks which keys are down.
         let ctx = egui::Context::default();
-        let mut run = |app: &mut SidAcidApp, events| {
+        let run = |app: &mut SidAcidApp, events| {
             let mut left = Vec::new();
             let input = egui::RawInput {
                 events,
@@ -1667,10 +1663,15 @@ mod tests {
             .collect();
         let before = app.doc.project.clone();
         app.paste_notes();
-        assert_eq!(
-            app.view.message.as_deref(),
-            Some("That paste would put more than 512 notes in the pattern")
-        );
+        let cap = "That would put more than 512 notes in the pattern";
+        assert_eq!(app.view.message.as_deref(), Some(cap));
+        assert_eq!(app.doc.project, before);
+        // Duplicate says the same.
+        app.view.message = None;
+        let notes = app.doc.project.roll(FM, 0).unwrap().notes[..2].to_vec();
+        app.set_selection(FM, notes);
+        app.duplicate_notes();
+        assert_eq!(app.view.message.as_deref(), Some(cap), "duplicate");
         assert_eq!(app.doc.project, before);
     }
 
