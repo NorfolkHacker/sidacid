@@ -115,9 +115,16 @@ impl FoldRows {
             return pitch;
         };
         if up {
-            p.iter().rev().find(|&&q| q > pitch).copied().unwrap_or(top)
+            p.iter()
+                .rev()
+                .find(|&&q| q > pitch)
+                .copied()
+                .unwrap_or(if pitch < top { top } else { pitch })
         } else {
-            p.iter().find(|&&q| q < pitch).copied().unwrap_or(bottom)
+            p.iter()
+                .find(|&&q| q < pitch)
+                .copied()
+                .unwrap_or(if pitch > bottom { bottom } else { pitch })
         }
     }
 }
@@ -329,6 +336,31 @@ mod tests {
         assert_eq!(f.step(63, false), 62);
         assert_eq!(f.step(127, true), 127, "stays on the top row");
         assert_eq!(f.step(0, false), 0);
+        // C# major: hidden pitches beyond
+        // the ends stay put rather than jumping to the far row.
+        let cs = FoldRows::new(
+            Key {
+                root: 1,
+                scale: acid_engine::scale::Scale::Major,
+                snap: false,
+            },
+            &NotePattern::default(),
+        );
+        let top = cs.pitches()[0];
+        assert!(top < 127, "127 is off C# major");
+        assert_eq!(cs.step(127, true), 127, "nothing above: not back down");
+        assert_eq!(cs.step(127, false), top);
+        let dm = FoldRows::new(
+            Key {
+                root: 2,
+                scale: acid_engine::scale::Scale::Major,
+                snap: false,
+            },
+            &NotePattern::default(),
+        );
+        assert_eq!(dm.pitches().last(), Some(&1), "C#, not C0");
+        assert_eq!(dm.step(0, false), 0, "nothing below: not back up");
+        assert_eq!(dm.step(0, true), 1);
         let rows = Rows::Folded(f);
         assert_eq!(rows.row_near(63), rows.row_near(62), "D#: the row below");
         assert_eq!(Rows::Pitches.row_near(60), 67);

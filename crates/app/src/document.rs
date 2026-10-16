@@ -402,7 +402,7 @@ impl Document {
             Edit::Param { id, value } => p.param(*id) == *value,
             Edit::Bpm(bpm) => p.bpm == *bpm,
             Edit::Swing(swing) => p.swing == *swing,
-            Edit::Key { key } => p.key.root == key.root && p.key.scale == key.scale,
+            Edit::Key { key } => p.key.root == key.root % 12 && p.key.scale == key.scale,
             Edit::SynthTranspose {
                 uid,
                 slot,
@@ -1267,6 +1267,24 @@ mod tests {
         let depth = d.undo_depth();
         d.apply(Edit::Key { key: d.project.key }, false);
         assert_eq!(d.undo_depth(), depth);
+    }
+
+    #[test]
+    fn the_key_no_op_check_compares_the_root_mod_12() {
+        let mut d = doc();
+        d.project.key.root = 14; // stored raw, as a loaded project might
+        // Applying root 2 stores 2 and the inverse holds 14: not a change.
+        d.apply(
+            Edit::Key {
+                key: Key {
+                    root: 2,
+                    scale: d.project.key.scale,
+                    snap: false,
+                },
+            },
+            false,
+        );
+        assert_eq!(d.undo_depth(), 0, "root 2 is root 14");
     }
 
     #[test]

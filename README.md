@@ -37,7 +37,7 @@ An acid groovebox built on a C64 SID-style sound engine. It runs as a native des
   - Drum lanes have eight labelled rows, and hits can sit at any snap.
   - **Key and scale:** in Pattern mode the dock header picks the project's root and scale (Chromatic, Minor, Melodic minor, Phrygian, Major, Hungarian minor). Melodic lanes shade off-scale rows and mark the root; drum lanes ignore the key.
   - **Snap to scale:** new, typed and dragged notes and Up/Down transposes land on scale degrees (Shift+Up/Down still moves an octave).
-  - **Fold:** each melodic lane has a Fold toggle that hides off-scale rows. Rows that hold notes stay visible, and the keyboard cursor moves onto a shown row.
+  - **Fold:** each melodic lane has a Fold toggle that hides off-scale rows. Rows that hold notes stay visible, and the keyboard cursor always stays on a shown row (a hidden pitch counts as the row below it).
   - Each lane has a header (collapse, pattern label, Strip toggle) and a handle to change its height.
   - An expression strip per lane: velocity, or accent and slide on the bass synths, or accent on the drums. The drum accent strip accents every hit on a step; double-click a hit to toggle its own accent.
   - Type notes with the keyboard: click a lane to focus it, then use the tracker layout (Z S X D C V G B H N J M and Q 2 W 3 E R 5 T 6 Y 7 U I). Arrows move the cursor and Backspace steps back and deletes. Clicking outside the dock turns keyboard entry off.

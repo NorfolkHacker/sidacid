@@ -463,17 +463,29 @@ impl SidAcidApp {
     /// puts other voices under the stored index.
     pub(crate) fn undo(&mut self) {
         self.view.voice_source_before(self.doc.next_undo());
+        let (key, middles) = (self.doc.project.key, self.fold_middles());
         let cmds = self.doc.undo();
         self.send(cmds);
         self.sync_rack();
+        if self.doc.project.key != key {
+            self.recentre_folds(middles);
+        } else {
+            self.settle_folds();
+        }
     }
 
     /// Redo; see `undo`.
     pub(crate) fn redo(&mut self) {
         self.view.voice_source_before(self.doc.next_redo());
+        let (key, middles) = (self.doc.project.key, self.fold_middles());
         let cmds = self.doc.redo();
         self.send(cmds);
         self.sync_rack();
+        if self.doc.project.key != key {
+            self.recentre_folds(middles);
+        } else {
+            self.settle_folds();
+        }
     }
 
     /// Sends queued commands to the audio thread. Without audio, commands

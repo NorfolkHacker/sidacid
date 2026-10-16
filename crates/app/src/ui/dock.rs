@@ -210,10 +210,11 @@ impl SidAcidApp {
         #[cfg(test)]
         self.view.dock.tool_rects.extend(rects);
         if picked != key {
+            let middles = self.fold_middles();
             let cmds = self.doc.apply(Edit::Key { key: picked }, false);
             self.send(cmds);
             self.doc.end_gesture();
-            self.cursors_to_shown_rows();
+            self.recentre_folds(middles);
         }
         if toggle.clicked() {
             self.doc.project.key.snap = !key.snap;
@@ -608,6 +609,7 @@ impl SidAcidApp {
         };
         let kind = self.lane_kind(uid);
         let snap = self.view.dock.snap;
+        self.settle_fold_view(uid);
         let mut cursor = self.view.panel(uid).cursor;
         let scale = self.snap_key(kind);
         let from = cursor.pitch;
@@ -1837,6 +1839,78 @@ mod tests {
         frame(&mut app, &ctx, 6.0, vec![]);
         assert!(tool(&app, "Key root").is_none());
         assert!(tool(&app, "Snap to scale").is_none());
+    }
+
+    /// FM's lane folded in `root` major with the keyboard cursor on `pitch`.
+    fn folded_key_app(root: u8, pitch: u8, notes: &[(u16, u16, u8)]) -> SidAcidApp {
+        use crate::test_rack::FM;
+        let mut app = sel_app(FM, notes, &[]);
+        app.doc.project.key = acid_engine::scale::Key {
+            root,
+            scale: Scale::Major,
+            snap: false,
+        };
+        app.doc.project.machine_mut(FM).unwrap().lane.fold = true;
+        app.view.panel(FM).cursor.pitch = pitch;
+        app
+    }
+
+    #[test]
+    fn undoing_a_key_change_leaves_the_cursor_on_a_shown_row() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        // D major, cursor on C#4; C major hides C#4 (cursor to C4); undo
+        // brings D major back, which hides C4: B3 is the drawn row.
+        let mut app = folded_key_app(2, 61, &[]);
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Key root", 0.0);
+        click_tool(&mut app, &ctx, "Root C", 1.0);
+        assert_eq!(app.doc.project.key.root, 0);
+        assert_eq!(app.view.panel(FM).cursor.pitch, 60, "C4 is shown in C");
+        app.undo();
+        assert_eq!(app.doc.project.key.root, 2);
+        assert_eq!(app.view.panel(FM).cursor.pitch, 59);
+        // Typing C writes in the octave the cursor is drawn in.
+        assert!(app.dock_key(Key::Z, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 48)]);
+    }
+
+    #[test]
+    fn removing_the_held_note_under_the_cursor_leaves_typing_on_the_drawn_row() {
+        use crate::test_rack::FM;
+        use egui::{Key, Modifiers};
+        // C4 is off D major but held, so it has a row; Backspace removes
+        // the note and the row, and the cursor is drawn on B3.
+        let mut app = folded_key_app(2, 60, &[(0, 4, 60)]);
+        assert!(app.dock_key(Key::Backspace, Modifiers::NONE));
+        assert!(notes_of(&app, FM).is_empty());
+        assert!(app.dock_key(Key::Z, Modifiers::NONE));
+        assert_eq!(notes_of(&app, FM), [(0, 4, 48)], "the octave of B3");
+    }
+
+    #[test]
+    fn a_key_change_keeps_a_folded_lanes_middle_pitch_in_view() {
+        use crate::test_rack::FM;
+        use crate::ui::lane_geom::FoldRows;
+        let mut app = folded_key_app(0, 50, &[]);
+        let height = acid_engine::project::LaneView::DEFAULT_HEIGHT as f32;
+        let rh = crate::ui::lane::ROW_H;
+        let centre = |rows: &FoldRows, p: u8| {
+            let row = rows.row_of(p).unwrap();
+            row as f32 * rh + rh / 2.0 - height / 2.0
+        };
+        let c = FoldRows::new(app.doc.project.key, &Default::default());
+        let start = centre(&c, 50);
+        app.view.panel(FM).lane_scroll_y = Some(start);
+        let ctx = egui::Context::default();
+        click_tool(&mut app, &ctx, "Key root", 0.0);
+        click_tool(&mut app, &ctx, "Root A", 1.0);
+        let d = FoldRows::new(app.doc.project.key, &Default::default());
+        let want = centre(&d, 50);
+        assert_ne!(want, start, "the row of D3 moved");
+        assert_eq!(app.view.panel(FM).lane_scroll_y, Some(want));
+        app.undo();
+        assert_eq!(app.view.panel(FM).lane_scroll_y, Some(start), "and back");
     }
 
     #[test]

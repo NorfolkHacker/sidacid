@@ -35,6 +35,7 @@ use acid_engine::project::{
     BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, TICKS_PER_STEP,
 };
 use acid_engine::scale::Scale;
+use acid_engine::sequencer::Mode;
 use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, UiBuilder, pos2, vec2,
@@ -152,33 +153,50 @@ impl SidAcidApp {
             let pitch = old
                 .pitch_of_row(middle.min(old.count().saturating_sub(1)))
                 .unwrap_or(0);
-            let row = new.row_near(pitch);
-            let max = (new.count() as f32 * ROW_H - height).max(0.0);
-            let y = (row as f32 * ROW_H + ROW_H / 2.0 - height / 2.0).clamp(0.0, max);
-            self.view.panel(uid).lane_scroll_y = Some(y);
+            self.view.panel(uid).lane_scroll_y = Some(centred_y(&new, height, pitch));
         }
         if let Some(m) = self.doc.project.machine_mut(uid) {
             m.lane.fold = !view.fold;
         }
-        self.cursors_to_shown_rows();
+        self.settle_fold_view(uid);
     }
 
-    /// Moves the keyboard cursor of every folded melodic lane off a hidden
-    /// pitch onto the shown row that draws it, so typing writes where the
-    /// cursor appears.
-    pub(crate) fn cursors_to_shown_rows(&mut self) {
-        let uids: Vec<MachineUid> = self
-            .doc
-            .project
-            .machines
-            .iter()
-            .filter(|m| m.lane.fold && !m.lane.collapsed)
-            .map(|m| m.uid)
-            .collect();
+    /// Whether `uid`'s lane is a folded, expanded, melodic Pattern-mode lane.
+    fn folded_view(&self, uid: MachineUid) -> bool {
+        self.view.mode == Mode::Pattern
+            && self.lane_kind(uid) != LaneKind::Drums
+            && self
+                .doc
+                .project
+                .machine(uid)
+                .is_some_and(|m| m.lane.fold && !m.lane.collapsed)
+    }
+
+    /// Settles every lane's fold view; see `settle_fold_view`.
+    pub(crate) fn settle_folds(&mut self) {
+        let uids: Vec<MachineUid> = self.doc.project.machines.iter().map(|m| m.uid).collect();
         for uid in uids {
-            if self.lane_kind(uid) == LaneKind::Drums {
+            self.settle_fold_view(uid);
+        }
+    }
+
+    /// The pitch in the middle of each folded lane's view, taken before a
+    /// key change so `recentre_folds` can keep it there.
+    pub(crate) fn fold_middles(&mut self) -> Vec<(MachineUid, u8)> {
+        let uids: Vec<MachineUid> = self.doc.project.machines.iter().map(|m| m.uid).collect();
+        let mut out = Vec::new();
+        for uid in uids {
+            if !self.folded_view(uid) {
                 continue;
             }
+            let Some(y) = self.view.panel(uid).lane_scroll_y else {
+                continue;
+            };
+            let height = self
+                .doc
+                .project
+                .machine(uid)
+                .map_or(0.0, |m| m.lane.clamped_height() as f32);
             let pattern = self
                 .doc
                 .project
@@ -186,10 +204,65 @@ impl SidAcidApp {
                 .cloned()
                 .unwrap_or_default();
             let rows = self.lane_rows(uid, true, &pattern);
-            let cursor = &mut self.view.panel(uid).cursor;
-            if let Some(p) = rows.pitch_of_row(rows.row_near(cursor.pitch)) {
-                cursor.pitch = p;
+            let middle = ((y + height / 2.0) / ROW_H).floor().max(0.0) as usize;
+            if let Some(p) = rows.pitch_of_row(middle.min(rows.count().saturating_sub(1))) {
+                out.push((uid, p));
             }
+        }
+        out
+    }
+
+    /// After the key (and so the rows) changed: puts each folded lane's
+    /// middle pitch back in the middle and settles its cursor.
+    pub(crate) fn recentre_folds(&mut self, middles: Vec<(MachineUid, u8)>) {
+        for (uid, pitch) in middles {
+            if !self.folded_view(uid) {
+                continue;
+            }
+            let height = self
+                .doc
+                .project
+                .machine(uid)
+                .map_or(0.0, |m| m.lane.clamped_height() as f32);
+            let pattern = self
+                .doc
+                .project
+                .roll(uid, self.selected(uid))
+                .cloned()
+                .unwrap_or_default();
+            let rows = self.lane_rows(uid, true, &pattern);
+            self.view.panel(uid).lane_scroll_y = Some(centred_y(&rows, height, pitch));
+        }
+        self.settle_folds();
+    }
+
+    /// On a folded, expanded, melodic Pattern-mode lane: moves the keyboard
+    /// cursor off a hidden pitch onto the shown row that draws it (so typing
+    /// writes where the cursor appears) and keeps the pitch scroll on the
+    /// rows. Called where the cursor is read.
+    pub(crate) fn settle_fold_view(&mut self, uid: MachineUid) {
+        if !self.folded_view(uid) {
+            return;
+        }
+        let pattern = self
+            .doc
+            .project
+            .roll(uid, self.selected(uid))
+            .cloned()
+            .unwrap_or_default();
+        let rows = self.lane_rows(uid, true, &pattern);
+        let height = self
+            .doc
+            .project
+            .machine(uid)
+            .map_or(0.0, |m| m.lane.clamped_height() as f32);
+        let panel = self.view.panel(uid);
+        if let Some(p) = rows.pitch_of_row(rows.row_near(panel.cursor.pitch)) {
+            panel.cursor.pitch = p;
+        }
+        if let Some(y) = panel.lane_scroll_y {
+            let max = (rows.count() as f32 * ROW_H - height).max(0.0);
+            panel.lane_scroll_y = Some(y.clamp(0.0, max));
         }
     }
 
@@ -365,6 +438,9 @@ impl SidAcidApp {
             Rows::Folded(_) if let Some(f) = frozen => Rows::Folded(f),
             rows => rows,
         };
+        if frozen.is_none() {
+            self.settle_fold_view(uid);
+        }
         let row_h = if drums {
             DRUM_ROW_H.min(height / DRUM_INSTRUMENTS as f32)
         } else {
@@ -1269,6 +1345,14 @@ fn drum_accent_strip(
         frame.changed |= toggle_accent_in(pattern, from, from + snap.ticks());
         frame.finished = true;
     }
+}
+
+/// The scroll that puts `pitch`'s row (or the one it is drawn on) in the
+/// middle of a `height` view of `rows`.
+fn centred_y(rows: &Rows, height: f32, pitch: u8) -> f32 {
+    let row = rows.row_near(pitch);
+    let max = (rows.count() as f32 * ROW_H - height).max(0.0);
+    (row as f32 * ROW_H + ROW_H / 2.0 - height / 2.0).clamp(0.0, max)
 }
 
 #[cfg(test)]
@@ -2413,7 +2497,7 @@ mod tests {
         };
         app.view.panel(FM).cursor.pitch = 66; // F#4, not in C major
         app.doc.project.machine_mut(FM).unwrap().lane.fold = true;
-        app.cursors_to_shown_rows();
+        app.settle_fold_view(FM);
         assert_eq!(
             app.view.panel(FM).cursor.pitch,
             65,
@@ -2421,8 +2505,38 @@ mod tests {
         );
         // A key change that hides the cursor's pitch moves it too.
         app.doc.project.key.root = 2; // D major has no F
-        app.cursors_to_shown_rows();
+        app.settle_fold_view(FM);
         assert_eq!(app.view.panel(FM).cursor.pitch, 64, "E, the row under F");
+    }
+
+    #[test]
+    fn the_fold_toggle_moves_a_hidden_cursor() {
+        let mut app = app_with(FM, &[]);
+        app.doc.project.key = acid_engine::scale::Key {
+            root: 0,
+            scale: Scale::Major,
+            snap: false,
+        };
+        app.view.panel(FM).cursor.pitch = 66; // F#4, off C major
+        let ctx = egui::Context::default();
+        let fold = text_at(&mut app, FM, "Fold").expect("a Fold toggle");
+        lane_frame(
+            &mut app,
+            &ctx,
+            FM,
+            0.0,
+            vec![egui::Event::PointerMoved(fold)],
+        );
+        let b = |pressed| egui::Event::PointerButton {
+            pos: fold,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: NONE,
+        };
+        lane_frame(&mut app, &ctx, FM, 0.1, vec![b(true)]);
+        lane_frame(&mut app, &ctx, FM, 0.2, vec![b(false)]);
+        assert!(app.doc.project.machine(FM).unwrap().lane.fold);
+        assert_eq!(app.view.panel(FM).cursor.pitch, 65, "the drawn row");
     }
 
     #[test]
