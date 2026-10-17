@@ -967,6 +967,17 @@ impl Project {
     }
 
     pub fn from_ron(text: &str) -> Result<Project, ProjectError> {
+        Project::from_ron_within(text, None)
+    }
+
+    /// Like `from_ron`, but refuses a file whose embedded audio inflates
+    /// past `budget` bytes of 16-bit PCM in all (`None`: no bound), before
+    /// it is all allocated.
+    pub fn from_ron_within(text: &str, budget: Option<u64>) -> Result<Project, ProjectError> {
+        crate::sampler::slot::pcm_codec::with_budget(budget, || Project::parse_ron(text))
+    }
+
+    fn parse_ron(text: &str) -> Result<Project, ProjectError> {
         let parse = |e: ron::error::SpannedError| ProjectError::Parse(e.to_string());
         let head: VersionOnly = ron::from_str(text).map_err(parse)?;
         // Each known version is matched explicitly, so bumping
@@ -1014,7 +1025,12 @@ impl Project {
     }
 
     pub fn load(path: &Path) -> Result<Project, ProjectError> {
-        Project::from_ron(&std::fs::read_to_string(path)?)
+        Project::load_within(path, None)
+    }
+
+    /// `load` with the audio bound of `from_ron_within`.
+    pub fn load_within(path: &Path, budget: Option<u64>) -> Result<Project, ProjectError> {
+        Project::from_ron_within(&std::fs::read_to_string(path)?, budget)
     }
 }
 
@@ -1510,6 +1526,24 @@ mod tests {
         fill_sampler(&mut p, MachineUid(6), 90 * 1024 * 1024); // > 64 MB, < 256 MB
         let q = Project::from_ron(&p.to_ron()).unwrap();
         assert_eq!(q, p);
+    }
+
+    #[test]
+    fn embedded_audio_over_the_budget_is_refused_while_parsing() {
+        // Two slots of 1 MB of 16-bit audio against a 1.5 MB budget.
+        let mut entries: Vec<String> = (0..2u8).map(|i| slot_entry(i * 8, 500_000).0).collect();
+        entries.resize(crate::sampler::SLOTS, "None".into());
+        let text = ron_with_slot_entries(&entries);
+        match Project::from_ron_within(&text, Some(1_500_000)) {
+            Err(ProjectError::Parse(e)) => assert!(e.contains("free memory"), "{e}"),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        // The budget is per parse: the same text loads within a larger one,
+        // and without any.
+        assert!(Project::from_ron_within(&text, Some(2_000_000)).is_ok());
+        assert!(Project::from_ron_within(&text, Some(2_000_000)).is_ok());
+        assert!(Project::from_ron_within(&text, None).is_ok());
+        assert!(Project::from_ron(&text).is_ok());
     }
 
     /// A project saved by Plan 4, before the FM voice name and bank and

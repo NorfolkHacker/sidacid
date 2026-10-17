@@ -181,9 +181,12 @@ impl SidAcidApp {
             Pending::New => self.load_document(Document::new(Project::default())),
             Pending::Open => {
                 if let Some(path) = project_dialog().pick_file() {
-                    let loaded = Project::load(&path)
-                        .map_err(|e| format!("Could not open {}:\n{e}", path.display()));
                     let mem = crate::sysmem::SysinfoMemory::new().snapshot();
+                    // i16 PCM is half the f32 figure `check_fits` counts, so
+                    // a file can't inflate past what would be refused anyway.
+                    let budget = mem.map(|m| m.available / 2);
+                    let loaded = Project::load_within(&path, budget)
+                        .map_err(|e| format!("Could not open {}:\n{e}", path.display()));
                     match loaded.and_then(|p| check_fits(&p, mem).map(|()| p)) {
                         Ok(project) => {
                             let mut doc = Document::new(project);

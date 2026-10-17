@@ -106,7 +106,28 @@ pub mod pcm_codec {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
     use serde::{Deserialize, Deserializer, Serializer};
+    use std::cell::Cell;
     use std::io::{Read, Write};
+
+    thread_local! {
+        /// PCM bytes still allowed in the project being parsed on this
+        /// thread; `None` is unbounded (outside `with_budget` too).
+        static BUDGET: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Runs `f` (a parse) with at most `bytes` of embedded PCM allowed in
+    /// all (`None`: no bound), so a hostile file can't inflate more audio
+    /// than the caller can hold before validation sees it.
+    pub fn with_budget<R>(bytes: Option<u64>, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<u64>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                BUDGET.with(|b| b.set(self.0));
+            }
+        }
+        let _restore = Restore(BUDGET.with(|b| b.replace(bytes)));
+        f()
+    }
 
     pub fn encode(pcm: &[i16]) -> String {
         let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -119,14 +140,22 @@ pub mod pcm_codec {
         let packed = STANDARD.decode(text).map_err(|e| e.to_string())?;
         // Longest valid sample (stereo, top rate) in bytes; caps a deflate bomb.
         const MAX_BYTES: u64 = (crate::sampler::MAX_SECONDS * 192_000.0) as u64 * 2 * 2;
+        let budget = BUDGET.with(Cell::get);
+        let limit = budget.map_or(MAX_BYTES, |b| b.min(MAX_BYTES));
         let mut bytes = Vec::new();
         DeflateDecoder::new(&packed[..])
-            .take(MAX_BYTES + 1)
+            .take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         let len = bytes.len() as u64;
         if len > MAX_BYTES {
             return Err("embedded audio is too large".into());
+        }
+        if let Some(b) = budget {
+            if len > b {
+                return Err("embedded audio is larger than the free memory".into());
+            }
+            BUDGET.with(|c| c.set(Some(b - len)));
         }
         if bytes.len() % 2 != 0 {
             return Err("odd number of PCM bytes".into());
