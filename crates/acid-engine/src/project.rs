@@ -262,7 +262,7 @@ pub struct PadKitMachine {
 
 /// Reads the pad list, refusing any length but `PADS` before an extra
 /// pad's audio is decoded.
-fn exactly_pads<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn exactly_pads<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<crate::padkit::pad::Pad>, D::Error> {
     use crate::padkit::PADS;
@@ -600,6 +600,20 @@ impl LaneView {
     pub const DEFAULT_HEIGHT: u16 = 120;
     pub const MIN_HEIGHT: u16 = 48;
     pub const MAX_HEIGHT: u16 = 480;
+    /// A Pad Kit's lane: its 16 rows at 12 points each.
+    pub const PADS_HEIGHT: u16 = 16 * 12;
+
+    /// A fresh lane for a `ty` machine: a Pad Kit's is tall enough to read
+    /// every row.
+    pub fn for_type(ty: MachineType) -> Self {
+        match ty {
+            MachineType::PadKit => Self {
+                height: Self::PADS_HEIGHT,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
 
     /// True when nothing differs from a fresh lane (so it is not saved).
     pub fn is_default(&self) -> bool {
@@ -635,12 +649,22 @@ impl MachineEntry {
                 .map(|p| (p, p.info().default))
                 .collect(),
             body: MachineBody::new(ty),
-            lane: LaneView::default(),
+            lane: LaneView::for_type(ty),
         }
     }
 
     pub fn machine_type(&self) -> MachineType {
         self.body.machine_type()
+    }
+
+    /// Decoded bytes (f32, as `memory_bytes` counts) of this machine's
+    /// samples: a Sampler's slots or a Pad Kit's layers; 0 for the rest.
+    pub fn sample_bytes(&self) -> usize {
+        match &self.body {
+            MachineBody::Sampler(s) => s.memory_bytes(),
+            MachineBody::PadKit(k) => k.memory_bytes(),
+            _ => 0,
+        }
     }
 }
 
@@ -775,14 +799,7 @@ impl Project {
 
     /// Decoded bytes (f32, as `memory_bytes` counts) of every sample in the project.
     pub fn sample_bytes(&self) -> usize {
-        self.machines
-            .iter()
-            .filter_map(|m| match &m.body {
-                MachineBody::Sampler(s) => Some(s.memory_bytes()),
-                MachineBody::PadKit(k) => Some(k.memory_bytes()),
-                _ => None,
-            })
-            .sum()
+        self.machines.iter().map(MachineEntry::sample_bytes).sum()
     }
     body_accessors!(mono, mono_mut, Mono, MonoMachine);
     body_accessors!(padkit, padkit_mut, PadKit, PadKitMachine);
@@ -1175,6 +1192,24 @@ mod tests {
         let back = Project::from_ron(&ron).unwrap();
         assert!(!back.machines[0].lane.fold);
         assert_eq!(back.machines[0].lane.height, 200);
+    }
+
+    #[test]
+    fn a_new_pad_kit_lane_is_tall_enough_for_its_rows_and_round_trips() {
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        assert_eq!(m.lane.height, 192);
+        assert_eq!(m.lane.clamped_height(), 192);
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.machine(uid).unwrap().lane.height, 192);
+        // Other machines keep the usual height.
+        assert_eq!(
+            p.new_machine(MachineType::Fm).unwrap().lane,
+            LaneView::default()
+        );
     }
 
     #[test]

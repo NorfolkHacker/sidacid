@@ -14,7 +14,9 @@ pub const KIT_EXTENSION: &str = "padkit";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PadKitFile {
     pub version: u32,
-    /// Exactly `PADS`.
+    /// Exactly `PADS`; a longer list is refused before its extra pads'
+    /// audio is decoded.
+    #[serde(deserialize_with = "crate::project::exactly_pads")]
     pub pads: Vec<Pad>,
     /// `PadKit` and `Pad` params only.
     pub params: Vec<(MachineParam, f32)>,
@@ -148,6 +150,19 @@ mod tests {
         let mut g = PadKitFile::from_entry(&entry()).unwrap();
         g.pads.pop();
         assert!(PadKitFile::from_ron_within(&g.to_ron(), None).is_err());
+    }
+
+    #[test]
+    fn an_extra_pad_is_refused_before_its_audio_is_decoded() {
+        let mut f = PadKitFile::from_entry(&entry()).unwrap();
+        let mut extra = Pad::default();
+        extra
+            .layers
+            .push(Layer::new("big", 44_100, 1, &[0.5; 10_000]));
+        f.pads.push(extra);
+        // Room for the 16 pads' audio, not the extra pad's.
+        let err = PadKitFile::from_ron_within(&f.to_ron(), Some(1_000)).unwrap_err();
+        assert!(err.contains("exactly 16 pads"), "{err}");
     }
 
     #[test]

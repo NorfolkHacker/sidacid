@@ -840,6 +840,48 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_keeps_sounding_across_new_layer_ranges() {
+        use crate::machine::MachineType;
+        use crate::padkit::pad::{Layer, Pad};
+        use crate::padkit::play::PadPlay;
+        let mut p = crate::demo::demo_project();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let (mut host, mut tx, _rx) = channel(Engine::from_project(SR, &p));
+        let mut pads = vec![Pad::default(); crate::padkit::PADS];
+        pads[0].layers = vec![Layer::new("x", 48_000, 1, &vec![0.5; 96_000])];
+        pads[0].split_evenly();
+        tx.push(Command::PadSample {
+            uid,
+            pad: 0,
+            layer: 0,
+            sample: Some(Arc::new(pads[0].layers[0].to_sample())),
+        })
+        .unwrap();
+        tx.push(Command::PadPlay {
+            uid,
+            play: Box::new(PadPlay::from_pads(&pads)),
+        })
+        .unwrap();
+        tx.push(Command::NoteOn {
+            uid,
+            pitch: 0,
+            vel: 100,
+        })
+        .unwrap();
+        assert!(run_peak(&mut host, 4096) > 0.01, "the pad sounds");
+        pads[0].layers[0].vel_hi = 40;
+        tx.push(Command::PadPlay {
+            uid,
+            play: Box::new(PadPlay::from_pads(&pads)),
+        })
+        .unwrap();
+        run_peak(&mut host, 512);
+        assert!(run_peak(&mut host, 2048) > 0.01, "still sounding");
+    }
+
+    #[test]
     fn status_arrives_about_sixty_times_a_second() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         tx.push(Command::Play).unwrap();

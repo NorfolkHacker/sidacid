@@ -399,11 +399,37 @@ mod tests {
     #[test]
     fn voice_stealing_takes_the_oldest() {
         let mut k = kit();
-        for _ in 0..VOICES {
+        // Pad 2 first, then pad 1 into every other voice: each retrigger
+        // only fades pad 1's last hit, so nothing is free or a mere tail.
+        k.note_on(2, 100, false, false);
+        for _ in 1..VOICES {
             k.note_on(1, 100, false, false);
-            k.note_on(2, 100, false, false);
         }
-        assert!(k.active_voices() <= VOICES);
+        assert_eq!(k.active_voices(), VOICES);
+        assert_eq!((k.voices[0].slot, k.voices[0].key), (2, 0));
+        k.note_on(0, 100, false, false); // pad 0's loud layer
+        assert_eq!(k.active_voices(), VOICES);
+        assert_eq!(
+            (k.voices[0].slot, k.voices[0].key),
+            (0, 1),
+            "the oldest voice (pad 2's) is reused"
+        );
+        assert!(k.voices.iter().all(|v| v.slot != 2));
+        assert!(k.voices[1..].iter().all(|v| v.slot == 1));
+    }
+
+    #[test]
+    fn new_layer_ranges_leave_a_sounding_pad_ringing() {
+        let mut k = kit();
+        k.note_on(1, 100, false, false);
+        render(&mut k, 1_000);
+        let mut pads = vec![Pad::default(); PADS];
+        pads[1].layers = vec![Layer::new("x", 48_000, 1, &[0.5; 10])];
+        pads[1].layers[0].vel_lo = 1;
+        pads[1].layers[0].vel_hi = 20;
+        k.swap_play(&mut PadPlay::from_pads(&pads));
+        assert_eq!(k.active_voices(), 1);
+        assert!(level_after(&mut k) > 0.1, "still sounding");
     }
 
     #[test]

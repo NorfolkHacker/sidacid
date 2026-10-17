@@ -599,9 +599,10 @@ impl Engine {
 
     /// Stops the transport and releases the pattern's notes (tails ring
     /// out; auditioned notes keep sounding). Stopping while already stopped
-    /// also silences the FM, Mono and Sampler machines at once, auditions
-    /// included, so drones and loops can be cut. The first stop after a
-    /// song ends by itself still only releases: the song end is not a stop.
+    /// also silences the FM, Mono, Sampler and Pad Kit machines at once,
+    /// auditions included, so drones and loops can be cut. The first stop
+    /// after a song ends by itself still only releases: the song end is not
+    /// a stop.
     pub fn stop(&mut self) {
         let cut = !self.seq.is_playing() && !self.ended_by_song;
         self.ended_by_song = false;
