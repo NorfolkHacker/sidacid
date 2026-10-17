@@ -426,16 +426,21 @@ impl EngineHost {
         // The slots' CPU time waits for a status with positions, so the
         // shared time and the frames it covers wait with it.
         let took_slots = status.positions.is_some();
-        if self.events.push(Event::Status(status)).is_ok() {
-            self.master_meter = 0.0;
-            self.cpu_peak = 0.0;
-            self.guard_fired = false;
-            self.song_rejected = false;
-            self.rack_rejected = false;
-            if took_slots {
-                self.shared_ns = 0;
-                self.cpu_frames = 0;
+        match self.events.push(Event::Status(status)) {
+            Ok(()) => {
+                self.master_meter = 0.0;
+                self.cpu_peak = 0.0;
+                self.guard_fired = false;
+                self.song_rejected = false;
+                self.rack_rejected = false;
+                if took_slots {
+                    self.shared_ns = 0;
+                    self.cpu_frames = 0;
+                }
             }
+            // Its position buffer must not be freed here: leak it, as
+            // `dispose` does.
+            Err(PushError::Full(event)) => std::mem::forget(event),
         }
     }
 
