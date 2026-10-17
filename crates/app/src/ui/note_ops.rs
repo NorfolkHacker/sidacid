@@ -32,7 +32,7 @@ fn limit() -> u16 {
 }
 
 fn max_pitch(kind: LaneKind) -> i32 {
-    if kind == LaneKind::Drums { 7 } else { 127 }
+    kind.top_pitch() as i32
 }
 
 /// Indices of the notes equal to the selected values; each selected value
@@ -287,14 +287,14 @@ pub fn copy(p: &NotePattern, idx: &[usize], origin: u16) -> Vec<Note> {
 /// Appends `notes` shifted to `at` (those starting at/after the pattern
 /// limit are dropped), settles them against their neighbours and returns
 /// their indices. Refuses, changing nothing, when the pattern would exceed
-/// `MAX_NOTES` or a drum lane would get a pitch of 8 or more.
+/// `MAX_NOTES` or a drum or pad lane would get a pitch with no row.
 pub fn paste(
     p: &mut NotePattern,
     notes: &[Note],
     at: u16,
     kind: LaneKind,
 ) -> Result<Vec<usize>, PasteError> {
-    if kind == LaneKind::Drums && notes.iter().any(|n| n.pitch >= 8) {
+    if kind.is_rows() && notes.iter().any(|n| n.pitch > kind.top_pitch()) {
         return Err(PasteError::WrongKind);
     }
     let placed: Vec<Note> = notes
@@ -612,6 +612,9 @@ mod tests {
         let mut d = pat(&[(0, 4, 6)]);
         shift(&mut d, &[0], 0, 3, LaneKind::Drums);
         assert_eq!(d.notes[0].pitch, 7, "drum rows stop at the open hat");
+        let mut pads = pat(&[(0, 4, 13)]);
+        shift(&mut pads, &[0], 0, 5, LaneKind::Pads);
+        assert_eq!(pads.notes[0].pitch, 15, "pad rows stop at pad 16");
     }
 
     #[test]
@@ -661,6 +664,17 @@ mod tests {
         assert_eq!(
             paste(&mut kit, &clip, 0, LaneKind::Drums),
             Err(PasteError::WrongKind)
+        );
+        let mut pads = pat(&[]);
+        let hits = vec![Note::new(0, 4, 15, 100), Note::new(4, 4, 20, 100)];
+        assert_eq!(
+            paste(&mut pads, &hits, 0, LaneKind::Pads),
+            Err(PasteError::WrongKind),
+            "pitch 20 has no pad"
+        );
+        assert!(
+            paste(&mut pads, &hits[..1], 0, LaneKind::Pads).is_ok(),
+            "pad 16 does"
         );
     }
 

@@ -8,6 +8,7 @@
 //! cursor to its row), so repeated Back unwinds typing.
 
 use super::poly_edit::{Snap, add, make_mono, note_at};
+use acid_engine::padkit::PADS;
 use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::NotePattern;
 use acid_engine::scale::Key as ScaleKey;
@@ -27,6 +28,29 @@ pub enum LaneKind {
     Acid,
     Poly,
     Drums,
+    /// A Pad Kit: one row per pad, like drums, but notes resize.
+    Pads,
+}
+
+impl LaneKind {
+    /// Highest pitch a note may have in this lane.
+    pub fn top_pitch(self) -> u8 {
+        match self {
+            LaneKind::Drums => DRUM_INSTRUMENTS as u8 - 1,
+            LaneKind::Pads => PADS as u8 - 1,
+            _ => 127,
+        }
+    }
+
+    /// Rows are instruments or pads, not pitches.
+    pub fn is_rows(self) -> bool {
+        matches!(self, LaneKind::Drums | LaneKind::Pads)
+    }
+
+    /// Notes can be resized.
+    pub fn resizable(self) -> bool {
+        self != LaneKind::Drums
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,11 +125,7 @@ pub fn apply_entry(
     // The cursor moves in whole grid cells; the last one may be partial.
     let cells = ticks.div_ceil(s);
     let cell = here / s;
-    let top = if kind == LaneKind::Drums {
-        DRUM_INSTRUMENTS as u8 - 1
-    } else {
-        127
-    };
+    let top = kind.top_pitch();
     match key {
         EntryKey::Left => {
             cursor.tick = wrap_cell(cell, -1, cells) * s;
@@ -124,12 +144,11 @@ pub fn apply_entry(
             false
         }
         EntryKey::Note(semis) => {
-            let pitch = match kind {
-                LaneKind::Drums => cursor.pitch.min(top),
-                _ => {
-                    let typed = (cursor.pitch / 12 * 12).saturating_add(semis).min(127);
-                    scale.map_or(typed, |k| k.snap(typed))
-                }
+            let pitch = if kind.is_rows() {
+                cursor.pitch.min(top)
+            } else {
+                let typed = (cursor.pitch / 12 * 12).saturating_add(semis).min(127);
+                scale.map_or(typed, |k| k.snap(typed))
             };
             let Some(i) = add(roll, here, s.min(ticks - here).max(1), pitch, ENTRY_VEL) else {
                 return false;

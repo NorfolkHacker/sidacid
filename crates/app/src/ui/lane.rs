@@ -34,7 +34,6 @@ use super::{SidAcidApp, theme};
 use crate::document::Edit;
 use acid_engine::host::Command;
 use acid_engine::machine::MachineUid;
-use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{
     BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, STEPS, TICKS_PER_STEP,
 };
@@ -91,7 +90,7 @@ impl StripMode {
 
     fn label(self, kind: LaneKind) -> &'static str {
         match (self, kind) {
-            (StripMode::Expr, LaneKind::Poly) => "Vel",
+            (StripMode::Expr, LaneKind::Poly | LaneKind::Pads) => "Vel",
             (StripMode::Expr, LaneKind::Acid) => "Acc/Slide",
             (StripMode::Expr, LaneKind::Drums) => "Acc",
             (StripMode::Chance, _) => "Chance",
@@ -185,24 +184,28 @@ impl SidAcidApp {
             .unwrap_or(acid_engine::sampler::FIRST_KEY)
     }
 
-    /// How `uid`'s lane edits: acid synths, drum kits, or freely (the rest).
+    /// How `uid`'s lane edits: acid synths, drum kits, Pad Kits, or freely
+    /// (the rest).
     pub(crate) fn lane_kind(&self, uid: MachineUid) -> LaneKind {
         let p = &self.doc.project;
         if p.synth(uid).is_some() {
             LaneKind::Acid
         } else if p.kit(uid).is_some() {
             LaneKind::Drums
+        } else if p.padkit(uid).is_some() {
+            LaneKind::Pads
         } else {
             LaneKind::Poly
         }
     }
 
-    /// The rows of `uid`'s lane: one per instrument on drums, else one per
-    /// pitch, or with `fold` only those of `FoldRows` for `pattern` and the
-    /// project key.
+    /// The rows of `uid`'s lane: one per instrument on drums, one per pad
+    /// on a Pad Kit, else one per pitch, or with `fold` only those of
+    /// `FoldRows` for `pattern` and the project key.
     pub(crate) fn lane_rows(&self, uid: MachineUid, fold: bool, pattern: &NotePattern) -> Rows {
         match self.lane_kind(uid) {
             LaneKind::Drums => Rows::Drums,
+            LaneKind::Pads => Rows::Pads,
             _ if fold => Rows::Folded(FoldRows::new(self.doc.project.key, pattern)),
             _ => Rows::Pitches,
         }
@@ -238,7 +241,7 @@ impl SidAcidApp {
     /// Whether `uid`'s lane is a folded, expanded, melodic Pattern-mode lane.
     fn folded_view(&self, uid: MachineUid) -> bool {
         self.view.mode == Mode::Pattern
-            && self.lane_kind(uid) != LaneKind::Drums
+            && !self.lane_kind(uid).is_rows()
             && self
                 .doc
                 .project
@@ -459,7 +462,7 @@ impl SidAcidApp {
                 ));
         }
         let kind = self.lane_kind(uid);
-        let melodic = kind != LaneKind::Drums;
+        let melodic = !kind.is_rows();
         let mode = self.view.panel(uid).strip_mode;
         let mut picked = mode;
         let (strip, fold) = if strip_toggle {
@@ -515,7 +518,8 @@ impl SidAcidApp {
         width: f32,
     ) {
         let kind = self.lane_kind(uid);
-        let drums = kind == LaneKind::Drums;
+        // Drum and pad lanes have a row per instrument or pad.
+        let drums = kind.is_rows();
         let acid = kind == LaneKind::Acid;
         // An open note tool previews into this pattern: the mouse and the
         // strip edit nothing here until it is applied or cancelled.
@@ -526,7 +530,7 @@ impl SidAcidApp {
         let snap = self.view.dock.snap;
         let tw = tick_w(ZOOMS[self.view.dock.zoom.min(ZOOMS.len() - 1)]);
         let playhead = self.playhead(uid, slot);
-        // Drum rows shrink to fit a short lane, so all 8 always show.
+        // Drum and pad rows shrink to fit a short lane, so all always show.
         // Under a move or resize the rows stay those of the drag's start:
         // rows coming and going with the dragged notes would move the
         // pitch under the pointer. They are rebuilt once it is dropped.
@@ -550,7 +554,7 @@ impl SidAcidApp {
             self.settle_fold_view(uid);
         }
         let row_h = if drums {
-            DRUM_ROW_H.min(height / DRUM_INSTRUMENTS as f32)
+            DRUM_ROW_H.min(height / rows.count() as f32)
         } else {
             ROW_H
         };
@@ -598,6 +602,12 @@ impl SidAcidApp {
         let pkey = self.doc.project.key;
         let scaled = pkey.scale != Scale::Chromatic;
         let held = self.view.audition.filter(|a| a.0 == uid).map(|a| a.1);
+        let pad_labels: Vec<String> = self
+            .doc
+            .project
+            .padkit(uid)
+            .map(|k| k.pads.iter().enumerate().map(|(i, p)| p.label(i)).collect())
+            .unwrap_or_default();
         let first = (scroll_y / row_h).floor().max(0.0) as usize;
         let last = (((scroll_y + height) / row_h).ceil().max(0.0) as usize).min(geom.row_count());
         for r in first..last {
@@ -618,10 +628,14 @@ impl SidAcidApp {
                 };
                 grid.rect_filled(row, 0.0, shade);
                 keys.rect_filled(key, 1.0, Color32::from_gray(190));
+                let name = match kind {
+                    LaneKind::Pads => pad_labels.get(pitch as usize).map_or("", String::as_str),
+                    _ => INST_NAMES[pitch as usize],
+                };
                 keys.text(
                     pos2(rect.left() + 2.0, y0 + row_h / 2.0),
                     Align2::LEFT_CENTER,
-                    INST_NAMES[pitch as usize],
+                    name,
                     FontId::monospace((row_h - 2.0).clamp(6.0, 9.0)),
                     Color32::BLACK,
                 );
@@ -743,14 +757,13 @@ impl SidAcidApp {
             }
         }
 
-        // Notes. A drum note whose pitch is not an instrument has no row.
-        let drawn = |n: &acid_engine::project::Note| {
-            n.start < ticks && (!drums || (n.pitch as usize) < DRUM_INSTRUMENTS)
-        };
+        // Notes. A drum or pad note whose pitch is not a row has none.
+        let drawn = |n: &acid_engine::project::Note| n.start < ticks && n.pitch <= kind.top_pitch();
         let mut sel = self.selection(uid);
         for (i, note) in pattern.notes.iter().enumerate().filter(|(_, n)| drawn(n)) {
             let r = geom.note_rect(note).shrink(0.5);
-            let fill = if drums {
+            // Pad hits shade by velocity, as it picks the layer.
+            let fill = if kind == LaneKind::Drums {
                 if note.accent {
                     theme::ACCENT
                 } else {
@@ -760,7 +773,7 @@ impl SidAcidApp {
                 theme::ACID.gamma_multiply(0.35 + 0.65 * note.vel as f32 / 127.0)
             };
             grid.rect_filled(r, 2.0, fill);
-            if acid && note.accent {
+            if (acid || kind == LaneKind::Pads) && note.accent {
                 grid.line_segment(
                     [
                         pos2(r.left(), r.top() + 1.0),
@@ -905,7 +918,7 @@ impl SidAcidApp {
                 (StripMode::Ratchet, _) => {
                     self.bar_strip(ui, uid, g, width, &mut pattern, &mut frame, Bar::Ratchet)
                 }
-                (StripMode::Expr, LaneKind::Poly) => {
+                (StripMode::Expr, LaneKind::Poly | LaneKind::Pads) => {
                     self.bar_strip(ui, uid, g, width, &mut pattern, &mut frame, Bar::Vel)
                 }
                 (StripMode::Expr, LaneKind::Acid) => {
@@ -967,7 +980,6 @@ impl SidAcidApp {
         frame: &mut Frame,
     ) {
         let kind = self.lane_kind(uid);
-        let drums = kind == LaneKind::Drums;
         let snap = self.view.dock.snap;
         // Snap to scale, on melodic lanes only.
         let scale = self.snap_key(kind);
@@ -1002,7 +1014,7 @@ impl SidAcidApp {
         };
 
         // Before the click: the click then selects the toggled hit.
-        if drums
+        if kind.is_rows()
             && resp.double_clicked()
             && let Some(p) = pointer
             && let Some(i) = hit_at(pattern, p)
@@ -1067,7 +1079,7 @@ impl SidAcidApp {
                         }
                     }
                     let grabbed = pattern.notes[i];
-                    if !drums && geom.near_right_edge(&grabbed, p.x) {
+                    if kind.resizable() && geom.near_right_edge(&grabbed, p.x) {
                         Some(LaneDrag::Resize {
                             origin: Box::new(pattern.clone()),
                             slot,
@@ -1603,7 +1615,7 @@ mod tests {
         /// Draws `uid`'s lane once (melodic lanes scrolled so `top` is the
         /// top row) to find where it sits.
         fn new(app: &mut SidAcidApp, uid: MachineUid, top: u8) -> Mouse {
-            if app.lane_kind(uid) != LaneKind::Drums {
+            if !app.lane_kind(uid).is_rows() {
                 app.view.panel(uid).lane_scroll_y = Some((127 - top) as f32 * ROW_H);
             }
             let ctx = egui::Context::default();
@@ -1620,8 +1632,19 @@ mod tests {
         fn at(&self, app: &mut SidAcidApp, tick: f32, pitch: u8) -> egui::Pos2 {
             let tw = tick_w(ZOOMS[app.view.dock.zoom]);
             let x = self.origin.x + app.lane_key_w() + tick * tw - app.view.dock.scroll_x;
-            let (row, row_h, scroll) = if app.lane_kind(self.uid) == LaneKind::Drums {
-                (7 - pitch as usize, DRUM_ROW_H, 0.0)
+            let kind = app.lane_kind(self.uid);
+            let (row, row_h, scroll) = if kind.is_rows() {
+                // Rows shrink to fit the lane, as `lane_body` draws them.
+                let rows = kind.top_pitch() as f32 + 1.0;
+                let height = app
+                    .doc
+                    .project
+                    .machine(self.uid)
+                    .unwrap()
+                    .lane
+                    .clamped_height();
+                let row_h = DRUM_ROW_H.min(height as f32 / rows);
+                ((kind.top_pitch() - pitch) as usize, row_h, 0.0)
             } else {
                 let scroll = app.view.panel(self.uid).lane_scroll_y.unwrap_or(0.0);
                 (127 - pitch as usize, ROW_H, scroll)
@@ -1923,6 +1946,35 @@ mod tests {
             [(0, 4, 60), (8, 4, 62)],
             "one undo step"
         );
+    }
+
+    #[test]
+    fn pad_hits_resize_and_double_clicks_accent_them() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        app.doc.project.roll_mut(uid, 0).unwrap().notes =
+            vec![acid_engine::project::Note::new(0, 4, 12, 100)];
+        let mut m = Mouse::new(&mut app, uid, 0);
+        let (edge, to) = (m.at(&mut app, 3.7, 12), m.at(&mut app, 9.5, 12));
+        m.drag(&mut app, edge, to, NONE);
+        assert_eq!(notes_of(&app, uid), [(0, 12, 12)], "the right edge resizes");
+        let hit = m.at(&mut app, 1.5, 12);
+        let press = |pressed| Mouse::button(hit, egui::PointerButton::Primary, pressed, NONE);
+        m.frame(&mut app, vec![egui::Event::PointerMoved(hit)], NONE);
+        let t = m.time;
+        for (k, pressed) in [true, false, true, false].into_iter().enumerate() {
+            lane_frame(
+                &mut app,
+                &m.ctx,
+                uid,
+                t + 0.05 * (k + 1) as f64,
+                vec![press(pressed)],
+            );
+        }
+        lane_frame(&mut app, &m.ctx, uid, t + 0.3, vec![]);
+        assert!(app.doc.project.roll(uid, 0).unwrap().notes[0].accent);
     }
 
     #[test]
@@ -2370,6 +2422,33 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_kit_has_a_sixteen_row_pad_lane() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        assert_eq!(app.lane_kind(uid), LaneKind::Pads);
+        let rows = app.lane_rows(uid, true, &NotePattern::default());
+        assert_eq!(rows, Rows::Pads, "pad lanes never fold");
+        assert_eq!(rows.count(), 16);
+        assert_eq!(
+            (rows.row_of(0), rows.row_of(15)),
+            (Some(15), Some(0)),
+            "pad 1 at the bottom"
+        );
+        let k = LaneKind::Pads;
+        assert_eq!(
+            (k.top_pitch(), k.is_rows(), k.resizable()),
+            (15, true, true)
+        );
+        assert_eq!(
+            (LaneKind::Drums.top_pitch(), LaneKind::Drums.resizable()),
+            (7, false)
+        );
+        assert_eq!(StripMode::Expr.label(LaneKind::Pads), "Vel");
+    }
+
+    #[test]
     fn lanes_draw_headless_for_every_machine() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.add_machine(acid_engine::machine::MachineType::Mono);
@@ -2384,7 +2463,7 @@ mod tests {
             });
         });
         for uid in app.doc.project.rack_uids() {
-            let melodic = app.lane_kind(uid) != LaneKind::Drums;
+            let melodic = !app.lane_kind(uid).is_rows();
             assert_eq!(app.view.panel(uid).lane_scroll_y.is_some(), melodic);
         }
     }
@@ -2408,6 +2487,22 @@ mod tests {
             }
         }
         (texts, acid_lines)
+    }
+
+    #[test]
+    fn pad_rows_are_labelled_with_the_pad_names() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        app.doc.project.padkit_mut(uid).unwrap().pads[4].name = "tom".into();
+        let (texts, _) = painted(&mut app, uid);
+        assert!(texts.iter().any(|t| t == "tom"));
+        assert!(texts.iter().any(|t| t == "P1") && texts.iter().any(|t| t == "P16"));
+        assert!(
+            !texts.iter().any(|t| t == "P5"),
+            "named pads show their name"
+        );
     }
 
     #[test]

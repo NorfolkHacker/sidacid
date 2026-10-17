@@ -246,7 +246,7 @@ pub fn reverse(p: &NotePattern, scope: &[usize], kind: LaneKind) -> (NotePattern
 /// Invert: pitches mirror within the scope's pitch range
 /// (`pitch' = lo + hi - pitch`), then go to their nearest in-key pitch
 /// when `key` snaps to a scale other than Chromatic. Melodic lanes only:
-/// drums are unchanged.
+/// drums and pads are unchanged.
 pub fn invert(
     p: &NotePattern,
     scope: &[usize],
@@ -254,7 +254,7 @@ pub fn invert(
     key: Key,
 ) -> (NotePattern, Vec<usize>) {
     let (scope, edit) = split(p, scope);
-    if kind == LaneKind::Drums {
+    if kind.is_rows() {
         return (p.clone(), scope);
     }
     let Some(lo) = edit.iter().map(|&i| p.notes[i].pitch as i32).min() else {
@@ -278,7 +278,7 @@ pub fn invert(
 
 /// Strum: notes sharing a start are staggered `ticks` apart in pitch
 /// order (`up` = low first); each keeps its end where it can (length at
-/// least 1). Melodic lanes only: drums are unchanged.
+/// least 1). Melodic lanes only: drums and pads are unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Strum {
     /// 1..=8.
@@ -299,7 +299,7 @@ pub fn strum(
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
     let (scope, edit) = split(p, scope);
-    if kind == LaneKind::Drums {
+    if kind.is_rows() {
         return (p.clone(), scope);
     }
     let gap = params.ticks.clamp(1, 8) as i32;
@@ -416,9 +416,9 @@ fn ordered(a: u8, b: u8) -> (u8, u8) {
 /// `whole`), one per grid line with a `density` % chance, pitched in `key`
 /// within the pitch range (any pitch when the key is Chromatic; the
 /// nearest in-key pitch when the range holds none) or a random instrument
-/// on drums, `len_min..=len_max` grid steps long (one step on drums; cut
-/// at the span end). A span with no grid line in it holds one cell at its
-/// start. The same seed gives the same notes.
+/// or pad on drums or pads, `len_min..=len_max` grid steps long (one step
+/// on drums; cut at the span end). A span with no grid line in it holds
+/// one cell at its start. The same seed gives the same notes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Randomize {
     /// 10..=100 %.
@@ -460,8 +460,8 @@ pub fn randomize(
     let density = params.density.min(100) as u64;
     let (plo, phi) = ordered(params.pitch_lo.min(127), params.pitch_hi.min(127));
     let (lmin, lmax) = ordered(params.len_min.max(1), params.len_max.max(1));
-    let pool: Vec<u8> = if kind == LaneKind::Drums {
-        (0..8).collect()
+    let pool: Vec<u8> = if kind.is_rows() {
+        (0..=kind.top_pitch()).collect()
     } else {
         (plo..=phi).filter(|&x| key.contains(x)).collect()
     };
@@ -482,8 +482,8 @@ pub fn randomize(
             pool[(roll(seed, k, 1) % pool.len() as u64) as usize]
         };
         // A drum hit is one cell: longer ones would run into the row's
-        // next hit and merge with it.
-        let units = if kind == LaneKind::Drums {
+        // next hit and merge with it. Pad hits resize, so take lengths.
+        let units = if !kind.resizable() {
             1
         } else {
             lmin as u64 + roll(seed, k, 2) % (lmax - lmin + 1) as u64
@@ -516,8 +516,8 @@ pub enum ArpStyle {
 /// (at least 1 tick, cut at the chord's end) and copying the fields of the
 /// chord note it takes its pitch from. The chord's notes are reused in
 /// place for the first steps (unused ones are removed), further steps are
-/// appended. Single notes are unchanged. Melodic lanes only: drums are
-/// unchanged.
+/// appended. Single notes are unchanged. Melodic lanes only: drums and
+/// pads are unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Arp {
     pub style: ArpStyle,
@@ -546,7 +546,7 @@ pub fn arpeggiate(
     kind: LaneKind,
 ) -> (NotePattern, Vec<usize>) {
     let (scope, edit) = split(p, scope);
-    if kind == LaneKind::Drums {
+    if kind.is_rows() {
         return (p.clone(), scope);
     }
     let rate = params.rate.ticks().max(1);
@@ -611,7 +611,7 @@ pub fn arpeggiate(
 /// cells of `snap` from the span's first grid line (Bjorklund: E(3,8) =
 /// x..x..x.), the pattern shifted `rotation` cells later and repeated
 /// across the whole span (cell `c` takes step `c % steps`), each one cell
-/// long, on `pitch` (drums: that row, 0..8). `steps` is capped at the
+/// long, on `pitch` (drums: that row, 0..8; pads: that pad, 0..16). `steps` is capped at the
 /// cells the span holds. Visible scope notes on that pitch are replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Euclid {
@@ -673,11 +673,7 @@ pub fn euclid(
     let g = snap.ticks().max(1);
     let cells: Vec<u16> = cells(lo, hi, g).collect();
     let steps = (params.steps.clamp(1, 64) as usize).min(cells.len());
-    let pitch = if kind == LaneKind::Drums {
-        params.pitch.min(7)
-    } else {
-        params.pitch.min(127)
-    };
+    let pitch = params.pitch.min(kind.top_pitch());
     let mut added = Vec::new();
     if steps > 0 {
         let onsets = bjorklund(params.hits as usize, steps);
@@ -970,6 +966,13 @@ mod tests {
     }
 
     #[test]
+    fn legato_lengthens_pad_hits() {
+        let p = pat(&[(0, 1, 0), (4, 1, 15)]);
+        let (q, _) = legato(&p, &all(&p), LaneKind::Pads);
+        assert_eq!(spans(&q), vec![(0, 4, 0), (4, 60, 15)]);
+    }
+
+    #[test]
     fn legato_stops_at_an_unselected_neighbour() {
         // Note 1 is not in scope: it survives, and note 0 ends at its start.
         let p = pat(&[(0, 1, 60), (4, 1, 62), (8, 1, 64)]);
@@ -1094,6 +1097,10 @@ mod tests {
         let d = pat(&[(0, 2, 0), (2, 2, 5)]);
         assert_eq!(
             invert(&d, &all(&d), LaneKind::Drums, Key::default()),
+            (d.clone(), vec![0, 1])
+        );
+        assert_eq!(
+            invert(&d, &all(&d), LaneKind::Pads, Key::default()),
             (d.clone(), vec![0, 1])
         );
     }
@@ -1494,6 +1501,35 @@ mod tests {
     }
 
     #[test]
+    fn randomize_pads_uses_every_pad_and_varies_lengths() {
+        let p = pat(&[]);
+        let (mut rows, mut lens) = ([false; 16], std::collections::BTreeSet::new());
+        for seed in 0..40 {
+            let (q, _) = randomize(
+                &p,
+                &[],
+                false,
+                &rnd(seed),
+                LaneKind::Pads,
+                c_minor(),
+                Snap::Step,
+            );
+            for n in &q.notes {
+                rows[n.pitch as usize] = true;
+                lens.insert(n.len);
+            }
+        }
+        assert!(
+            rows.iter().all(|&r| r),
+            "pads 1 to 16, not the key's pitches"
+        );
+        assert!(
+            lens.len() > 1,
+            "pad hits take the Shortest to Longest lengths"
+        );
+    }
+
+    #[test]
     fn randomize_drums_hits_one_cell_each() {
         // At 100 % every cell gets its own hit, even with long lengths set:
         // same-row neighbours never overlap and merge.
@@ -1712,6 +1748,15 @@ mod tests {
             Snap::Step,
         );
         assert_eq!(q.notes[0].pitch, 7);
+    }
+
+    #[test]
+    fn euclid_pads_use_the_row_up_to_pad_16() {
+        let p = pat(&[]);
+        let (q, _) = euclid(&p, &[], false, &eu(1, 4, 0, 12), LaneKind::Pads, Snap::Step);
+        assert!(q.notes.iter().all(|n| n.pitch == 12));
+        let (q, _) = euclid(&p, &[], false, &eu(1, 4, 0, 60), LaneKind::Pads, Snap::Step);
+        assert!(q.notes.iter().all(|n| n.pitch == 15));
     }
 
     #[test]

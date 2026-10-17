@@ -78,11 +78,11 @@ impl ToolKind {
     }
 
     /// Why the tool is greyed on a lane of `kind`, or None when it works
-    /// there: Invert needs pitches (not drums), Strum and Arpeggiate need
-    /// chords (a lane playing several notes at once).
+    /// there: Invert needs pitches (not drums or pads), Strum and
+    /// Arpeggiate need chords (a lane playing several notes at once).
     pub fn unavailable(self, kind: LaneKind) -> Option<&'static str> {
         match self {
-            ToolKind::Invert if kind == LaneKind::Drums => Some("Melodic lanes only"),
+            ToolKind::Invert if kind.is_rows() => Some("Melodic lanes only"),
             ToolKind::Strum | ToolKind::Arpeggiate if kind != LaneKind::Poly => {
                 Some("Only on lanes that play chords")
             }
@@ -242,13 +242,8 @@ impl SidAcidApp {
         };
         let kind = self.lane_kind(uid);
         let mut params = self.view.tool_params;
-        // Euclidean starts on the cursor's pitch or drum row.
-        let pitch = self.view.panel(uid).cursor.pitch;
-        params.euclid.pitch = if kind == LaneKind::Drums {
-            pitch.min(INST_NAMES.len() as u8 - 1)
-        } else {
-            pitch.min(127)
-        };
+        // Euclidean starts on the cursor's pitch, drum row or pad.
+        params.euclid.pitch = self.view.panel(uid).cursor.pitch.min(kind.top_pitch());
         let panel = self.view.panel(uid);
         let sel_before = (panel.selected.clone(), panel.sel_slot);
         // The preview's edits must not merge into an earlier gesture.
@@ -415,6 +410,14 @@ impl SidAcidApp {
         };
         let (tool, mut params) = (t.tool, t.params);
         let kind = self.lane_kind(t.uid);
+        // The row names on drum and pad lanes, for Euclidean's row picker.
+        let rows: Vec<String> = match kind {
+            LaneKind::Drums => INST_NAMES.iter().map(|n| n.to_string()).collect(),
+            LaneKind::Pads => self.doc.project.padkit(t.uid).map_or(Vec::new(), |k| {
+                k.pads.iter().enumerate().map(|(i, p)| p.label(i)).collect()
+            }),
+            _ => Vec::new(),
+        };
         let snap = self.view.dock.snap;
         let mut open = true;
         let (mut apply, mut cancel, mut new_seed) = (false, false, false);
@@ -432,7 +435,7 @@ impl SidAcidApp {
                     combo: &mut combo,
                     rects,
                 };
-                settings(ui, tool, &mut params, kind, snap, out);
+                settings(ui, tool, &mut params, kind, &rows, snap, out);
                 ui.separator();
                 ui.horizontal(|ui| {
                     let a = ui.button("Apply");
@@ -538,12 +541,14 @@ struct Out<'a> {
     rects: &'a mut Vec<(String, Rect)>,
 }
 
-/// `tool`'s settings (the plan's table).
+/// `tool`'s settings (the plan's table). `rows` names a drum or pad
+/// lane's rows, from pitch 0.
 fn settings(
     ui: &mut egui::Ui,
     tool: ToolKind,
     p: &mut ToolParams,
     kind: LaneKind,
+    rows: &[String],
     snap: Snap,
     out: Out,
 ) {
@@ -552,7 +557,6 @@ fn settings(
         combo: open_combo,
         rects,
     } = out;
-    let drums = kind == LaneKind::Drums;
     let note = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).weak());
     match tool {
         ToolKind::Quantize => {
@@ -596,10 +600,13 @@ fn settings(
         ToolKind::Randomize => {
             let r = &mut p.randomize;
             number(ui, "Density", &mut r.density, 10..=100, "%");
-            // Drum hits are one cell each: no pitch range, no lengths.
-            if !drums {
+            // Drum and pad hits take a random row: no pitch range. Drum
+            // hits are one cell each: no lengths.
+            if !kind.is_rows() {
                 pitch(ui, "Lowest", &mut r.pitch_lo);
                 pitch(ui, "Highest", &mut r.pitch_hi);
+            }
+            if kind.resizable() {
                 let unit = format!(" × {}", snap.label());
                 rects.push((
                     "Shortest".into(),
@@ -639,16 +646,16 @@ fn settings(
             let steps = e.steps.clamp(1, 64);
             number(ui, "Hits", &mut e.hits, 0..=steps, "");
             number(ui, "Rotation", &mut e.rotation, 0..=steps - 1, "");
-            if drums {
+            if kind.is_rows() && !rows.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("Row");
-                    let row = (e.pitch as usize).min(INST_NAMES.len() - 1);
+                    let row = (e.pitch as usize).min(rows.len() - 1);
                     let combo = egui::ComboBox::from_id_salt("euclid_row")
                         .width(50.0)
-                        .selected_text(INST_NAMES[row])
+                        .selected_text(rows[row].as_str())
                         .show_ui(ui, |ui| {
-                            for (i, name) in INST_NAMES.iter().enumerate() {
-                                ui.selectable_value(&mut e.pitch, i as u8, *name);
+                            for (i, name) in rows.iter().enumerate() {
+                                ui.selectable_value(&mut e.pitch, i as u8, name.as_str());
                             }
                         });
                     rects.push(("Row".into(), combo.response.rect));
@@ -749,6 +756,16 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    #[test]
+    fn pad_lanes_cannot_invert_or_play_chords() {
+        assert_eq!(
+            ToolKind::Invert.unavailable(LaneKind::Pads),
+            Some("Melodic lanes only")
+        );
+        assert!(ToolKind::Strum.unavailable(LaneKind::Pads).is_some());
+        assert_eq!(ToolKind::Euclid.unavailable(LaneKind::Pads), None);
     }
 
     #[test]
@@ -1362,6 +1379,28 @@ mod tests {
         open(&mut app, &ctx, ToolKind::Randomize, 3.0);
         frame(&mut app, &ctx, 5.0, vec![]);
         assert!(rect(&app, "Shortest").is_some() && rect(&app, "Longest").is_some());
+    }
+
+    #[test]
+    fn pad_tools_offer_lengths_and_pad_rows() {
+        let ctx = egui::Context::default();
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        app.doc.project.padkit_mut(uid).unwrap().pads[2].name = "snare".into();
+        app.doc.project.roll_mut(uid, 0).unwrap().notes = vec![Note::new(0, 4, 2, 100)];
+        app.view.focus = Some(uid);
+        app.view.dock.keyboard = true;
+        app.view.panel(uid).cursor.pitch = 2;
+        open(&mut app, &ctx, ToolKind::Randomize, 0.0);
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(rect(&app, "Shortest").is_some(), "pad hits resize");
+        click(&mut app, &ctx, "Cancel", 3.0);
+        open(&mut app, &ctx, ToolKind::Euclid, 5.0);
+        frame(&mut app, &ctx, 7.0, vec![]);
+        assert!(rect(&app, "Row").is_some(), "a row picker, not a pitch");
+        assert_eq!(app.view.tool.as_ref().unwrap().params.euclid.pitch, 2);
     }
 
     #[test]

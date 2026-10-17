@@ -831,7 +831,7 @@ impl SidAcidApp {
     /// snap is on, the scale isn't Chromatic and the lane is melodic.
     pub(crate) fn snap_key(&self, kind: LaneKind) -> Option<acid_engine::scale::Key> {
         let key = self.doc.project.key;
-        (key.snap && key.scale != Scale::Chromatic && kind != LaneKind::Drums).then_some(key)
+        (key.snap && key.scale != Scale::Chromatic && !kind.is_rows()).then_some(key)
     }
 
     /// A lane's mouse move or resize is in progress, or a note tool is
@@ -903,7 +903,7 @@ impl SidAcidApp {
         } else {
             self.view.dock.snap.ticks() as i32
         };
-        let octave = if kind == LaneKind::Drums { 0 } else { 12 };
+        let octave = if kind.is_rows() { 0 } else { 12 };
         let pitch = if mods.shift { octave } else { 1 };
         let (dt, dp) = match key {
             Key::ArrowLeft => (-step, 0),
@@ -965,7 +965,9 @@ impl SidAcidApp {
     fn paste_refused(&mut self, e: PasteError) {
         self.view.message = Some(match e {
             PasteError::TooMany => super::note_ops::too_many_notes(),
-            PasteError::WrongKind => "Melodic notes can't be pasted onto drums".into(),
+            // Single-lane melodic clips are refused before this: here a
+            // pad above 8 is going onto drums.
+            PasteError::WrongKind => "Some notes have no row on this lane".into(),
         });
     }
 
@@ -1053,7 +1055,7 @@ impl SidAcidApp {
         let (Some(clip), Some(focus)) = (self.view.note_clip.clone(), self.focused()) else {
             return;
         };
-        let melodic = |k: LaneKind| k != LaneKind::Drums;
+        let melodic = |k: LaneKind| !k.is_rows();
         let single = clip.lanes.len() == 1;
         let at = self.view.panel(focus).cursor.tick;
         let targets: Vec<(MachineUid, &Vec<Note>)> = if let [(_, kind, notes)] = &clip.lanes[..] {
@@ -1062,6 +1064,8 @@ impl SidAcidApp {
                 self.view.message = Some(
                     if melodic(to) {
                         "Drum notes can't be pasted onto a melodic part"
+                    } else if to == LaneKind::Pads {
+                        "Melodic notes can't be pasted onto pads"
                     } else {
                         "Melodic notes can't be pasted onto drums"
                     }
@@ -1204,7 +1208,7 @@ mod tests {
         app.add_machine(acid_engine::machine::MachineType::Mono);
         crate::ui::run_frames(&mut app, 3);
         for uid in app.doc.project.rack_uids() {
-            let melodic = app.lane_kind(uid) != crate::ui::key_entry::LaneKind::Drums;
+            let melodic = !app.lane_kind(uid).is_rows();
             assert_eq!(
                 app.view.panel(uid).lane_scroll_y.is_some(),
                 melodic,

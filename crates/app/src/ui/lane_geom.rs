@@ -4,6 +4,7 @@
 //! instrument (the kick at the bottom). A folded melodic lane has one row
 //! per pitch in its `FoldRows` table, highest on top.
 
+use acid_engine::padkit::PADS;
 use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{Note, NotePattern, TICKS_PER_STEP};
 use acid_engine::scale::Key;
@@ -22,6 +23,8 @@ pub fn tick_w(zoom: f32) -> f32 {
 pub enum Rows {
     Pitches,
     Drums,
+    /// One per Pad Kit pad, pad 1 at the bottom.
+    Pads,
     /// A folded melodic lane: only the pitches in the table.
     Folded(FoldRows),
 }
@@ -31,6 +34,7 @@ impl Rows {
         match self {
             Rows::Pitches => 128,
             Rows::Drums => DRUM_INSTRUMENTS,
+            Rows::Pads => PADS,
             Rows::Folded(f) => f.len(),
         }
     }
