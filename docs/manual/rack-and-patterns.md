@@ -6,6 +6,8 @@ This chapter covers the rack: the machine types, how to add, duplicate, remove, 
 
 A *machine* is one sound source in the rack, with its own patterns, its own knobs and its own mixer channel. The rack lists the machines from top to bottom, and the same order is used for the lanes in the editor dock, the mixer strips and the song lanes.
 
+Each machine has its own colour, taken from its place in the rack: the first machine is green, then cyan, magenta, yellow and blue, and the sixth starts again at green. The colour is used for the machine's panel title and frame, its notes in the editor dock, its blocks in Song mode, and its name and meter in the mixer. Moving a machine changes its colour.
+
 These are the machine types, as the **+ Add machine** menu names them:
 
 | Menu label | What it is | New machines are named | Chapter |
@@ -46,7 +48,7 @@ Click the remove button (🗙) in a panel's header. The machine goes at once, wi
 
 ### Moving a machine
 
-Click ⬆ (Move up) or ⬇ (Move down) in a panel's header to move the machine one place. Move up is greyed out on the first machine, and Move down on the last.
+Click ⬆ (Move up) or ⬇ (Move down) in a panel's header to move the machine one place. Move up is greyed out on the first machine, and Move down on the last. The machine takes the colour of its new place (see [Machines](#machines)).
 
 ### Renaming a machine
 
@@ -59,7 +61,7 @@ Names are shown in capitals in the panel header and as typed elsewhere, for exam
 Each machine panel starts with a header row. From left to right:
 
 - **Collapse arrow.** Click it to fold the panel down to its header, or open it again. Only the arrow does this: clicking the name doesn't.
-- **Title.** The machine's name in capitals, followed by the selected pattern, for example "SYNTH 1   A01". Drum kit titles add "DRUMS" after the name ("KIT A DRUMS   A01"). The FM and Mono titles end with the name of the voice or patch last loaded. The focused machine's title is lit in green.
+- **Title.** The machine's name in capitals, followed by the selected pattern, for example "SYNTH 1   A01". Drum kit titles add "DRUMS" after the name ("KIT A DRUMS   A01"). The FM and Mono titles end with the name of the voice or patch last loaded. The title is drawn in the machine's colour, and so is the thin frame around the panel. The focused machine's frame is brighter than the others.
 - **CPU n%.** The share of the audio time this machine takes, shown while audio runs. It turns amber above 25 % and red above 50 %.
 - **⬆ ⬇ 🗐 🗙.** Move up, Move down, Duplicate and Remove, as described above.
 

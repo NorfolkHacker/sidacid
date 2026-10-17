@@ -23,7 +23,7 @@ Each lane shows its blocks over a grid with a line at every bar (and every four 
 
 ## Blocks
 
-A block plays one pattern of its machine from a given step. Each block is drawn as a rounded box labelled with its pattern (for example "A03"), with a small picture of the pattern's notes inside. Muted blocks are dimmed.
+A block plays one pattern of its machine from a given step. Each block is drawn as a rounded box in its machine's colour (see [Machines](rack-and-patterns.md#machines)), labelled with its pattern (for example "A03"), with a small picture of the pattern's notes inside. Muted blocks are dimmed.
 
 Blocks on a lane never overlap. A gap between blocks is silence for that machine.
 

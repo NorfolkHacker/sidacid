@@ -54,6 +54,16 @@ pub enum SongDrag {
     Marquee { from: u32, add: bool },
 }
 
+/// A block's (fill, ink) for the machine coloured `colour`: grey when
+/// muted. The ink draws its border, repeat dividers and note picture.
+fn block_colours(colour: Color32, mute: bool) -> (Color32, Color32) {
+    if mute {
+        (theme::GRID_DARK, theme::KNOB_TRACK)
+    } else {
+        (colour.gamma_multiply(0.18), colour)
+    }
+}
+
 /// Width of one step in Song mode at dock zoom index `zoom`.
 pub(crate) fn step_w(zoom: usize) -> f32 {
     tick_w(ZOOMS[zoom.min(ZOOMS.len() - 1)]) * TICKS_PER_STEP as f32
@@ -281,11 +291,7 @@ impl SidAcidApp {
             pos2(geom.x_of(end) - 0.5, body.bottom()),
         );
         let painter = grid.with_clip_rect(r.intersect(grid.clip_rect()));
-        let (fill, ink) = if b.mute {
-            (theme::GRID_DARK, theme::KNOB_TRACK)
-        } else {
-            (theme::ACID.gamma_multiply(0.18), theme::ACID)
-        };
+        let (fill, ink) = block_colours(self.machine_colour(uid), b.mute);
         painter.rect_filled(r, 3.0, fill);
         let period = lens(uid, b.pattern.0).max(1);
         if b.len.is_some() {
@@ -637,6 +643,17 @@ mod tests {
 
     const NONE: egui::Modifiers = egui::Modifiers::NONE;
     const W: f32 = 800.0;
+
+    #[test]
+    fn blocks_take_the_machine_colour_unless_muted() {
+        let c = theme::MACHINE_COLOURS[3];
+        assert_eq!(block_colours(c, false), (c.gamma_multiply(0.18), c));
+        assert_eq!(
+            block_colours(c, true),
+            (theme::GRID_DARK, theme::KNOB_TRACK),
+            "muted blocks stay grey"
+        );
+    }
 
     #[test]
     fn a_ruler_range_stops_at_the_song_limit() {

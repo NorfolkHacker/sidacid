@@ -764,18 +764,10 @@ impl SidAcidApp {
         // Notes. A drum or pad note whose pitch is not a row has none.
         let drawn = |n: &acid_engine::project::Note| n.start < ticks && n.pitch <= kind.top_pitch();
         let mut sel = self.selection(uid);
+        let colour = self.machine_colour(uid);
         for (i, note) in pattern.notes.iter().enumerate().filter(|(_, n)| drawn(n)) {
             let r = geom.note_rect(note).shrink(0.5);
-            // Pad hits shade by velocity, as it picks the layer.
-            let fill = if kind == LaneKind::Drums {
-                if note.accent {
-                    theme::ACCENT
-                } else {
-                    theme::ACID
-                }
-            } else {
-                theme::ACID.gamma_multiply(0.35 + 0.65 * note.vel as f32 / 127.0)
-            };
+            let fill = note_fill(colour, kind, note.accent, note.vel);
             grid.rect_filled(r, 2.0, fill);
             if (acid || kind == LaneKind::Pads) && note.accent {
                 grid.line_segment(
@@ -1255,6 +1247,7 @@ impl SidAcidApp {
         );
         let painter = ui.painter_at(lane);
         let hi = bar.range().1 as f32;
+        let colour = self.machine_colour(uid);
         for note in pattern.notes.iter().filter(|n| n.start < geom.ticks) {
             let x = geom.x_of(note.start);
             // At least a stub, so a note at chance 0 still shows.
@@ -1265,7 +1258,7 @@ impl SidAcidApp {
                     pos2(x + (geom.tick_w - 1.0).max(1.0), lane.bottom()),
                 ),
                 0.0,
-                theme::ACID,
+                colour,
             );
         }
         if lresp.drag_started() {
@@ -1422,6 +1415,17 @@ impl SidAcidApp {
     }
 }
 
+/// A note's fill in a lane of `kind` for the machine coloured `colour`:
+/// drum hits flat (accented ones red), other notes and pad hits shaded by
+/// velocity, as it picks the layer.
+fn note_fill(colour: Color32, kind: LaneKind, accent: bool, vel: u8) -> Color32 {
+    match kind {
+        LaneKind::Drums if accent => theme::ACCENT,
+        LaneKind::Drums => colour,
+        _ => colour.gamma_multiply(0.35 + 0.65 * vel as f32 / 127.0),
+    }
+}
+
 /// Allocates one expression-strip row `width` wide and `h` tall under
 /// the grid, with its label in the key strip. Returns the row's grid part
 /// (right of the key strip) and its response. A press on the row is
@@ -1558,6 +1562,30 @@ mod tests {
     use crate::document::Document;
     use crate::test_rack::*;
     use acid_engine::project::Project;
+
+    #[test]
+    fn notes_fill_in_the_machine_colour() {
+        let c = theme::MACHINE_COLOURS[2];
+        let shade = |vel: f32| c.gamma_multiply(0.35 + 0.65 * vel / 127.0);
+        assert_eq!(note_fill(c, LaneKind::Poly, false, 127), shade(127.0));
+        assert_eq!(note_fill(c, LaneKind::Poly, false, 0), shade(0.0));
+        assert_eq!(
+            note_fill(c, LaneKind::Acid, true, 64),
+            shade(64.0),
+            "accent marks it apart"
+        );
+        assert_eq!(
+            note_fill(c, LaneKind::Pads, false, 64),
+            shade(64.0),
+            "pads shade too"
+        );
+        assert_eq!(
+            note_fill(c, LaneKind::Drums, false, 10),
+            c,
+            "drum hits do not shade"
+        );
+        assert_eq!(note_fill(c, LaneKind::Drums, true, 10), theme::ACCENT);
+    }
 
     /// Runs one frame of KIT808's lane in a 1000x800 screen at `time`;
     /// returns where the lane's top-left corner was drawn.
@@ -3158,7 +3186,7 @@ mod tests {
         let strip_bottom = origin.y + HEADER_H + height + VEL_H;
         let bar = out.shapes.iter().any(|c| {
             matches!(&c.shape, Shape::Rect(r)
-                if r.fill == theme::ACID && (r.rect.bottom() - strip_bottom).abs() < 0.5
+                if r.fill == app.machine_colour(FM) && (r.rect.bottom() - strip_bottom).abs() < 0.5
                     && r.rect.height() >= 1.0)
         });
         assert!(bar, "a stub for chance 0");

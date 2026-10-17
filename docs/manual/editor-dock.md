@@ -73,7 +73,7 @@ The acid synths, the FM synth, the Mono synth and the sampler have melodic lanes
 - **FM, Mono and sampler lanes** let notes overlap freely, so you can stack chords. (The Mono synth itself plays one note at a time; see [Mono synth](mono-synth.md).) Clicking and holding the key strip of one of these lanes plays that pitch so you can hear it.
 - **Acid synth lanes** keep one note at a time. A note you add or move cuts the note sounding into its start and removes notes that start inside it. Accented notes have a coloured line along their top, and a note with slide on is joined to the next note by a line, drawn as a tie, when that next note starts exactly where it ends. Acid lanes have no velocity; they use accent and slide instead (see [Acid synth](acid-synth.md)).
 
-Note colour gets brighter with velocity.
+Notes are drawn in their machine's colour (see [Machines](rack-and-patterns.md#machines)), and get brighter with velocity.
 
 On FM, Mono, sampler and drum lanes, notes of the same pitch (or drum) that overlap after an edit merge into one note covering both.
 

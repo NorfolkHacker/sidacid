@@ -5,7 +5,7 @@
 //! whole rack has been drawn (`rack_action_after_draw`): the rack must not
 //! change while its panels are being drawn from it.
 
-use super::{SidAcidApp, theme};
+use super::SidAcidApp;
 use acid_engine::machine::{MachineType, MachineUid};
 use eframe::egui::{self, collapsing_header::CollapsingState};
 
@@ -36,6 +36,18 @@ pub enum RackAction {
 /// panels keep the open state they had before the rack controls.
 fn header_id(ui: &egui::Ui, salt: &'static str, uid: MachineUid) -> egui::Id {
     ui.make_persistent_id(egui::Id::new((salt, uid)))
+}
+
+/// The frame around a machine's panel, in its colour: full strength on
+/// the focused machine, dimmed on the rest. One width for both, so the
+/// panel does not shift when the focus moves.
+fn panel_stroke(colour: egui::Color32, focused: bool) -> egui::Stroke {
+    let colour = if focused {
+        colour
+    } else {
+        colour.gamma_multiply(0.35)
+    };
+    egui::Stroke::new(1.5, colour)
 }
 
 impl SidAcidApp {
@@ -123,8 +135,9 @@ impl SidAcidApp {
     }
 
     /// A machine's panel: a collapsing header showing `title`, the rack
-    /// buttons and double-click rename, over `body`. The open state is
-    /// kept under the id the panel's `CollapsingHeader` used (`header_id`).
+    /// buttons and double-click rename, over `body`, framed in the
+    /// machine's colour. The open state is kept under the id the panel's
+    /// `CollapsingHeader` used (`header_id`).
     pub(crate) fn machine_panel(
         &mut self,
         ui: &mut egui::Ui,
@@ -133,15 +146,22 @@ impl SidAcidApp {
         title: String,
         body: impl FnOnce(&mut SidAcidApp, &mut egui::Ui),
     ) {
-        ui.vertical(|ui| {
-            let id = header_id(ui, salt, uid);
-            let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
-            if let Some(open) = self.view.forced_open(salt) {
-                state.set_open(open);
-            }
-            state
-                .show_header(ui, |ui| self.panel_header(ui, uid, &title))
-                .body(|ui| body(self, ui));
+        let stroke = panel_stroke(self.machine_colour(uid), self.focused() == Some(uid));
+        let frame = egui::Frame::new()
+            .stroke(stroke)
+            .corner_radius(3.0)
+            .inner_margin(egui::Margin::same(4));
+        frame.show(ui, |ui| {
+            ui.vertical(|ui| {
+                let id = header_id(ui, salt, uid);
+                let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
+                if let Some(open) = self.view.forced_open(salt) {
+                    state.set_open(open);
+                }
+                state
+                    .show_header(ui, |ui| self.panel_header(ui, uid, &title))
+                    .body(|ui| body(self, ui));
+            });
         });
     }
 
@@ -153,12 +173,11 @@ impl SidAcidApp {
             self.rename_box(ui, uid, title);
         } else {
             // Only the arrow toggles the panel: a double-click here renames
-            // and must leave the panel as it was. The focused machine's
-            // title is lit, like its lane's outline in the dock.
-            let mut text = egui::RichText::new(title).strong();
-            if self.focused() == Some(uid) {
-                text = text.color(theme::ACID);
-            }
+            // and must leave the panel as it was. The title is in the
+            // machine's colour; the frame shows the focus.
+            let text = egui::RichText::new(title)
+                .strong()
+                .color(self.machine_colour(uid));
             let r = ui
                 .add(
                     egui::Label::new(text)
@@ -266,13 +285,22 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_rack::*;
-    use crate::ui::run_frames;
+    use crate::ui::{run_frames, theme};
     use acid_engine::machine::{MachineType, MachineUid};
     use acid_engine::project::Project;
     use eframe::egui;
 
     fn demo() -> SidAcidApp {
         SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()))
+    }
+
+    #[test]
+    fn the_focused_panel_frame_is_brighter_and_as_wide() {
+        let c = theme::MACHINE_COLOURS[2];
+        let (on, off) = (panel_stroke(c, true), panel_stroke(c, false));
+        assert_eq!(on.color, c);
+        assert_eq!(off.color, c.gamma_multiply(0.35));
+        assert_eq!(on.width, off.width, "the panel does not shift on focus");
     }
 
     #[test]

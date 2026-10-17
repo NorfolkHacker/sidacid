@@ -131,7 +131,8 @@ Lo-Fi comes after the Master level, so turning Master down also lowers the resol
 Each strip has a meter next to its name, and the master section has one next to "Master".
 
 - A meter shows the peak level since its last reading, on a scale from −48 dB (empty) to 0 dB (full).
-- It turns from green to red when the peak reaches full scale (0 dB, within about 0.1 dB).
+- A channel's meter, and its name, are drawn in its machine's colour (see [Machines](rack-and-patterns.md#machines)). The master meter is lime green.
+- A meter turns red when the peak reaches full scale (0 dB, within about 0.1 dB).
 - A channel meter reads after Level and Pan. A muted channel, or one silenced by another channel's Solo, reads empty.
 - The master meter reads the final output, after Lo-Fi and the clip.
 

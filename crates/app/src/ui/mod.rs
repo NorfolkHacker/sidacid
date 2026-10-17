@@ -803,6 +803,15 @@ impl SidAcidApp {
             .collect()
     }
 
+    /// `uid`'s colour, by its rack position (`theme::machine_colour`);
+    /// ACID when it is not in the rack.
+    pub(crate) fn machine_colour(&self, uid: MachineUid) -> egui::Color32 {
+        self.doc
+            .project
+            .position(uid)
+            .map_or(theme::ACID, theme::machine_colour)
+    }
+
     /// The machine keyboard shortcuts act on: the focused one while it is
     /// in the rack, else the first machine.
     pub(crate) fn focused(&self) -> Option<MachineUid> {
@@ -1008,6 +1017,30 @@ pub(crate) mod tests {
     use super::*;
     use crate::document::Edit;
     use acid_engine::project::Project;
+
+    #[test]
+    fn a_machine_takes_the_colour_of_its_rack_position() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert_eq!(app.machine_colour(SYNTH1), theme::MACHINE_COLOURS[0]);
+        assert_eq!(app.machine_colour(KIT808), theme::MACHINE_COLOURS[2]);
+        assert_eq!(
+            app.machine_colour(SAMPLER),
+            theme::MACHINE_COLOURS[0],
+            "the sixth"
+        );
+        app.move_machine(SAMPLER, 1);
+        assert_eq!(
+            app.machine_colour(SAMPLER),
+            theme::MACHINE_COLOURS[1],
+            "moving recolours"
+        );
+        assert_eq!(app.machine_colour(SYNTH2), theme::MACHINE_COLOURS[2]);
+        assert_eq!(
+            app.machine_colour(MachineUid(99)),
+            theme::ACID,
+            "not in the rack"
+        );
+    }
 
     #[test]
     fn dice_and_drum_buttons_are_single_undo_steps() {

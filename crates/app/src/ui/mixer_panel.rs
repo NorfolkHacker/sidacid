@@ -2,7 +2,7 @@
 
 use super::{SidAcidApp, theme};
 use acid_engine::params::{ChannelParam, FxParam, MasterParam, ParamId};
-use eframe::egui::{self, Sense, vec2};
+use eframe::egui::{self, Color32, Sense, vec2};
 
 const METER_FLOOR_DB: f32 = -48.0;
 
@@ -57,22 +57,20 @@ pub fn meter_fraction(peak: f32) -> f32 {
     ((20.0 * peak.log10() - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
 }
 
-fn meter(ui: &mut egui::Ui, peak: f32) {
+/// A meter's lit colour: `colour`, red when it clips.
+fn meter_colour(peak: f32, colour: Color32) -> Color32 {
+    if peak >= 0.99 { theme::ACCENT } else { colour }
+}
+
+/// A level meter lit in `colour`.
+fn meter(ui: &mut egui::Ui, peak: f32, colour: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(10.0, 80.0), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 1.0, theme::GRID_DARK);
     let f = meter_fraction(peak);
     let mut lit = rect;
     lit.set_top(rect.bottom() - rect.height() * f);
-    painter.rect_filled(
-        lit,
-        1.0,
-        if peak >= 0.99 {
-            theme::ACCENT
-        } else {
-            theme::ACID
-        },
-    );
+    painter.rect_filled(lit, 1.0, meter_colour(peak, colour));
 }
 
 impl SidAcidApp {
@@ -96,9 +94,10 @@ impl SidAcidApp {
                                 .collect();
                             for (pos, (uid, name)) in strips.into_iter().enumerate() {
                                 ui.vertical(|ui| {
+                                    let colour = theme::machine_colour(pos);
                                     ui.horizontal(|ui| {
-                                        ui.strong(name);
-                                        meter(ui, self.shown.meter(pos));
+                                        ui.label(egui::RichText::new(name).strong().color(colour));
+                                        meter(ui, self.shown.meter(pos), colour);
                                     });
                                     egui::Grid::new(("strip", uid)).spacing([0.0, 0.0]).show(
                                         ui,
@@ -140,7 +139,7 @@ impl SidAcidApp {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.strong("Master");
-                                    meter(ui, self.status.master_meter);
+                                    meter(ui, self.status.master_meter, theme::ACID);
                                 });
                                 egui::Grid::new("master")
                                     .spacing([0.0, 0.0])
@@ -165,6 +164,14 @@ impl SidAcidApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meters_light_in_their_colour_and_clip_red() {
+        let c = theme::MACHINE_COLOURS[1];
+        assert_eq!(meter_colour(0.5, c), c);
+        assert_eq!(meter_colour(0.99, c), theme::ACCENT);
+        assert_eq!(meter_colour(0.5, theme::ACID), theme::ACID, "the master's");
+    }
 
     #[test]
     fn meter_uses_a_48_db_scale() {
