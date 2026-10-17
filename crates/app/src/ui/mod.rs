@@ -827,8 +827,6 @@ impl eframe::App for SidAcidApp {
     }
 }
 
-/// Sends commands from the front of `pending` until `send` refuses one;
-/// that one and everything after it stay queued, in order.
 /// An event's status (its `positions` taken out) and status buffer
 /// (filled, or disposed). Other dispose events drop here, on the UI
 /// thread.
@@ -843,6 +841,8 @@ fn split_buffer(event: Event) -> (Option<Status>, Option<Box<PositionStatus>>) {
     }
 }
 
+/// Sends commands from the front of `pending` until `send` refuses one;
+/// that one and everything after it stay queued, in order.
 fn send_in_order(
     pending: &mut Vec<Command>,
     send: &mut impl FnMut(Command) -> Result<(), Command>,
@@ -2488,9 +2488,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_load_over_the_old_limit_fits_the_pool() {
+    fn a_load_past_the_old_pool_and_limit_is_accepted() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
-        // 80 MB of silence already loaded: over the old 64 MB, well inside 256 MB.
+        // 80 MB of silence already loaded: over the old 64 MB limit.
         sampler_with_frames(&mut app, 80 * 1024 * 1024 / 4);
         app.load_sample_bytes(SAMPLER, 15, "Fits", Some("wav"), &test_wav(0.5));
         assert!(app.view.message.is_none(), "{:?}", app.view.message);
@@ -2610,7 +2610,7 @@ pub(crate) mod tests {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.pending.clear();
         let before = app.engine_rack.clone();
-        app.add_machine(MachineType::Fm); // Task 5 adds the UI; this task adds the method (doc op + sync_rack)
+        app.add_machine(MachineType::Fm);
         let swaps: Vec<_> = app
             .pending
             .iter()
@@ -2723,9 +2723,30 @@ pub(crate) mod tests {
     fn the_app_tracks_the_engines_rack_capacity() {
         let mut app = SidAcidApp::headless(Document::new(Project::default()));
         assert_eq!(app.engine_capacity, 16);
-        // With the cap still in place, check the value follows a swap's capacity.
+        // A swap that does not grow the rack keeps the capacity.
         app.move_machine(SYNTH1, 3);
         assert_eq!(app.engine_capacity, 16);
+    }
+
+    #[test]
+    fn loading_a_project_of_forty_machines_sizes_the_engine_and_buffers_for_it() {
+        let mut p = Project::default();
+        while p.machines.len() < 40 {
+            let m = p.new_machine(MachineType::Fm).unwrap();
+            p.insert_machine(p.machines.len(), m).unwrap();
+        }
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        app.load_document(Document::new(p));
+        assert_eq!(app.engine_capacity, 48);
+        assert_eq!(app.pool.capacity(), 48);
+        // A small edit fits the engine's capacity: no growth.
+        let mut q = app.doc.project.clone();
+        let m = q.new_machine(MachineType::Fm).unwrap();
+        q.insert_machine(q.machines.len(), m).unwrap();
+        let swap =
+            acid_engine::rack::RackSwap::build(&q, &app.engine_rack, 48_000.0, app.engine_capacity);
+        assert_eq!(swap.capacity, 48);
+        assert!(swap.growth.is_none());
     }
 
     #[test]

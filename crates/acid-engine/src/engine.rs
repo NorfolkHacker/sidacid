@@ -983,6 +983,7 @@ mod tests {
             before.playhead[..16],
             "tracks kept their place"
         );
+        assert_eq!(after.patterns[..16], before.patterns[..16], "patterns kept");
         assert_eq!(after.len(), 17);
         let g = swap.growth.as_ref().unwrap();
         assert_eq!(

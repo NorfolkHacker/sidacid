@@ -91,7 +91,8 @@ impl BufferPool {
     /// A buffer came back (filled or disposed): reuse it if it fits, else drop.
     pub fn returned(&mut self, mut b: Box<PositionStatus>) -> Option<Box<PositionStatus>> {
         self.out = self.out.saturating_sub(1);
-        if !b.fits(self.capacity) || self.out >= STATUS_BUFFERS {
+        debug_assert!(self.out < STATUS_BUFFERS);
+        if !b.fits(self.capacity) {
             return None;
         }
         b.clear();
@@ -103,6 +104,12 @@ impl BufferPool {
     /// smaller ones that come back are dropped (and replaced).
     pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
+    }
+
+    /// Rack positions each new buffer has room for.
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// A new host holds none of ours.
