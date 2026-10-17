@@ -43,7 +43,7 @@ To load a file by dragging:
 1. Click a pad to select the slot.
 2. Drag the audio file from your file manager and drop it anywhere on the SidAcid window.
 
-A dropped file goes into the selected slot of the focused Sampler. If the focused machine is not a Sampler, it goes into the first Sampler in the rack.
+A dropped file goes into the selected slot of the focused Sampler. If the focused machine is not a Sampler or a [Pad Kit](pad-kit.md), it goes into the first Sampler in the rack. Dropped onto a Pad Kit's pad grid, it goes to the pad instead.
 
 Loading into a slot that already holds a sample replaces it. **Clear** empties the slot. Both can be undone (see [Files and export](files-and-export.md)).
 
@@ -192,4 +192,4 @@ Rows that belong to a slot's zone are tinted (four colours, cycling by slot numb
 
 Rows outside every zone are not labelled and play nothing.
 
-See also: [Editor dock](editor-dock.md) · [The rack and patterns](rack-and-patterns.md) · [Mixer and effects](mixer-and-effects.md) · [Files and export](files-and-export.md) · [Song mode](song-mode.md)
+See also: [Pad Kit](pad-kit.md) · [Editor dock](editor-dock.md) · [The rack and patterns](rack-and-patterns.md) · [Mixer and effects](mixer-and-effects.md) · [Files and export](files-and-export.md) · [Song mode](song-mode.md)

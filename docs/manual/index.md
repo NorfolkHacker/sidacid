@@ -1,6 +1,6 @@
 # SidAcid manual
 
-SidAcid is an acid groovebox. Its sound engine is modelled on a classic 8-bit home-computer sound chip, and around it sit drum machines, an FM synth, a virtual-analog mono synth and a sampler. It runs as a desktop app, laid out for a 1280×800 handheld screen. This manual covers every machine, the editor, Song mode, the mixer and the files SidAcid reads and writes.
+SidAcid is an acid groovebox. Its sound engine is modelled on a classic 8-bit home-computer sound chip, and around it sit drum machines, an FM synth, a virtual-analog mono synth, a sampler and a pad-based sample drum machine. It runs as a desktop app, laid out for a 1280×800 handheld screen. This manual covers every machine, the editor, Song mode, the mixer and the files SidAcid reads and writes.
 
 ![SidAcid](../images/screenshot.png)
 
@@ -18,6 +18,7 @@ SidAcid is an acid groovebox. Its sound engine is modelled on a classic 8-bit ho
 - [FM synth](fm-synth.md): six operators, 32 algorithms, envelopes, LFO, effects, voices and `.syx` import.
 - [Mono synth](mono-synth.md): the virtual-analog mono voice, its arpeggiator and patches.
 - [Sampler](sampler.md): 16 slots, Slice and Chromatic modes, loading audio.
+- [Pad Kit](pad-kit.md): 16 pads with velocity layers, mute groups, One-shot and Gate, kit files.
 
 ### Making music
 

@@ -85,6 +85,10 @@ On a sampler lane, rows that play a loaded slot are tinted in that slot's colour
 
 Kit A and Kit B have drum lanes with eight rows, labelled BD, SD, LT, HT, CP, RS, CH and OH, with the bass drum at the bottom. A hit can sit at any snap position. Drum hits keep their length: you can't resize them by dragging. A hit's colour shows whether it is accented. Drum lanes ignore the project key. See [Drum kits](drum-kits.md).
 
+### Pad lanes
+
+A Pad Kit has a pad lane with 16 rows, one per pad, labelled with the pads' names and with pad 1 at the bottom. It works like a drum lane, except that its notes can be resized (which matters for Gate pads) and have a velocity: the **Vel** strip shows it, and notes are shaded by velocity. Double-click a note to turn its accent on or off; an accented note has a coloured line along its top. The Invert tool isn't available, and the lane ignores the project key. See [Pad Kit](pad-kit.md#the-pad-lane).
+
 ## Editing notes with the mouse
 
 | To | Do this |
@@ -95,9 +99,9 @@ Kit A and Kit B have drum lanes with eight rows, labelled BD, SD, LT, HT, CP, RS
 | Box-select | Drag on empty space. Every note the box touches is selected. Hold Shift to add to the selection. |
 | Move the selection | Drag a selected note (or drag an unselected note to select and move it). Hold Alt to move by single ticks. |
 | Copy the selection | Ctrl-drag a note: copies move and the originals stay. |
-| Resize the selection | Drag a note's right edge. Not on drum lanes. |
+| Resize the selection | Drag a note's right edge. Not on drum lanes (pad lanes can). |
 | Delete | Right-click a note. If it is selected, the whole selection goes; otherwise just that note. |
-| Toggle a drum hit's accent | Double-click the hit. |
+| Toggle a drum hit's or pad note's accent | Double-click the hit. |
 
 A press anywhere in a lane also focuses that machine, gives the dock the keyboard and puts the keyboard cursor where you clicked.
 
@@ -207,7 +211,7 @@ Turn on **Strip** in a lane's header to show an expression strip under the grid.
 
 | View | Lanes | What it shows and does |
 |---|---|---|
-| Vel | FM, Mono, sampler | One bar per note, its height the velocity (1 to 127). Click or drag to set the velocity of the notes starting in the snap cell under the pointer. |
+| Vel | FM, Mono, sampler, Pad Kit | One bar per note, its height the velocity (1 to 127). Click or drag to set the velocity of the notes starting in the snap cell under the pointer. |
 | Acc/Slide | Acid synths | Two rows, Acc and Slide. A mark shows where a note has accent (at its start) or slide (at its end). Click a row to turn accent or slide on or off for the note sounding there. |
 | Acc | Drum kits | A mark on each snap cell holding an accented hit. Click a cell to accent every hit starting in it, or, when they all are accented already, to clear them. |
 | Chance | Every lane | One bar per note, its height the chance (0 to 100%). Click or drag to set it for the notes starting in the snap cell under the pointer. |
@@ -388,4 +392,4 @@ Spreads a number of hits as evenly as they go over a number of grid cells, for e
 | Rotation | Shifts the cycle later by this many cells. | 0 to Steps − 1 (default 0) |
 | Pitch (melodic lanes) or Row (drum lanes) | Where the hits go. It starts on the keyboard cursor's pitch or row. | any pitch / BD to OH |
 
-See also: [Song mode](song-mode.md), [The rack and patterns](rack-and-patterns.md), [Acid synth](acid-synth.md), [Drum kits](drum-kits.md), [Sampler](sampler.md), [Keyboard reference](keyboard-reference.md).
+See also: [Song mode](song-mode.md), [The rack and patterns](rack-and-patterns.md), [Acid synth](acid-synth.md), [Drum kits](drum-kits.md), [Sampler](sampler.md), [Pad Kit](pad-kit.md), [Keyboard reference](keyboard-reference.md).

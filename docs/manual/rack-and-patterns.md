@@ -16,6 +16,7 @@ These are the machine types, as the **+ Add machine** menu names them:
 | FM | A 6-operator FM synth that can play chords. | FM, FM 2, … | [FM synth](fm-synth.md) |
 | Sampler | A 16-slot sampler for sliced breaks and pitched samples. | Sampler, Sampler 2, … | [Sampler](sampler.md) |
 | Mono | A virtual-analog mono synth with an arpeggiator. | Mono, Mono 2, … | [Mono synth](mono-synth.md) |
+| Pad Kit | A sample drum machine: 16 pads, each with up to four velocity layers. | Pads, Pads 2, … | [Pad Kit](pad-kit.md) |
 
 A new project (**File → New**) starts with six machines: Synth 1, Synth 2, Kit A, Kit B, FM and Sampler.
 
@@ -120,7 +121,7 @@ A pattern only pastes onto a matching kind of machine:
 |---|---|
 | Acid synth | Any acid synth, including Trans |
 | Kit A or Kit B | Any drum kit, either kind |
-| FM, Mono or Sampler | Any FM, Mono or Sampler |
+| FM, Mono, Sampler or Pad Kit | Any FM, Mono, Sampler or Pad Kit. Onto a Pad Kit, notes above pitch 15 (pad 16) are left out. |
 
 Pasting onto another kind shows "The clipboard holds a different kind of pattern." The copied pattern stays available after **File → New** or **File → Open**, so you can paste it into another project.
 

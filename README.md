@@ -44,6 +44,10 @@ An acid groovebox built on a sound engine modelled on a classic 8-bit home-compu
   - **Chromatic mode** for voices and stabs: root key, start/end, and a crossfaded loop.
   - Per slot: level, pan, tune, filter, ADSR and reverse. Grit adds vintage-sampler-style 12-bit, 26 kHz crunch.
   - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
+- **Pad Kit**, a sample drum machine:
+  - 16 pads, each with up to four velocity layers that play by hit velocity. Per pad: tune, decay, level, pan, filter, start/end trim, reverse, One-shot or Gate play, and one of four mute groups. The kit has volume and accent.
+  - Drop several audio files on the pad grid to fill consecutive pads. Save and load a whole kit as a `.padkit` file.
+  - Its pattern lane has one row per pad, with resizable notes, velocity and accent.
 - **Editor dock:**
   - Every part's pattern sits in a resizable dock at the bottom, as stacked lanes on one shared time ruler. Snap runs from 1/4 to 1/64, with zoom and follow-playhead; a thumb strip along the bottom of the ruler is the horizontal scrollbar.
   - Melodic lanes have a key strip and their own pitch scroll: chords on the FM synth, Mono and sampler, one note at a time on the acid synths with slides drawn as ties. Sampler rows are labelled with their slot and slice.

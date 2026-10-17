@@ -118,4 +118,4 @@ You place, move and delete drum hits in the kit's lane in the [editor dock](edit
 
 ## See also
 
-[Editor dock](editor-dock.md) · [Rack and patterns](rack-and-patterns.md) · [Acid synth](acid-synth.md) · [Mixer and effects](mixer-and-effects.md) · [Song mode](song-mode.md)
+[Pad Kit](pad-kit.md) · [Editor dock](editor-dock.md) · [Rack and patterns](rack-and-patterns.md) · [Acid synth](acid-synth.md) · [Mixer and effects](mixer-and-effects.md) · [Song mode](song-mode.md)
