@@ -36,7 +36,7 @@ use acid_engine::host::Command;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{
-    BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, TICKS_PER_STEP,
+    BASE_MIDI, LaneView, MAX_NOTES, MachineBody, NotePattern, PatternRef, STEPS, TICKS_PER_STEP,
 };
 use acid_engine::scale::Scale;
 use acid_engine::sequencer::Mode;
@@ -1114,18 +1114,14 @@ impl SidAcidApp {
         {
             let (tick, pitch) = (geom.tick_at_clamped(p.x), geom.pitch_at_clamped(p.y));
             // Alt: single ticks; else whole snap cells.
-            let (step, unit) = if mods.alt {
-                (tick, 1)
-            } else {
-                (snap.floor(tick), snap.ticks())
-            };
             let floor = |t: u16| if mods.alt { t } else { snap.floor(t) };
+            let unit = if mods.alt { 1 } else { snap.ticks() };
             let moved = match &self.view.panel(uid).drag {
                 Some(LaneDrag::Move {
                     origin, idx, grab, ..
                 }) => {
                     let mut p = (**origin).clone();
-                    let dt = step as i32 - floor(grab.0) as i32;
+                    let dt = floor(tick) as i32 - floor(grab.0) as i32;
                     // With snap to scale the grabbed note follows the
                     // pointer's snapped pitch; the rest then snap too.
                     let to = scale.map_or(pitch, |k| k.snap(pitch));
@@ -1139,8 +1135,14 @@ impl SidAcidApp {
                 Some(LaneDrag::Resize {
                     origin, idx, grab, ..
                 }) => {
+                    // A resize may reach past the pattern's end: the
+                    // pattern grows (up to its longest) to hold the notes,
+                    // and dragging back gives the length back.
+                    let far = geom.tick_at_upto(p.x, STEPS as u16 * TICKS_PER_STEP);
+                    let end = floor(far) + unit;
                     let mut p = (**origin).clone();
-                    note_ops::resize(&mut p, idx, (step + unit) as i32 - *grab as i32);
+                    note_ops::resize(&mut p, idx, end as i32 - *grab as i32);
+                    note_ops::grow_to_fit(&mut p, idx);
                     Some((p, idx.clone()))
                 }
                 _ => None,
@@ -1960,6 +1962,26 @@ mod tests {
         assert_eq!(app.selection(SYNTH1), [1]);
         app.doc.undo();
         assert_eq!(notes_of(&app, SYNTH1), [(0, 8, 36), (16, 4, 40)]);
+    }
+
+    #[test]
+    fn resizing_past_the_pattern_end_lengthens_the_pattern() {
+        let mut app = app_with(FM, &[(56, 8, 60)]);
+        let mut m = Mouse::new(&mut app, FM, 64);
+        let len = |app: &SidAcidApp| app.doc.project.roll(FM, 0).unwrap().length;
+        // From the note's right edge, at the pattern's end, five steps on.
+        let (edge, to) = (m.at(&mut app, 63.7, 60), m.at(&mut app, 81.5, 60));
+        m.drag(&mut app, edge, to, NONE);
+        assert_eq!(notes_of(&app, FM), [(56, 28, 60)]);
+        assert_eq!(len(&app), 21, "the pattern grows to hold the note");
+        app.doc.undo();
+        assert_eq!(notes_of(&app, FM), [(56, 8, 60)]);
+        assert_eq!(len(&app), 16, "one undo step puts the length back");
+        // Out past the end and back within one drag: the length is kept.
+        let (edge, back) = (m.at(&mut app, 63.7, 60), m.at(&mut app, 59.5, 60));
+        m.drag(&mut app, edge, back, NONE);
+        assert_eq!(notes_of(&app, FM), [(56, 4, 60)]);
+        assert_eq!(len(&app), 16, "a shorter note never shrinks the pattern");
     }
 
     #[test]

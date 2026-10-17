@@ -171,6 +171,13 @@ impl LaneGeom {
         (t.max(0.0) as u32).min(self.ticks.saturating_sub(1) as u32) as u16
     }
 
+    /// Like `tick_at_clamped`, but held to `0..limit` instead of the
+    /// pattern, so the area past the pattern's end counts.
+    pub fn tick_at_upto(&self, x: f32, limit: u16) -> u16 {
+        let t = ((x.max(self.left) - self.left + self.scroll_x) / self.tick_w).floor();
+        (t.max(0.0) as u32).min(limit.saturating_sub(1) as u32) as u16
+    }
+
     pub fn row_top(&self, row: usize) -> f32 {
         self.top + row as f32 * self.row_h - self.scroll_y
     }

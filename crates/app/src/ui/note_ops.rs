@@ -144,6 +144,23 @@ pub fn resize(p: &mut NotePattern, idx: &[usize], dlen: i32) {
     }
 }
 
+/// Lengthens the pattern so the notes at `idx` end inside it, up to the
+/// longest pattern (`STEPS` steps); a note running past that is cut there.
+/// The pattern never shrinks.
+pub fn grow_to_fit(p: &mut NotePattern, idx: &[usize]) {
+    let max = STEPS as u16 * TICKS_PER_STEP;
+    let mut end = 0;
+    for &i in idx {
+        if let Some(n) = p.notes.get_mut(i)
+            && n.start < max
+        {
+            n.len = n.len.min(max - n.start);
+            end = end.max(n.start + n.len);
+        }
+    }
+    p.length = p.length.max(end.div_ceil(TICKS_PER_STEP) as u8);
+}
+
 /// Removes the notes at `idx`.
 pub fn delete(p: &mut NotePattern, idx: &[usize]) {
     let mut i = 0;
@@ -595,6 +612,19 @@ mod tests {
         let mut d = pat(&[(0, 4, 6)]);
         shift(&mut d, &[0], 0, 3, LaneKind::Drums);
         assert_eq!(d.notes[0].pitch, 7, "drum rows stop at the open hat");
+    }
+
+    #[test]
+    fn growing_to_fit_lengthens_but_never_shrinks_and_caps_at_the_longest() {
+        let mut p = pat(&[(56, 20, 60), (0, 4, 62)]);
+        grow_to_fit(&mut p, &[0]);
+        assert_eq!(p.length, 19, "ends at tick 76: 19 steps");
+        let mut short = pat(&[(0, 4, 60)]);
+        grow_to_fit(&mut short, &[0]);
+        assert_eq!(short.length, 16, "never shrinks");
+        let mut long = pat(&[(250, 40, 60)]);
+        grow_to_fit(&mut long, &[0]);
+        assert_eq!((long.length, spans(&long)), (64, vec![(250, 6, 60)]));
     }
 
     #[test]
