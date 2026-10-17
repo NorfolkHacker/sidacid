@@ -22,6 +22,7 @@ mod mono_patches;
 mod note_ops;
 mod note_panel;
 mod note_tools;
+mod padkit_file;
 mod padkit_load;
 mod padkit_panel;
 mod padkit_wave;

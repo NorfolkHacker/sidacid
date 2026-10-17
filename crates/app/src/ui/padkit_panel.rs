@@ -52,10 +52,15 @@ impl SidAcidApp {
             PatternRef(slot).label()
         );
         self.machine_panel(ui, uid, "padkit", title, |app, ui| {
-            // Task 9 adds Save kit… and Load kit… to this row.
             ui.horizontal_wrapped(|ui| {
                 app.param_knob(ui, uid.param(PadKitParam::Volume), "Volume");
                 app.param_knob(ui, uid.param(PadKitParam::Accent), "Accent");
+                if ui.button("Save kit…").clicked() {
+                    app.save_kit_dialog(uid);
+                }
+                if ui.button("Load kit…").clicked() {
+                    app.load_kit_dialog(uid);
+                }
             });
             let rects = app.padkit_grid(ui, uid);
             // Drops are resolved after the rack draws (`route_drop`).

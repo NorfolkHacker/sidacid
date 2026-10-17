@@ -114,7 +114,6 @@ pub enum Edit {
         values: Vec<(ParamId, f32)>,
     },
     /// Replacing all the pads at once (loading a kit), with knob values.
-    #[allow(dead_code)] // the kit loader uses it in a later task
     PadKitKit {
         uid: MachineUid,
         // Boxed to keep `Edit` small.

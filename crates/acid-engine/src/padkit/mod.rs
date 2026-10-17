@@ -1,5 +1,6 @@
 //! The Pad Kit: 16 pads, each up to four velocity layers of sample.
 
+pub mod file;
 mod machine;
 pub mod pad;
 pub mod play;

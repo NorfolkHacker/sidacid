@@ -36,6 +36,11 @@ pub(crate) enum MemAction {
         skipped: Vec<String>,
         total: usize,
     },
+    /// A parsed kit file for Pad Kit `uid`.
+    LoadKit {
+        uid: MachineUid,
+        kit: Box<acid_engine::padkit::file::PadKitFile>,
+    },
     /// A parsed project that passed `check_fits`, with where it came from.
     Open {
         project: Box<Project>,
@@ -139,6 +144,10 @@ impl SidAcidApp {
                 total,
             } => {
                 self.load_pads_now(uid, first, files, skipped, total);
+                None
+            }
+            MemAction::LoadKit { uid, kit } => {
+                self.load_kit_now(uid, *kit);
                 None
             }
             MemAction::Open { project, path } => {
