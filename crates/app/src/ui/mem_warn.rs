@@ -120,26 +120,26 @@ impl SidAcidApp {
         let first = !std::mem::replace(&mut warn.shown, true);
         let text = warning_text(warn.free_after);
         let mut answer = None;
-        egui::Window::new("Low memory")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(text);
-                ui.horizontal(|ui| {
-                    if ui.button("Go ahead").clicked() {
-                        answer = Some(true);
-                    }
-                    let cancel = ui.button("Cancel");
-                    if first {
-                        cancel.request_focus();
-                    }
-                    if cancel.clicked() {
-                        answer = Some(false);
-                    }
-                });
+        // A modal: the rest of the UI gets no input while the warning is
+        // up, so the document cannot change under the held action.
+        let modal = egui::Modal::new(egui::Id::new("low_memory")).show(ctx, |ui| {
+            ui.heading("Low memory");
+            ui.label(text);
+            ui.horizontal(|ui| {
+                if ui.button("Go ahead").clicked() {
+                    answer = Some(true);
+                }
+                let cancel = ui.button("Cancel");
+                if first {
+                    cancel.request_focus();
+                }
+                if cancel.clicked() {
+                    answer = Some(false);
+                }
             });
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        });
+        // Esc, or a click outside the dialog, cancels.
+        if modal.should_close() {
             answer = Some(false);
         }
         if let Some(go) = answer {
@@ -270,6 +270,36 @@ mod tests {
         run(&mut app, vec![key(egui::Key::Escape, true)]);
         assert!(app.pending_warn.is_none());
         assert_eq!(app.doc.project.machines.len(), 6);
+    }
+
+    #[test]
+    fn while_the_warning_is_held_the_rest_of_the_ui_gets_no_clicks() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let ctx = egui::Context::default();
+        let run = |app: &mut SidAcidApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.ui(ctx));
+        };
+        run(&mut app, vec![]);
+        // A point on the app's own UI: wherever a widget reports hover.
+        app.sysmem = Box::new(crate::sysmem::FakeMemory(Some(MemSnapshot {
+            total: 4 * GIB,
+            available: 512 * MIB,
+        })));
+        app.with_memory_check(1, MemAction::Add(MachineType::Fm));
+        run(&mut app, vec![]);
+        let top = ctx.memory(|m| m.top_modal_layer());
+        assert!(top.is_some(), "the warning is a modal layer");
+        // Every layer below the modal is blocked from input.
+        let below = ctx.layer_id_at(egui::pos2(5.0, 5.0));
+        assert_eq!(below, top, "the modal backdrop covers the whole screen");
     }
 
     #[test]
