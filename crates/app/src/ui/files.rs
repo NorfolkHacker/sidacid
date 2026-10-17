@@ -2,8 +2,9 @@
 //! pattern copy & paste and the window title.
 
 use super::SidAcidApp;
+use super::mem_warn::{MemAction, machines_bytes};
 use crate::document::{Document, Edit};
-use crate::sysmem::{MemSnapshot, SystemMemory, format_bytes};
+use crate::sysmem::{MemSnapshot, format_bytes};
 use acid_engine::host::Command;
 use acid_engine::project::{
     BANK_SIZE, DrumPattern, MachineBody, NotePattern, PatternRef, Project, SynthPattern,
@@ -181,7 +182,8 @@ impl SidAcidApp {
             Pending::New => self.load_document(Document::new(Project::default())),
             Pending::Open => {
                 if let Some(path) = project_dialog().pick_file() {
-                    let mem = crate::sysmem::SysinfoMemory::new().snapshot();
+                    let mem = self.sysmem.snapshot();
+                    self.mem = mem;
                     // i16 PCM is half the f32 figure `check_fits` counts, so
                     // a file can't inflate past what would be refused anyway.
                     let budget = mem.map(|m| m.available / 2);
@@ -189,9 +191,9 @@ impl SidAcidApp {
                         .map_err(|e| format!("Could not open {}:\n{e}", path.display()));
                     match loaded.and_then(|p| check_fits(&p, mem).map(|()| p)) {
                         Ok(project) => {
-                            let mut doc = Document::new(project);
-                            doc.path = Some(path);
-                            self.load_document(doc);
+                            let extra = project.sample_bytes() as u64 + machines_bytes(&project);
+                            let project = Box::new(project);
+                            self.with_memory_check(extra, MemAction::Open { project, path });
                         }
                         Err(e) => self.view.message = Some(e),
                     }
@@ -199,6 +201,13 @@ impl SidAcidApp {
             }
             Pending::Quit => self.view.quit = true,
         }
+    }
+
+    /// Makes `project`, opened from `path`, the document.
+    pub(crate) fn open_project_now(&mut self, project: Project, path: PathBuf) {
+        let mut doc = Document::new(project);
+        doc.path = Some(path);
+        self.load_document(doc);
     }
 
     /// Releases the held pad and roll-audition notes, so a note that is

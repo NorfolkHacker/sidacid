@@ -15,6 +15,7 @@ mod keys;
 pub mod knob;
 mod lane;
 mod lane_geom;
+mod mem_warn;
 mod mixer_panel;
 mod mono_panel;
 mod mono_patches;
@@ -300,6 +301,13 @@ pub struct SidAcidApp {
     /// The rack generation (`Status::rack_gen`) a status describing
     /// `engine_rack` carries; it mirrors the host's count (see `rack_sync`).
     pub(crate) rack_expected: u32,
+    /// Where system RAM figures come from (tests fake a machine running
+    /// short), the latest reading and when it was taken.
+    pub(crate) sysmem: Box<dyn crate::sysmem::SystemMemory>,
+    pub(crate) mem: Option<crate::sysmem::MemSnapshot>,
+    mem_at: Option<f64>,
+    /// An action held behind the low-memory warning.
+    pub(crate) pending_warn: Option<mem_warn::MemWarn>,
     /// Tests only: the commands a frame flushed with no audio device (a
     /// real app drops them), so a test can see what would reach the engine.
     #[cfg(test)]
@@ -408,6 +416,7 @@ impl SidAcidApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut app = Self::headless(Document::new(acid_engine::demo::demo_project()));
+        app.sysmem = Box::new(crate::sysmem::SysinfoMemory::new());
         app.settings_path = crate::settings::settings_path();
         if let Some(path) = &app.settings_path {
             let (settings, notice) = crate::settings::load(path);
@@ -420,7 +429,8 @@ impl SidAcidApp {
         app
     }
 
-    /// An app with no audio device (tests, or before audio starts).
+    /// An app with no audio device (tests, or before audio starts). It has
+    /// no system memory figures, so never warns; `new` gives it the real ones.
     pub fn headless(doc: Document) -> Self {
         let engine_capacity = rack_capacity(doc.project.machines.len());
         Self {
@@ -437,6 +447,10 @@ impl SidAcidApp {
             pending: Vec::new(),
             view: ViewState::default(),
             rack_expected: 0,
+            sysmem: Box::new(crate::sysmem::FakeMemory(None)),
+            mem: None,
+            mem_at: None,
+            pending_warn: None,
             #[cfg(test)]
             flushed: Vec::new(),
         }
@@ -699,6 +713,7 @@ impl SidAcidApp {
         });
         self.dock_focus_after_draw(ctx);
         self.dialogs(ctx);
+        self.memory_warning_ui(ctx);
         self.audio_settings_window(ctx);
         // A collapsed lane stops drawing its grid, so a key or drag held
         // when it collapsed would never see its release.
@@ -2135,7 +2150,7 @@ pub(crate) mod tests {
         assert_eq!(fm_voices::starter().len(), 16);
     }
 
-    fn test_wav(seconds: f32) -> Vec<u8> {
+    pub(crate) fn test_wav(seconds: f32) -> Vec<u8> {
         test_wav_at(22_050, seconds)
     }
 

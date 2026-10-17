@@ -3,11 +3,12 @@
 //! undoable edit is applied.
 
 use super::SidAcidApp;
+use super::mem_warn::MemAction;
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::{MachineParam, SlotParam};
 use acid_engine::sampler::SLOTS;
-use acid_engine::sampler::decode::decode;
+use acid_engine::sampler::decode::{Decoded, decode};
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
 use acid_engine::sampler::slot::{SlotData, SlotMeta};
 
@@ -51,7 +52,8 @@ impl SidAcidApp {
         }
     }
 
-    /// Loads a decoded file into slot `slot` of sampler `uid`.
+    /// Decodes a file for slot `slot` of sampler `uid` and loads it, once
+    /// the memory check passes or the user goes ahead.
     pub(crate) fn load_sample_bytes(
         &mut self,
         uid: MachineUid,
@@ -79,6 +81,28 @@ impl SidAcidApp {
                 return;
             }
         };
+        // Twice the decoded audio: the slot, and the undo history's copy.
+        let extra = (decoded.samples.len() * size_of::<f32>() * 2) as u64;
+        self.with_memory_check(
+            extra,
+            MemAction::LoadSample {
+                uid,
+                slot,
+                name: name.to_string(),
+                decoded: Box::new(decoded),
+            },
+        );
+    }
+
+    /// Loads a decoded file into slot `slot` of sampler `uid`, without the
+    /// memory check.
+    pub(crate) fn load_decoded_now(
+        &mut self,
+        uid: MachineUid,
+        slot: usize,
+        name: &str,
+        decoded: Decoded,
+    ) {
         let Some(sampler) = self.doc.project.sampler(uid) else {
             return;
         };

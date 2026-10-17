@@ -2,7 +2,9 @@
 //! peak, renders that overran their time budget, and memory in use; and
 //! each machine's share of the audio time, shown on its panel header.
 
+use super::mem_warn::machines_bytes;
 use super::{SidAcidApp, theme};
+use crate::sysmem::{MemLevel, MemSnapshot, format_bytes, level};
 use acid_engine::host::{CPU_SMOOTHING, PositionStatus, Status};
 use acid_engine::machine::MachineUid;
 use eframe::egui;
@@ -10,7 +12,7 @@ use std::collections::HashMap;
 
 /// Seconds a peak stays on show before a lower one may replace it.
 const PEAK_HOLD: f64 = 1.0;
-/// Seconds between reads of the process's memory use.
+/// Seconds between reads of the process's and the system's memory.
 const MEMORY_EVERY: f64 = 1.0;
 /// Load at which a reading turns amber.
 const BUSY: f32 = 0.8;
@@ -200,8 +202,47 @@ pub fn process_memory() -> Option<u64> {
     memory_stats::memory_stats().map(|m| m.physical_mem as u64)
 }
 
-fn megabytes(bytes: u64) -> String {
-    format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+/// The transport's memory reading: "MEM 412 MB / 16 GB", the app's use
+/// against the system's RAM (just the app's without system figures).
+pub(crate) fn mem_text(app_bytes: u64, sys: Option<MemSnapshot>) -> String {
+    match sys {
+        Some(s) => format!(
+            "MEM {} / {}",
+            format_bytes(app_bytes),
+            format_bytes(s.total)
+        ),
+        None => format!("MEM {}", format_bytes(app_bytes)),
+    }
+}
+
+/// The memory reading's colour: amber when the system runs low on free
+/// memory, red when it is short (`sysmem::level`).
+pub(crate) fn mem_colour(sys: Option<MemSnapshot>, normal: egui::Color32) -> egui::Color32 {
+    match sys.map(|s| level(s.total, s.available)) {
+        Some(MemLevel::Critical) => theme::ACCENT,
+        Some(MemLevel::Low) => theme::QUEUED,
+        _ => normal,
+    }
+}
+
+/// The memory reading's hover: the app's use against the system's free
+/// memory, then what the app's use is made of.
+fn mem_hover(app: u64, sys: Option<MemSnapshot>, samples: u64, machines: u64) -> String {
+    let mut s = format!("App: {}", format_bytes(app));
+    if let Some(m) = sys {
+        s.push_str(&format!(
+            " · System free: {} of {}",
+            format_bytes(m.available),
+            format_bytes(m.total)
+        ));
+    }
+    s.push_str(&format!(
+        "\nSamples {} · Machines ~{} · Other {}",
+        format_bytes(samples),
+        format_bytes(machines),
+        format_bytes(app.saturating_sub(samples + machines))
+    ));
+    s
 }
 
 fn load_colour(load: f32, normal: egui::Color32) -> egui::Color32 {
@@ -215,9 +256,18 @@ fn load_colour(load: f32, normal: egui::Color32) -> egui::Color32 {
 }
 
 impl SidAcidApp {
+    /// Re-reads the system's memory figures once `MEMORY_EVERY` has passed.
+    pub(crate) fn refresh_memory(&mut self, now: f64) {
+        if self.mem_at.is_none_or(|at| now - at >= MEMORY_EVERY) {
+            self.mem = self.sysmem.snapshot();
+            self.mem_at = Some(now);
+        }
+    }
+
     pub(crate) fn perf_readout(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
         self.view.perf.tick_memory(now, process_memory);
+        self.refresh_memory(now);
         if let Some(audio) = &self.audio {
             self.view.perf.on_xruns(audio.xruns(), now);
         }
@@ -267,12 +317,13 @@ impl SidAcidApp {
         )
         .on_hover_text(&hover);
         if let Some(bytes) = perf.memory() {
-            ui.label(format!("MEM {}", megabytes(bytes)))
-                .on_hover_text("Memory this app is using");
+            let samples = self.doc.project.sample_bytes() as u64;
+            let machines = machines_bytes(&self.doc.project);
+            ui.label(
+                egui::RichText::new(mem_text(bytes, self.mem)).color(mem_colour(self.mem, normal)),
+            )
+            .on_hover_text(mem_hover(bytes, self.mem, samples, machines));
         }
-        let samples = self.doc.project.sample_bytes() as u64;
-        ui.label(format!("Smp {}", megabytes(samples)))
-            .on_hover_text("Decoded sampler audio in this project");
         let dropouts = perf.dropouts();
         if dropouts > 0 {
             let ago = perf
@@ -437,6 +488,46 @@ mod tests {
         assert!(
             (p.machine_cpu(MachineUid(1)).unwrap() - 0.2).abs() < 0.01,
             "follows the uid, not the position"
+        );
+    }
+
+    #[test]
+    fn mem_text_and_colour_follow_the_system() {
+        use crate::sysmem::{GIB, MIB, MemSnapshot};
+        let normal = egui::Color32::WHITE;
+        let s = MemSnapshot {
+            total: 16 * GIB,
+            available: 10 * GIB,
+        };
+        assert_eq!(mem_text(412 * MIB, Some(s)), "MEM 412 MB / 16 GB");
+        assert_eq!(mem_colour(Some(s), normal), normal);
+        let low = MemSnapshot {
+            available: 3 * GIB,
+            ..s
+        };
+        assert_eq!(mem_colour(Some(low), normal), theme::QUEUED);
+        let red = MemSnapshot {
+            available: GIB,
+            ..s
+        };
+        assert_eq!(mem_colour(Some(red), normal), theme::ACCENT);
+        assert_eq!(mem_text(412 * MIB, None), "MEM 412 MB");
+    }
+
+    #[test]
+    fn the_mem_hover_breaks_the_use_down() {
+        use crate::sysmem::{GIB, MIB, MemSnapshot};
+        let s = MemSnapshot {
+            total: 16 * GIB,
+            available: 9 * GIB + 8 * GIB / 10,
+        };
+        assert_eq!(
+            mem_hover(412 * MIB, Some(s), 180 * MIB, 40 * MIB),
+            "App: 412 MB · System free: 9.8 GB of 16 GB\nSamples 180 MB · Machines ~40 MB · Other 192 MB"
+        );
+        assert_eq!(
+            mem_hover(100 * MIB, None, 180 * MIB, 0),
+            "App: 100 MB\nSamples 180 MB · Machines ~0 MB · Other 0 MB"
         );
     }
 

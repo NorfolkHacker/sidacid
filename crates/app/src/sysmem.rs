@@ -1,5 +1,3 @@
-// The meter (Task 9) uses these.
-#![allow(dead_code)]
 //! System RAM figures for the memory meter, behind a trait so tests can
 //! fake a machine that is running short.
 
@@ -32,27 +30,36 @@ impl SystemMemory for SysinfoMemory {
     fn snapshot(&mut self) -> Option<MemSnapshot> {
         self.sys.refresh_memory();
         let total = self.sys.total_memory();
+        let available = self.sys.available_memory();
+        // Debug builds: `SIDACID_FAKE_FREE_MB=400` pretends the system is
+        // short, to see the meter and the warning without filling RAM.
+        #[cfg(debug_assertions)]
+        let available = std::env::var("SIDACID_FAKE_FREE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(available, |mb| mb * MIB);
         (total > 0).then(|| MemSnapshot {
             total,
-            available: self.sys.available_memory().min(total),
+            available: available.min(total),
         })
     }
 }
 
-#[cfg(test)]
+/// A fixed reading: tests fake a machine running short with it, and a
+/// headless app holds `FakeMemory(None)` (no figures, so never a warning).
 pub struct FakeMemory(pub Option<MemSnapshot>);
 
-#[cfg(test)]
 impl SystemMemory for FakeMemory {
     fn snapshot(&mut self) -> Option<MemSnapshot> {
         self.0
     }
 }
 
-/// "2.1 GB" from 1 GB up, whole megabytes below.
+/// "2.1 GB" from 1 GB up ("16 GB" when whole), whole megabytes below.
 pub fn format_bytes(b: u64) -> String {
     if b >= GIB {
-        format!("{:.1} GB", b as f64 / GIB as f64)
+        let gb = format!("{:.1}", b as f64 / GIB as f64);
+        format!("{} GB", gb.strip_suffix(".0").unwrap_or(&gb))
     } else {
         format!("{} MB", b / MIB)
     }
@@ -100,6 +107,7 @@ mod tests {
     #[test]
     fn bytes_read_as_gb_or_mb() {
         assert_eq!(format_bytes(2 * GIB + GIB / 10), "2.1 GB");
+        assert_eq!(format_bytes(16 * GIB), "16 GB");
         assert_eq!(format_bytes(300 * MIB), "300 MB");
         assert_eq!(format_bytes(4 * MIB), "4 MB");
         assert_eq!(format_bytes(0), "0 MB");

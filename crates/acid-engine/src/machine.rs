@@ -72,6 +72,20 @@ impl MachineType {
         }
     }
 
+    /// Rough heap + inline bytes one machine of this type takes in the
+    /// engine (DSP state, buffers, channel strip), excluding samples.
+    /// What `Slot::from_entry` allocated, rounded up to 4 KiB (measured
+    /// 2026-10-17 by `tests/slot_memory.rs`).
+    pub const fn memory_estimate(self) -> usize {
+        match self {
+            MachineType::Synth => 16 << 10,
+            MachineType::Kit808 | MachineType::Kit909 => 12 << 10,
+            MachineType::Fm => 44 << 10,
+            MachineType::Sampler => 24 << 10,
+            MachineType::Mono => 16 << 10,
+        }
+    }
+
     /// Whether the song transpose applies to this type.
     pub fn transposes(self) -> bool {
         matches!(

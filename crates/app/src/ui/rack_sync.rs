@@ -12,6 +12,7 @@
 //! host are taken back out (`discard_pending`).
 
 use super::SidAcidApp;
+use super::mem_warn::MemAction;
 use acid_engine::host::{Command, Status};
 use acid_engine::machine::{MachineType, MachineUid, rack_capacity};
 use acid_engine::params::ParamId;
@@ -24,8 +25,15 @@ const NO_AUDIO_RATE: f32 = 48_000.0;
 
 impl SidAcidApp {
     /// Adds a fresh `ty` machine at the end of the rack (one undo step)
-    /// and focuses it. None when the rack has no free machine ids.
+    /// and focuses it, unless it would leave the system short of memory:
+    /// then the low-memory warning asks first, and this gives None.
     pub(crate) fn add_machine(&mut self, ty: MachineType) -> Option<MachineUid> {
+        self.with_memory_check(ty.memory_estimate() as u64, MemAction::Add(ty))
+    }
+
+    /// `add_machine` without the memory check. None when the rack has no
+    /// free machine ids.
+    pub(crate) fn add_machine_now(&mut self, ty: MachineType) -> Option<MachineUid> {
         let (uid, cmds) = self.doc.add_machine(ty)?;
         self.send(cmds);
         self.sync_rack();
@@ -34,8 +42,21 @@ impl SidAcidApp {
     }
 
     /// Adds a copy of `uid` directly below it (one undo step) and focuses
-    /// it. None when the rack has no free machine ids or `uid` is not in it.
+    /// it, behind the memory check as `add_machine` is. None when the rack
+    /// has no free machine ids, `uid` is not in it or the warning asks.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
+        let m = self.doc.project.machine(uid)?;
+        let samples = self
+            .doc
+            .project
+            .sampler(uid)
+            .map_or(0, |s| s.memory_bytes());
+        let extra = m.machine_type().memory_estimate() + samples;
+        self.with_memory_check(extra as u64, MemAction::Duplicate(uid))
+    }
+
+    /// `duplicate_machine` without the memory check.
+    pub(crate) fn duplicate_machine_now(&mut self, uid: MachineUid) -> Option<MachineUid> {
         let (copy, cmds) = self.doc.duplicate_machine(uid)?;
         self.send(cmds);
         self.sync_rack();

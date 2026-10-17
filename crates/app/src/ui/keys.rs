@@ -66,6 +66,12 @@ fn typing(ctx: &egui::Context) -> bool {
 }
 
 impl SidAcidApp {
+    /// A confirm, message or low-memory dialog is open: its buttons have
+    /// the keys.
+    fn dialog_open(&self) -> bool {
+        self.view.confirm.is_some() || self.view.message.is_some() || self.pending_warn.is_some()
+    }
+
     /// Feed the frame's key presses (repeats too) to the dock and take the
     /// used ones out of the frame so focused widgets don't act on them.
     /// Once a Delete/Backspace press has removed the selection, that key's
@@ -206,7 +212,7 @@ impl SidAcidApp {
     /// Typing into a field, or with a dialog open, Tab and the arrows are
     /// egui's (as for `handle_shortcuts`).
     pub(crate) fn hold_dock_focus(&mut self, ctx: &egui::Context) {
-        if typing(ctx) || self.view.confirm.is_some() || self.view.message.is_some() {
+        if typing(ctx) || self.dialog_open() {
             self.view.dock.focus_held = None;
             return;
         }
@@ -294,7 +300,7 @@ impl SidAcidApp {
     }
 
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if typing(ctx) || self.view.confirm.is_some() || self.view.message.is_some() {
+        if typing(ctx) || self.dialog_open() {
             return;
         }
         let pressed: Vec<Shortcut> =
