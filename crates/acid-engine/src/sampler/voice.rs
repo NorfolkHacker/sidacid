@@ -220,6 +220,15 @@ impl Voice {
         }
     }
 
+    /// Releases so that a note at full level is silent after `seconds`
+    /// (a release's time constant is `seconds` instead).
+    pub fn fade(&mut self, seconds: f32) {
+        self.release(seconds);
+        if self.stage == Stage::Release {
+            self.release_coef = (SILENT.ln() / (seconds.max(1e-4) * self.sample_rate)).exp();
+        }
+    }
+
     /// Still sounding, but only the fade of a stolen note: not held, and
     /// the first voice to take for a new note.
     pub fn tail_only(&self) -> bool {
@@ -1063,6 +1072,21 @@ mod tests {
         c.choke();
         run(&mut c, &sample, &s, 3000);
         assert!(!c.active, "choked within 65 ms");
+    }
+
+    #[test]
+    fn a_fade_is_silent_within_its_time() {
+        let sample = constant(48_000, 0.5);
+        let s = SlotSettings::default();
+        let mut v = Voice::new(SR);
+        v.start(&whole(48_000), 0, 36, 127, false, 1);
+        run(&mut v, &sample, &s, 1_000);
+        v.fade(0.005);
+        assert!(!v.held);
+        let out = run(&mut v, &sample, &s, 230);
+        assert!(v.active && out[229] > 0.0, "still fading at 4.8 ms");
+        run(&mut v, &sample, &s, 20);
+        assert!(!v.active, "silent by 5.2 ms");
     }
 
     #[test]

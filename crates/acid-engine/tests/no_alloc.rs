@@ -424,6 +424,51 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
 }
 
 #[test]
+fn the_pad_kit_does_not_allocate() {
+    use acid_engine::padkit::pad::{Layer, Pad};
+    use acid_engine::padkit::play::PadPlay;
+    use acid_engine::padkit::{PADS, PadKit};
+    use acid_engine::params::{PadKitParam, PadParam};
+    use std::sync::Arc;
+    let mut k = PadKit::new(SR);
+    let mut pads = vec![Pad::default(); PADS];
+    let tone: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.03).sin() * 0.6).collect();
+    for pad in &mut pads {
+        pad.layers = vec![Layer::new("x", 44_100, 1, &tone); 2];
+        pad.split_evenly();
+    }
+    for (p, pad) in pads.iter().enumerate() {
+        for (l, layer) in pad.layers.iter().enumerate() {
+            k.swap_sample(p, l, &mut Some(Arc::new(layer.to_sample())));
+        }
+    }
+    let mut play = PadPlay::from_pads(&pads);
+    let mut fresh = Some(Arc::new(pads[0].layers[0].to_sample()));
+    k.set_pad_param(1, PadParam::Mode, 1.0);
+    let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+    let n = count_allocs(|| {
+        k.swap_play(&mut play);
+        k.set_param(PadKitParam::Accent, 0.7);
+        k.set_pad_param(2, PadParam::Group, 0.25);
+        k.set_pad_param(3, PadParam::Group, 0.25);
+        // 40 hits on 16 voices: steals, chokes and retriggers
+        for i in 0..40u8 {
+            k.note_on(i % PADS as u8, 20 + i * 2, i % 3 == 0, i % 5 == 0);
+            k.render(&mut l, &mut r);
+            k.note_off(1, false);
+        }
+        k.pattern_off();
+        // the old audio comes back to the caller, not dropped here
+        assert!(k.swap_sample(0, 0, &mut fresh));
+        k.render(&mut l, &mut r);
+        k.all_off();
+        k.reset();
+    });
+    assert_eq!(n, 0);
+    assert!(fresh.is_some());
+}
+
+#[test]
 fn a_steal_by_a_note_shorter_than_its_fade_does_not_allocate() {
     use acid_engine::sampler::slot::{SlotData, SlotMeta};
     let mut p = Project::default();

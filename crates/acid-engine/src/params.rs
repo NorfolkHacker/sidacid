@@ -596,6 +596,11 @@ pub mod pad_map {
     /// Mute groups: Off, then 1..=4.
     pub const GROUPS: usize = 5;
 
+    /// The drum kits' curve: half the travel is a quarter of the volume.
+    pub fn level_gain(v: f32) -> f32 {
+        v.clamp(0.0, 1.0).powi(2)
+    }
+
     pub fn tune_semitones(v: f32) -> f32 {
         (v - 0.5) * 48.0
     }
