@@ -2,9 +2,9 @@
 //! channel strip and render buffer, built from its `MachineEntry`.
 
 use crate::drums::DrumKit;
-use crate::engine::Engine;
+use crate::engine::{Engine, event_reserve};
 use crate::fm::FmSynth;
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
+use crate::machine::{MachineType, MachineUid, rack_capacity};
 use crate::mixer::{ChannelStrip, StereoBuf};
 use crate::params::MachineParam;
 use crate::project::{
@@ -13,6 +13,7 @@ use crate::project::{
 };
 use crate::sampler::slot::SlotPlay;
 use crate::sampler::{SLOTS, Sampler};
+use crate::sequencer::{SeqBuffers, SeqEvent};
 use crate::synth::BassSynth;
 use crate::va::MonoSynth;
 use std::ops::Range;
@@ -189,15 +190,10 @@ pub struct CompiledSong {
 
 impl CompiledSong {
     /// Resolves uid lanes to rack positions (UI thread; allocates). Lanes
-    /// of machines not in `rack` are dropped; positions past
-    /// `MAX_MACHINES` are ignored.
+    /// of machines not in `rack` are dropped.
     pub fn compile(song: &Song, rack: &[MachineUid]) -> CompiledSong {
         CompiledSong {
-            lanes: rack
-                .iter()
-                .take(MAX_MACHINES)
-                .map(|&uid| song.lane(uid).to_vec())
-                .collect(),
+            lanes: rack.iter().map(|&uid| song.lane(uid).to_vec()).collect(),
             end: song.end,
             loop_range: song.loop_range,
             automation: song.automation.clone(),
@@ -210,18 +206,39 @@ impl CompiledSong {
     }
 }
 
+/// A bigger rack capacity for the engine, built on the UI thread: the
+/// sequencer's per-position storage and the event buffer. After the swap
+/// it holds the engine's old ones, for disposal.
+pub struct Growth {
+    pub capacity: usize,
+    pub(crate) seq: SeqBuffers,
+    /// Empty, with room for `event_reserve(capacity)` events.
+    pub(crate) events: Vec<SeqEvent>,
+}
+
+impl Growth {
+    /// Allocates.
+    pub fn new(capacity: usize) -> Box<Growth> {
+        Box::new(Growth {
+            capacity,
+            seq: SeqBuffers::new(capacity),
+            events: Vec::with_capacity(event_reserve(capacity)),
+        })
+    }
+}
+
 /// A rack edit for the audio thread (`Command::SetRack`): everything the
 /// new rack needs that the engine doesn't already hold, built on the UI
 /// thread. After `Engine::set_rack` it carries what left the engine (the
 /// old slot `Vec` in `into`, unused `fresh` slots, the old song) back for
 /// disposal.
 pub struct RackSwap {
-    /// New rack order, at most `MAX_MACHINES`.
+    /// New rack order, at most `capacity`.
     pub order: Vec<MachineUid>,
     /// Same length as `order`: a new slot, or `None` to move the slot the
     /// engine already has for that uid.
     pub fresh: Vec<Option<Slot>>,
-    /// Empty, capacity `MAX_MACHINES`: the new rack is moved into it.
+    /// Empty, with room for `capacity` slots: the new rack is moved into it.
     pub into: Vec<Slot>,
     /// The song compiled for `order`.
     pub song: Box<CompiledSong>,
@@ -234,14 +251,25 @@ pub struct RackSwap {
     pub map: Vec<Option<usize>>,
     /// Same length as `order`; engine scratch: each new position's type.
     pub tys: Vec<Option<MachineType>>,
+    /// The engine's rack capacity after this swap.
+    pub capacity: usize,
+    /// The storage for `capacity`, when that is more than the engine
+    /// holds now; afterwards the engine's old storage.
+    pub growth: Option<Box<Growth>>,
 }
 
 impl RackSwap {
     /// UI-thread helper: builds a swap from the project (after a rack
-    /// edit) and the uids the engine has now. Only machines not in
-    /// `current` get new slots. Allocates.
-    pub fn build(project: &Project, current: &[MachineUid], sample_rate: f32) -> Box<RackSwap> {
-        let machines = &project.machines[..project.machines.len().min(MAX_MACHINES)];
+    /// edit) and the uids the engine has now, for an engine holding
+    /// `engine_capacity` positions (grown if the new rack needs more).
+    /// Only machines not in `current` get new slots. Allocates.
+    pub fn build(
+        project: &Project,
+        current: &[MachineUid],
+        sample_rate: f32,
+        engine_capacity: usize,
+    ) -> Box<RackSwap> {
+        let machines = &project.machines;
         let order: Vec<MachineUid> = machines.iter().map(|m| m.uid).collect();
         let fresh = machines
             .iter()
@@ -249,15 +277,19 @@ impl RackSwap {
             .collect();
         let selected = machines.iter().map(|m| m.selected).collect();
         let n = order.len();
+        let capacity = rack_capacity(n).max(engine_capacity);
+        let growth = (capacity > engine_capacity).then(|| Growth::new(capacity));
         let song = Box::new(CompiledSong::compile(&project.song, &order));
         Box::new(RackSwap {
             order,
             fresh,
-            into: Vec::with_capacity(n.max(MAX_MACHINES)),
+            into: Vec::with_capacity(capacity),
             song,
             selected,
             map: vec![None; n],
             tys: vec![None; n],
+            capacity,
+            growth,
         })
     }
 }

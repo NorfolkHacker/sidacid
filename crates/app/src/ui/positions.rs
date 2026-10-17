@@ -99,8 +99,8 @@ impl BufferPool {
         Some(b)
     }
 
-    // Unused while the rack's size is fixed.
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// New buffers have room for `capacity` positions from now on;
+    /// smaller ones that come back are dropped (and replaced).
     pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
     }

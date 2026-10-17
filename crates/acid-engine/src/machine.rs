@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 /// Largest number of machines a rack may hold.
 pub const MAX_MACHINES: usize = 16;
 
+/// Rack capacity grows in steps of this many machines.
+pub const RACK_CHUNK: usize = 16;
+
+/// The capacity an engine holds for a rack of `machines`.
+pub fn rack_capacity(machines: usize) -> usize {
+    machines.div_ceil(RACK_CHUNK).max(1) * RACK_CHUNK
+}
+
 /// Stable identity of a machine within a project. Allocated from
 /// `Project::next_uid`, never reused, independent of rack position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -125,6 +133,14 @@ pub fn standard_rack() -> [(MachineUid, MachineType, &'static str); 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rack_capacity_grows_in_chunks_of_sixteen() {
+        assert_eq!(
+            [0, 1, 16, 17, 32, 33].map(rack_capacity),
+            [16, 16, 16, 32, 32, 48]
+        );
+    }
 
     #[test]
     fn default_names_number_from_two_except_synths() {

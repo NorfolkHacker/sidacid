@@ -47,7 +47,7 @@ mod transport;
 use crate::audio::AudioLink;
 use crate::document::Document;
 use acid_engine::host::{Command, Event, PositionStatus, Status};
-use acid_engine::machine::{MachineType, MachineUid};
+use acid_engine::machine::{MachineType, MachineUid, rack_capacity};
 use eframe::egui;
 use positions::{BufferPool, Shown};
 use std::collections::HashMap;
@@ -294,6 +294,9 @@ pub struct SidAcidApp {
     /// The machine order the engine has, as far as the UI knows (see
     /// `rack_sync`).
     pub(crate) engine_rack: Vec<MachineUid>,
+    /// The rack capacity the engine holds, as far as the UI knows: a rack
+    /// edit past it sends the engine bigger storage (see `rack_sync`).
+    pub(crate) engine_capacity: usize,
     /// The rack generation (`Status::rack_gen`) a status describing
     /// `engine_rack` carries; it mirrors the host's count (see `rack_sync`).
     pub(crate) rack_expected: u32,
@@ -419,8 +422,10 @@ impl SidAcidApp {
 
     /// An app with no audio device (tests, or before audio starts).
     pub fn headless(doc: Document) -> Self {
+        let engine_capacity = rack_capacity(doc.project.machines.len());
         Self {
             engine_rack: doc.project.rack_uids(),
+            engine_capacity,
             doc,
             audio: None,
             audio_error: None,
@@ -428,7 +433,7 @@ impl SidAcidApp {
             settings_path: None,
             status: Status::default(),
             shown: Shown::default(),
-            pool: BufferPool::new(acid_engine::machine::MAX_MACHINES),
+            pool: BufferPool::new(engine_capacity),
             pending: Vec::new(),
             view: ViewState::default(),
             rack_expected: 0,
@@ -2723,6 +2728,15 @@ mod tests {
         app.undo();
         assert_eq!(app.engine_rack, app.doc.project.rack_uids());
         run_frames(&mut app, 2);
+    }
+
+    #[test]
+    fn the_app_tracks_the_engines_rack_capacity() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        assert_eq!(app.engine_capacity, 16);
+        // With the cap still in place, check the value follows a swap's capacity.
+        app.move_machine(SYNTH1, 3);
+        assert_eq!(app.engine_capacity, 16);
     }
 
     #[test]

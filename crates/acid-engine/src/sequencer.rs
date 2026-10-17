@@ -15,7 +15,6 @@
 //! A sub-hit between ticks is held back and sent at its own sample
 //! (`samples_to_due`, `take_due`), so ratchets land on exact fractions.
 
-use crate::machine::MAX_MACHINES;
 use crate::params::{DRUM_INSTRUMENTS, ParamId};
 use crate::project::{
     Block, DrumPattern, MAX_NOTES, Note, NotePattern, SynthPattern, TICKS_PER_STEP,
@@ -103,11 +102,11 @@ const _: () = assert!(TICKS_PER_STEP == SUBS as u16);
 /// Ratcheted notes a track follows at once (more play their first hit only).
 const RATCHETS: usize = 16;
 
-/// Most events the ticks can hold back at once: per track, `RATCHETS`
-/// ratcheting notes with at most 7 hits each after a tick's start (hits
-/// are at least 1/8 tick apart), each a release and a start (an acid
-/// track's one note needs fewer: its hits and their gate-offs).
-pub(crate) const PENDING: usize = MAX_MACHINES * RATCHETS * 7 * 2;
+/// Most events the ticks can hold back at once, per rack position:
+/// `RATCHETS` ratcheting notes with at most 7 hits each after a tick's
+/// start (hits are at least 1/8 tick apart), each a release and a start
+/// (an acid track's one note needs fewer: its hits and their gate-offs).
+pub(crate) const PENDING_PER_TRACK: usize = RATCHETS * 7 * 2;
 
 /// Events a tick holds back to send later inside it (ratchet hits
 /// between ticks), each with the samples left until it is due, kept in
@@ -120,10 +119,11 @@ struct Pending {
 }
 
 impl Pending {
-    /// Allocates (construction only).
-    fn new() -> Self {
+    /// Room for a rack of `capacity` positions. Allocates (construction
+    /// only).
+    fn new(capacity: usize) -> Self {
         Self {
-            evs: Vec::with_capacity(PENDING),
+            evs: Vec::with_capacity(capacity * PENDING_PER_TRACK),
             base: 0.0,
             quarter: 0.0,
         }
@@ -132,8 +132,11 @@ impl Pending {
     /// Holds `ev` back to `at` sub-ticks into the running tick (dropped
     /// should the reserve ever be full, which the bound above rules out).
     fn push(&mut self, at: u32, ev: SeqEvent) {
-        debug_assert!(self.evs.len() < PENDING, "PENDING is too small");
-        if self.evs.len() < PENDING.min(self.evs.capacity()) {
+        debug_assert!(
+            self.evs.len() < self.evs.capacity(),
+            "PENDING_PER_TRACK is too small"
+        );
+        if self.evs.len() < self.evs.capacity() {
             let time = self.base + at as f64 / FINE as f64 * self.quarter;
             self.evs.push((time, ev));
         }
@@ -197,7 +200,7 @@ fn emit(out: &mut Vec<SeqEvent>, later: &mut Pending, at: u32, ev: SeqEvent) {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Track {
+pub(crate) struct Track {
     step: usize,
     pattern: u8,
     queued: Option<u8>,
@@ -337,8 +340,11 @@ pub struct Sequencer {
     /// The quarter of the current step (0 = step start, 2 = mid-step).
     sub: u8,
     samples_to_next: f64,
-    /// By rack position.
-    tracks: [Track; MAX_MACHINES],
+    /// By rack position; its length is the rack capacity, as for every
+    /// per-position `Vec` here.
+    tracks: Vec<Track>,
+    /// Scratch for `rearrange`: the tracks before it.
+    prev_tracks: Vec<Track>,
     /// Scratch for `rearrange`: each old position's new one.
     new_of: Vec<Option<usize>>,
     mode: Mode,
@@ -357,14 +363,16 @@ pub struct Sequencer {
     /// before (not by Play), so reaching the loop end crosses it.
     advanced: bool,
     /// The arp clock of the tick last run, per rack position.
-    clocks: [(u64, f64); MAX_MACHINES],
+    clocks: Vec<(u64, f64)>,
     /// Fill is held: `Fill` notes play, `NotFill` ones don't.
     fill: bool,
     /// The project's chance seed.
     seed: u32,
     /// The pattern last selected per machine; restored when song
     /// playback (which overrides the tracks' patterns) is left.
-    chosen: [u8; MAX_MACHINES],
+    chosen: Vec<u8>,
+    /// Scratch for `rearrange`: the selections before it.
+    prev_chosen: Vec<u8>,
     ended: bool,
     /// Events held back to their sample inside the tick that sent them.
     pending: Pending,
@@ -487,8 +495,55 @@ fn release_all(t: &mut Track, slot: usize, out: &mut Vec<SeqEvent>) {
     }
 }
 
+/// The sequencer's per-position storage for a rack capacity, built off
+/// the audio thread and moved in by `Sequencer::grow`.
+pub struct SeqBuffers {
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) prev_tracks: Vec<Track>,
+    pub(crate) clocks: Vec<(u64, f64)>,
+    pub(crate) chosen: Vec<u8>,
+    pub(crate) prev_chosen: Vec<u8>,
+    pub(crate) new_of: Vec<Option<usize>>,
+    /// Empty, with room for `capacity * PENDING_PER_TRACK` events.
+    pub(crate) pending: Vec<(f64, SeqEvent)>,
+}
+
+impl SeqBuffers {
+    /// Every per-position `Vec` `capacity` long. Allocates.
+    #[doc(hidden)]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            tracks: vec![Track::default(); capacity],
+            prev_tracks: vec![Track::default(); capacity],
+            clocks: vec![(0, 0.0); capacity],
+            chosen: vec![0; capacity],
+            prev_chosen: vec![0; capacity],
+            new_of: vec![None; capacity],
+            pending: Vec::with_capacity(capacity * PENDING_PER_TRACK),
+        }
+    }
+
+    /// Whether every buffer is sized for `capacity` (and `pending` empty).
+    pub(crate) fn fits(&self, capacity: usize) -> bool {
+        [
+            self.tracks.len(),
+            self.prev_tracks.len(),
+            self.clocks.len(),
+            self.chosen.len(),
+            self.prev_chosen.len(),
+            self.new_of.len(),
+        ]
+        .iter()
+        .all(|&l| l == capacity)
+            && self.pending.is_empty()
+            && self.pending.capacity() >= capacity * PENDING_PER_TRACK
+    }
+}
+
 impl Sequencer {
-    pub fn new(sample_rate: f32) -> Self {
+    /// Holds a rack of `capacity` positions. Allocates.
+    pub fn new(sample_rate: f32, capacity: usize) -> Self {
+        let b = SeqBuffers::new(capacity);
         Self {
             sample_rate,
             bpm: 125.0,
@@ -497,8 +552,9 @@ impl Sequencer {
             global_step: 0,
             sub: 0,
             samples_to_next: 0.0,
-            tracks: [Track::default(); MAX_MACHINES],
-            new_of: vec![None; MAX_MACHINES],
+            tracks: b.tracks,
+            prev_tracks: b.prev_tracks,
+            new_of: b.new_of,
             mode: Mode::Pattern,
             song_start: 0,
             song_step: 0,
@@ -506,13 +562,40 @@ impl Sequencer {
             auto_sync: false,
             resync_pending: false,
             advanced: false,
-            clocks: [(0, 0.0); MAX_MACHINES],
+            clocks: b.clocks,
             fill: false,
             seed: 0,
-            chosen: [0; MAX_MACHINES],
+            chosen: b.chosen,
+            prev_chosen: b.prev_chosen,
             ended: false,
-            pending: Pending::new(),
+            pending: Pending::new(capacity),
         }
+    }
+
+    /// Rack positions the sequencer holds.
+    pub fn capacity(&self) -> usize {
+        self.tracks.len()
+    }
+
+    /// Moves the state into `b` (real-time safe; `b` is the bigger one)
+    /// and swaps it in: `b` then holds the old buffers, for disposal off
+    /// the audio thread.
+    pub fn grow(&mut self, b: &mut SeqBuffers) {
+        let n = self.capacity().min(b.tracks.len());
+        b.tracks[..n].copy_from_slice(&self.tracks[..n]);
+        b.clocks[..n].copy_from_slice(&self.clocks[..n]);
+        b.chosen[..n].copy_from_slice(&self.chosen[..n]);
+        b.pending.clear();
+        // Within its capacity: never grows.
+        let room = b.pending.capacity();
+        b.pending.extend(self.pending.evs.drain(..).take(room));
+        std::mem::swap(&mut self.tracks, &mut b.tracks);
+        std::mem::swap(&mut self.prev_tracks, &mut b.prev_tracks);
+        std::mem::swap(&mut self.clocks, &mut b.clocks);
+        std::mem::swap(&mut self.chosen, &mut b.chosen);
+        std::mem::swap(&mut self.prev_chosen, &mut b.prev_chosen);
+        std::mem::swap(&mut self.new_of, &mut b.new_of);
+        std::mem::swap(&mut self.pending.evs, &mut b.pending);
     }
 
     pub fn set_bpm(&mut self, bpm: f32) {
@@ -710,12 +793,12 @@ impl Sequencer {
             self.auto_sync = true;
         }
         if self.song_step >= compiled_song_end(song, banks) {
-            for pos in 0..MAX_MACHINES {
+            for pos in 0..self.capacity() {
                 if matches!(banks.bank(pos), Some(Bank::Synth(_))) && self.tracks[pos].gate_open {
                     out.push(SeqEvent::NoteOff { slot: pos });
                 }
             }
-            for pos in 0..MAX_MACHINES {
+            for pos in 0..self.capacity() {
                 if matches!(banks.bank(pos), Some(Bank::Notes(_))) {
                     release_all(&mut self.tracks[pos], pos, out);
                 }
@@ -724,7 +807,7 @@ impl Sequencer {
             self.ended = true;
             return false;
         }
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..self.capacity() {
             self.follow_blocks(pos, song, banks);
         }
         // Before the pattern lanes, so a lane value wins on its step.
@@ -763,7 +846,7 @@ impl Sequencer {
     /// track's pass afresh (the loop jump).
     fn seek_all(&mut self, song: &CompiledSong, banks: Banks<'_>, cut: bool) {
         let next = self.song_step as u64 * SUBS as u64;
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..self.capacity() {
             if cut {
                 let t = &mut self.tracks[pos];
                 cut_gate(t);
@@ -860,28 +943,29 @@ impl Sequencer {
         song: &CompiledSong,
         selected: &[u8],
     ) {
-        let (old_tracks, old_chosen) = (self.tracks, self.chosen);
+        self.prev_tracks.copy_from_slice(&self.tracks);
+        self.prev_chosen.copy_from_slice(&self.chosen);
         // Held-back hits follow their machines (they can outlive a render
         // block, and so meet a rack edit).
         self.new_of.fill(None);
         for (pos, old) in map.iter().enumerate() {
             if let Some(o) = *old
-                && o < MAX_MACHINES
+                && o < self.capacity()
                 && banks.bank(pos).is_some()
             {
                 self.new_of[o] = Some(pos);
             }
         }
         self.pending.remap(&self.new_of);
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..self.capacity() {
             let in_rack = banks.bank(pos).is_some();
             let old = map
                 .get(pos)
                 .copied()
                 .flatten()
-                .filter(|&o| o < MAX_MACHINES && in_rack);
+                .filter(|&o| o < self.capacity() && in_rack);
             (self.tracks[pos], self.chosen[pos]) = match old {
-                Some(o) => (old_tracks[o], old_chosen[o]),
+                Some(o) => (self.prev_tracks[o], self.prev_chosen[o]),
                 None if in_rack => {
                     let sel = selected.get(pos).copied().unwrap_or(0);
                     let t = Track {
@@ -1073,8 +1157,8 @@ impl Sequencer {
     /// the start of that position's block, so the arp's grid restarts on
     /// every block) and its length in samples, swing included. Read after
     /// `tick`: a block starting on that tick is already counted.
-    pub fn tick_clocks(&self) -> [(u64, f64); MAX_MACHINES] {
-        self.clocks
+    pub fn tick_clocks(&self) -> &[(u64, f64)] {
+        &self.clocks
     }
 
     fn set_clocks(&mut self, quarter: f64) {
@@ -1088,7 +1172,7 @@ impl Sequencer {
             }
         } else {
             let tick = self.global_step * SUBS as u64 + self.sub as u64;
-            self.clocks = [(tick, quarter); MAX_MACHINES];
+            self.clocks.fill((tick, quarter));
         }
     }
 
@@ -1121,7 +1205,7 @@ impl Sequencer {
         let quarter = self.step_len(self.global_step) * 0.25;
         if self.sub == 0 && self.mode == Mode::Song && !self.song_step_start(song, banks, out) {
             // The song ended on this tick: its clock is the first of none.
-            self.clocks = [(0, quarter); MAX_MACHINES];
+            self.clocks.fill((0, quarter));
             return;
         }
         self.set_clocks(quarter);
@@ -1129,12 +1213,12 @@ impl Sequencer {
         // just past) plus its share of the tick.
         self.pending.base = self.samples_to_next;
         self.pending.quarter = quarter;
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..self.capacity() {
             if let Some(Bank::Synth(bank)) = banks.bank(pos) {
                 self.synth_tick(pos, bank, out);
             }
         }
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..self.capacity() {
             if let Some(Bank::Drum(bank)) = banks.bank(pos) {
                 self.drum_tick(pos, bank, out);
             }
@@ -1418,7 +1502,7 @@ impl Sequencer {
 
     /// One tick of each note track: releases, then starts, then advance.
     fn note_ticks(&mut self, banks: Banks<'_>, out: &mut Vec<SeqEvent>) {
-        for m in 0..MAX_MACHINES {
+        for m in 0..self.capacity() {
             let Some(Bank::Notes(bank)) = banks.bank(m) else {
                 continue;
             };
@@ -1531,6 +1615,7 @@ fn next_plays(roll: &NotePattern, t: &Track, p: u16, pos: usize, seed: u32, fill
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MAX_MACHINES;
     use crate::machine::{MachineUid, standard_rack};
     use crate::project::{DrumPattern, NotePattern, PatternRef, SynthPattern};
     use crate::steps::{ACID_VEL, DrumGrid, DrumHit, Gate, SynthGrid, SynthStep};
@@ -1558,7 +1643,7 @@ mod tests {
 
     #[test]
     fn non_finite_tempo_is_ignored() {
-        let mut seq = Sequencer::new(SR);
+        let mut seq = Sequencer::new(SR, MAX_MACHINES);
         seq.set_bpm(140.0);
         seq.set_swing(0.3);
         seq.set_bpm(f32::NAN);
@@ -1687,7 +1772,7 @@ mod tests {
     }
 
     fn new_seq() -> Sequencer {
-        let mut s = Sequencer::new(SR);
+        let mut s = Sequencer::new(SR, MAX_MACHINES);
         s.set_bpm(120.0); // 16th = 5512.5 samples
         s
     }

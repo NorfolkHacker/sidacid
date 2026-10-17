@@ -14,7 +14,7 @@
 use super::SidAcidApp;
 use super::sampler_load::{pool_message, sample_memory};
 use acid_engine::host::{Command, Status};
-use acid_engine::machine::{MachineType, MachineUid};
+use acid_engine::machine::{MachineType, MachineUid, rack_capacity};
 use acid_engine::params::ParamId;
 use acid_engine::project::BANK_SIZE;
 use acid_engine::rack::RackSwap;
@@ -99,7 +99,14 @@ impl SidAcidApp {
             return;
         }
         let rate = self.audio.as_ref().map_or(NO_AUDIO_RATE, |a| a.sample_rate);
-        let swap = RackSwap::build(&self.doc.project, &self.engine_rack, rate);
+        let swap = RackSwap::build(
+            &self.doc.project,
+            &self.engine_rack,
+            rate,
+            self.engine_capacity,
+        );
+        self.engine_capacity = swap.capacity;
+        self.pool.set_capacity(swap.capacity);
         self.send(vec![Command::SetRack(swap)]);
         self.follow_rack(&rack);
         for &uid in rack.iter().filter(|u| !self.engine_rack.contains(u)) {
@@ -116,6 +123,7 @@ impl SidAcidApp {
     pub(crate) fn rack_for_new_host(&mut self) {
         self.engine_rack = self.doc.project.rack_uids();
         self.rack_expected = 0;
+        self.follow_engine_capacity();
         self.pool.reset();
     }
 
@@ -123,6 +131,15 @@ impl SidAcidApp {
     pub(crate) fn rack_for_replaced_engine(&mut self) {
         self.engine_rack = self.doc.project.rack_uids();
         self.rack_expected = self.rack_expected.wrapping_add(1);
+        self.follow_engine_capacity();
+    }
+
+    /// An engine built from the project holds the capacity of its rack;
+    /// status buffers are sized to match (smaller spares come back and
+    /// are replaced).
+    fn follow_engine_capacity(&mut self) {
+        self.engine_capacity = rack_capacity(self.doc.project.machines.len());
+        self.pool.set_capacity(self.engine_capacity);
     }
 
     /// Clears `pending`, taking back the rack generations of the

@@ -4,7 +4,7 @@
 //! process() is real-time safe: no allocation, locking or I/O.
 
 use crate::host::{PatternData, PositionStatus};
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
+use crate::machine::{MachineType, MachineUid, rack_capacity};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::project::{MAX_NOTES, PATTERNS, Project};
@@ -12,7 +12,7 @@ use crate::rack::{CompiledSong, MachineDsp, RackSwap, Slot, SlotPatterns};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
-use crate::sequencer::{Mode, SeqEvent, Sequencer};
+use crate::sequencer::{Mode, PENDING_PER_TRACK, SeqBuffers, SeqEvent, Sequencer};
 use crate::song::{Banks, MAX_SONG_STEPS};
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,38 +41,44 @@ const SLOT_EVENTS: usize = {
     if m > notes { m } else { notes }
 };
 
-/// Room in the sequencer event buffer for the worst tick of a rack with
-/// `param_count` params (globals included): every automation lane (a song
-/// holds at most one lane per param) plus every slot at its worst, for a
-/// full `MAX_MACHINES` rack. Reserved up front so the buffer never grows
-/// on the audio thread.
-fn event_reserve(param_count: usize) -> usize {
-    param_count + MAX_MACHINES * SLOT_EVENTS
+/// Room in the sequencer event buffer for the worst tick of any rack of
+/// up to `capacity` machines: every automation lane (a song holds at most
+/// one lane per param, so at most `max_param_count(capacity)`) plus every
+/// slot at its worst. Reserved up front so the buffer never grows on the
+/// audio thread; a rack past `capacity` brings a bigger one (`Growth`).
+pub(crate) fn event_reserve(capacity: usize) -> usize {
+    max_param_count(capacity) + capacity * SLOT_EVENTS
 }
 
 // Held-back events come out of the same buffer, a batch at a time.
-const _: () = assert!(crate::sequencer::PENDING <= MAX_MACHINES * SLOT_EVENTS);
+const _: () = assert!(PENDING_PER_TRACK <= SLOT_EVENTS);
 
-/// The most params any rack can have: `MAX_MACHINES` of the type with the
-/// most knobs, plus the globals. The event buffer is reserved for it so a
-/// rack edit never needs a bigger one. Allocates (construction only).
-fn max_param_count() -> usize {
+/// The most params a rack of `capacity` machines can have: that many of
+/// the type with the most knobs, plus the globals. The event buffer is
+/// reserved for it so a rack edit within the capacity never needs a
+/// bigger one. Allocates (construction only).
+fn max_param_count(capacity: usize) -> usize {
     let per_slot = MachineType::ALL
         .iter()
         .map(|&t| MachineParam::all_for(t).len())
         .max()
         .unwrap_or(0);
-    GLOBALS + MAX_MACHINES * per_slot
+    GLOBALS + capacity * per_slot
 }
 
-/// Whether `song` can play on a rack with `param_count` params, where
-/// `fits` tells which params the rack has: a lane per position at most,
-/// each sorted by start with starts and the end within `MAX_SONG_STEPS`,
-/// pattern refs within the bank, and at most one automation lane per
-/// param, each on a param the rack has.
-fn song_fits(song: &CompiledSong, param_count: usize, fits: impl Fn(ParamId) -> bool) -> bool {
+/// Whether `song` can play on a rack of `capacity` positions with
+/// `param_count` params, where `fits` tells which params the rack has: a
+/// lane per position at most, each sorted by start with starts and the
+/// end within `MAX_SONG_STEPS`, pattern refs within the bank, and at most
+/// one automation lane per param, each on a param the rack has.
+fn song_fits(
+    song: &CompiledSong,
+    capacity: usize,
+    param_count: usize,
+    fits: impl Fn(ParamId) -> bool,
+) -> bool {
     let max = MAX_SONG_STEPS as u32;
-    let blocks_ok = song.lanes.len() <= MAX_MACHINES
+    let blocks_ok = song.lanes.len() <= capacity
         && song.lanes.iter().all(|lane| {
             lane.windows(2).all(|w| w[0].start < w[1].start)
                 && lane
@@ -87,7 +93,7 @@ fn song_fits(song: &CompiledSong, param_count: usize, fits: impl Fn(ParamId) -> 
 
 pub struct Engine {
     sample_rate: f32,
-    /// The rack, in order; capacity `MAX_MACHINES` so it never grows.
+    /// The rack, in order; room for the rack capacity so it never grows.
     slots: Vec<Slot>,
     /// Send effects and master bus.
     mixer: Mixer,
@@ -121,13 +127,14 @@ impl Engine {
     /// Builds an engine with a project loaded. Allocates; call off the
     /// audio thread.
     pub fn from_project(sample_rate: f32, p: &Project) -> Engine {
+        let capacity = rack_capacity(p.machines.len());
         let global_ids: [GlobalParam; GLOBALS] = std::array::from_fn(|i| GlobalParam::all()[i]);
         let defaults = global_ids.map(|g| g.info().default);
         let mut e = Self {
             sample_rate,
-            slots: Vec::with_capacity(MAX_MACHINES),
+            slots: Vec::with_capacity(capacity),
             mixer: Mixer::new(sample_rate, Self::MAX_BLOCK),
-            seq: Sequencer::new(sample_rate),
+            seq: Sequencer::new(sample_rate, capacity),
             events: Vec::new(),
             global_ids,
             global_knobs: defaults,
@@ -143,21 +150,26 @@ impl Engine {
         e
     }
 
-    /// Rebuilds the rack from `p` (one slot per machine, in rack order, at
-    /// most `MAX_MACHINES`) and loads its globals, song, tempo and pattern
-    /// selection. Not real-time safe: call while stopped or from a
-    /// non-audio thread before handing the engine to the audio thread.
+    /// Rebuilds the rack from `p` (one slot per machine, in rack order),
+    /// growing the rack capacity if `p` needs more, and loads its globals,
+    /// song, tempo and pattern selection. Not real-time safe: call while
+    /// stopped or from a non-audio thread before handing the engine to the
+    /// audio thread.
     pub(crate) fn load_project(&mut self, p: &Project) {
+        let capacity = rack_capacity(p.machines.len()).max(self.capacity());
+        if capacity > self.capacity() {
+            self.seq.grow(&mut SeqBuffers::new(capacity));
+        }
         self.slots.clear();
+        self.slots.reserve(capacity);
         self.take_shared_ns();
         self.slots.extend(
             p.machines
                 .iter()
-                .take(MAX_MACHINES)
                 .map(|m| Slot::from_entry(m, self.sample_rate)),
         );
         self.param_count = GLOBALS + self.slots.iter().map(|s| s.knobs.len()).sum::<usize>();
-        self.events = Vec::with_capacity(event_reserve(max_param_count().max(self.param_count)));
+        self.events = Vec::with_capacity(event_reserve(capacity));
         for i in 0..GLOBALS {
             let id = ParamId::from(self.global_ids[i]);
             self.set_param(id, p.param(id));
@@ -168,7 +180,7 @@ impl Engine {
         self.set_seed(p.seed);
         // Every position takes its machine's selection; empty ones go back
         // to the first pattern.
-        for pos in 0..MAX_MACHINES {
+        for pos in 0..capacity {
             let selected = p
                 .machines
                 .get(pos)
@@ -188,20 +200,38 @@ impl Engine {
         self.slots.len()
     }
 
+    /// Rack positions the engine holds without a `Growth`.
+    pub fn capacity(&self) -> usize {
+        self.seq.capacity()
+    }
+
     /// Where each new position's slot comes from, and the new rack's
-    /// types, if `swap` is well formed: `order` within `MAX_MACHINES`
-    /// without repeats, `fresh` as long as `order` with each slot under its
-    /// own uid, every other uid in the rack now, an empty `into` with room
-    /// for a full rack, and a song that fits the new rack.
+    /// types, if `swap` is well formed: `order` within the capacity after
+    /// the swap without repeats, `fresh` as long as `order` with each slot
+    /// under its own uid, every other uid in the rack now, an empty `into`
+    /// with room for the new rack and the capacity now, a growth (if any)
+    /// sized for a bigger capacity than now, and a song that fits the new
+    /// rack.
     fn check_rack(&self, swap: &mut RackSwap) -> bool {
         let n = swap.order.len();
-        if n > MAX_MACHINES
+        let capacity = swap.growth.as_ref().map_or(self.capacity(), |g| g.capacity);
+        let events_room = swap
+            .growth
+            .as_ref()
+            .map_or(self.events.capacity(), |g| g.events.capacity());
+        // Its events buffer is checked against the new rack below
+        // (`event_reserve` allocates, so it can't be asked here).
+        let growth_ok = swap.growth.as_ref().is_none_or(|g| {
+            g.capacity > self.capacity() && g.seq.fits(g.capacity) && g.events.is_empty()
+        });
+        if n > capacity
+            || !growth_ok
             || swap.fresh.len() != n
             || swap.map.len() != n
             || swap.tys.len() != n
             || swap.selected.len() != n
             || !swap.into.is_empty()
-            || swap.into.capacity() < n.max(MAX_MACHINES)
+            || swap.into.capacity() < n.max(self.capacity())
         {
             return false;
         }
@@ -235,8 +265,10 @@ impl Engine {
                 .is_some_and(|ty| p.index_for(ty).is_some()),
             ParamId::Fx(_) | ParamId::Master(_) => id.global().is_some(),
         };
-        let fits_events = event_reserve(param_count) <= self.events.capacity();
-        fits_events && song_fits(&swap.song, param_count, fits)
+        // Every automation lane (at most one per param) plus every
+        // position at its worst.
+        let fits_events = param_count + capacity * SLOT_EVENTS <= events_room;
+        fits_events && song_fits(&swap.song, capacity, param_count, fits)
     }
 
     /// Swaps in a new rack (real-time safe: nothing is built, dropped or
@@ -251,6 +283,12 @@ impl Engine {
     pub fn set_rack(&mut self, swap: &mut RackSwap) -> bool {
         if !self.check_rack(swap) {
             return false;
+        }
+        // Checked above: bigger buffers, empty, the old ones going back.
+        if let Some(g) = swap.growth.as_mut() {
+            self.seq.grow(&mut g.seq);
+            self.events.clear();
+            std::mem::swap(&mut self.events, &mut g.events);
         }
         let bpm = self.seq.bpm();
         for i in 0..swap.order.len() {
@@ -613,7 +651,8 @@ impl Engine {
     /// Swaps in a new song (real-time safe). An invalid song leaves both
     /// sides untouched and returns false.
     pub fn swap_song(&mut self, song: &mut CompiledSong) -> bool {
-        if !song_fits(song, self.param_count, |id| self.locate(id).is_some()) {
+        let fits = |id| self.locate(id).is_some();
+        if !song_fits(song, self.capacity(), self.param_count, fits) {
             return false;
         }
         std::mem::swap(&mut self.song, song);
@@ -855,7 +894,7 @@ impl Engine {
                 // After this tick's notes, so a note on a step boundary
                 // sounds on it. Each Mono clocks from its own block.
                 let clocks = self.seq.tick_clocks();
-                for (s, &(tick, tick_len)) in self.slots.iter_mut().zip(&clocks) {
+                for (s, &(tick, tick_len)) in self.slots.iter_mut().zip(clocks) {
                     if let MachineDsp::Mono(m) = &mut s.dsp {
                         m.clock_tick(tick, tick_len);
                     }
@@ -912,8 +951,84 @@ mod tests {
     };
     use crate::project::{DrumPattern, NotePattern, SynthPattern};
     use crate::project::{MachineBody, MachineEntry};
-    use crate::rack::RackSwap;
+    use crate::rack::{Growth, RackSwap};
     use crate::testutil::{all_finite, peak, rms};
+
+    #[test]
+    #[ignore = "needs Task 6"]
+    fn a_rack_edit_past_the_capacity_grows_it_and_keeps_playing_state() {
+        let mut p = Project::default();
+        while p.machines.len() < 16 {
+            let m = p.new_machine(MachineType::Kit909);
+            p.insert_machine(p.machines.len(), m).unwrap();
+        }
+        let mut e = Engine::from_project(SR, &p);
+        assert_eq!(e.capacity(), 16);
+        e.play();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for _ in 0..100 {
+            e.process(&mut l, &mut r);
+        }
+        let before = e.positions();
+        let mut q = p.clone();
+        let m = q.new_machine(MachineType::Fm);
+        q.insert_machine(q.machines.len(), m).unwrap();
+        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
+        assert_eq!(swap.capacity, 32);
+        assert!(swap.growth.is_some());
+        assert!(e.set_rack(&mut swap));
+        assert_eq!(e.capacity(), 32);
+        let after = e.positions();
+        assert_eq!(
+            after.playhead[..16],
+            before.playhead[..16],
+            "tracks kept their place"
+        );
+        assert_eq!(after.len(), 17);
+        let g = swap.growth.as_ref().unwrap();
+        assert_eq!(
+            g.seq.tracks.len(),
+            16,
+            "the old buffers come back for disposal"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs Task 6"]
+    fn a_swap_beyond_the_engines_capacity_without_growth_is_refused() {
+        let p = Project::default();
+        let mut e = Engine::from_project(SR, &p);
+        let mut q = p.clone();
+        for _ in 0..12 {
+            let m = q.new_machine(MachineType::Fm);
+            q.insert_machine(q.machines.len(), m).unwrap();
+        }
+        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
+        swap.growth = None;
+        assert!(!e.set_rack(&mut swap));
+        assert_eq!(e.slot_uids(), p.rack_uids());
+    }
+
+    #[test]
+    fn growth_with_the_same_rack_moves_state_into_bigger_buffers() {
+        let p = Project::default();
+        let mut e = Engine::from_project(SR, &p);
+        e.play();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for _ in 0..100 {
+            e.process(&mut l, &mut r);
+        }
+        let before = e.positions();
+        let mut q = p.clone();
+        q.machines.swap(0, 1); // a real edit, so the swap is sent
+        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, 16);
+        swap.capacity = 32;
+        swap.growth = Some(Growth::new(32));
+        assert!(e.set_rack(&mut swap));
+        assert_eq!(e.capacity(), 32);
+        let after = e.positions();
+        assert_eq!(after.playhead[0], before.playhead[1]);
+    }
 
     /// Uid of the standard rack's machine at position `pos`.
     fn pos_uid(pos: usize) -> MachineUid {
@@ -1098,7 +1213,7 @@ mod tests {
         assert_eq!(eng.slot_capacity(), MAX_MACHINES);
         assert_eq!(p.song.automation.len(), eng.param_count, "a lane per param");
         let reserve = eng.events.capacity();
-        assert!(reserve >= event_reserve(eng.param_count));
+        assert!(reserve >= event_reserve(eng.capacity()));
         let mut most = 0;
         let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
         for mode in [Mode::Pattern, Mode::Song] {
@@ -1200,7 +1315,7 @@ mod tests {
             "FM 2".into(),
         ));
         q.next_uid = 8;
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         eng.set_rack(&mut swap);
         let order: Vec<u16> = eng.slot_uids().iter().map(|u| u.0).collect();
         assert_eq!(order, [2, 3, 5, 6, 1, 7]);
@@ -1227,7 +1342,7 @@ mod tests {
         }
         q.machines.push(e);
         q.next_uid = 8;
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         eng.set_rack(&mut swap);
         assert_eq!(
             eng.positions().playhead[6],
@@ -1250,7 +1365,7 @@ mod tests {
             "FM 2".into(),
         ));
         q.next_uid = 8;
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         assert!(eng.set_rack(&mut swap));
         // Position 4 is the demo's FM, on the same default pattern.
         assert_ne!(eng.positions().playhead[4], 0, "past step 0");
@@ -1282,7 +1397,7 @@ mod tests {
         q.song.lane_mut(MachineUid(7)).extend(
             [0, 16].map(|start| crate::project::Block::new(start, crate::project::PatternRef(2))),
         );
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         assert!(eng.set_rack(&mut swap));
         assert_eq!(
             eng.positions().patterns[6],
@@ -1318,7 +1433,7 @@ mod tests {
         eng.process(&mut l, &mut r);
         let mut q = p.clone();
         q.machines.retain(|m| m.uid != MachineUid(1));
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         eng.set_rack(&mut swap);
         eng.process(&mut l, &mut r);
         assert!(l.iter().any(|s| s.abs() > 1e-4), "FM still sounding");
@@ -1339,7 +1454,7 @@ mod tests {
         e.selected = 9;
         q.machines.insert(0, e);
         q.next_uid = 8;
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR, eng.capacity());
         assert!(swap.fresh[0].is_some() && swap.fresh[1..].iter().all(Option::is_none));
         assert!(eng.set_rack(&mut swap));
         let pats = eng.positions().patterns;
@@ -1361,7 +1476,7 @@ mod tests {
             "FM 2".into(),
         ));
         q.next_uid = 8;
-        let good = || RackSwap::build(&q, &before, SR);
+        let good = || RackSwap::build(&q, &before, SR, 16);
         // Duplicate uid.
         let mut dup = good();
         dup.order[1] = dup.order[0];
@@ -1375,7 +1490,21 @@ mod tests {
         // Fresh list of the wrong length.
         let mut short = good();
         short.fresh.pop();
-        for mut swap in [dup, unknown, long, short] {
+        // A growth no bigger than the engine holds.
+        let mut same = good();
+        same.growth = Some(Growth::new(16));
+        // A growth whose buffers are smaller than its capacity.
+        let mut odd = good();
+        let mut g = Growth::new(32);
+        g.capacity = 48;
+        (odd.capacity, odd.growth) = (48, Some(g));
+        odd.into = Vec::with_capacity(48);
+        // A growth with no room for events.
+        let mut mute = good();
+        let mut g = Growth::new(32);
+        g.events = Vec::new();
+        (mute.capacity, mute.growth) = (32, Some(g));
+        for mut swap in [dup, unknown, long, short, same, odd, mute] {
             let fresh = swap.fresh.iter().filter(|s| s.is_some()).count();
             assert!(!eng.set_rack(&mut swap));
             assert_eq!(eng.slot_uids(), before);
@@ -1402,7 +1531,7 @@ mod tests {
         let mut q = p.clone();
         let first = q.machines.remove(0);
         q.machines.push(first);
-        let mut swap = RackSwap::build(&q, &b.slot_uids(), SR);
+        let mut swap = RackSwap::build(&q, &b.slot_uids(), SR, b.capacity());
         assert!(b.set_rack(&mut swap));
         let by_uid = |e: &mut Engine| {
             let uids = e.slot_uids();
@@ -1431,7 +1560,7 @@ mod tests {
         let mut q = p.clone();
         let fm = q.machines.remove(4);
         q.machines.insert(0, fm);
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR, eng.capacity());
         assert!(eng.set_rack(&mut swap));
         let map = &swap.map;
         assert_eq!(map[0], Some(4));
@@ -1449,7 +1578,7 @@ mod tests {
         q.machines.swap(0, 2);
         let added = q.new_machine(MachineType::Fm);
         q.insert_machine(q.machines.len(), added).unwrap();
-        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR);
+        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
         assert!(e.set_rack(&mut swap));
         assert_eq!(
             swap.map,
@@ -1522,7 +1651,7 @@ mod tests {
         let mut q = p.clone();
         q.machines.reverse();
         let before = eng.peek_cpu_ns();
-        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
+        let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0, eng.capacity());
         eng.set_rack(&mut swap);
         let after = eng.peek_cpu_ns();
         for i in 0..6 {

@@ -674,9 +674,9 @@ fn a_rack_swap_through_the_host_does_not_allocate() {
     q.next_uid = 8;
     q.song.lanes.retain(|(u, _)| *u != MachineUid(3));
     q.validate().unwrap();
-    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
     // And a malformed one (a repeated uid), refused without allocating.
-    let mut bad = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    let mut bad = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
     bad.order[1] = bad.order[0];
     tx.push(Command::SetMode(Mode::Song)).ok().unwrap();
     tx.push(Command::Play).ok().unwrap();
@@ -728,7 +728,7 @@ fn machines_joining_mid_pattern_do_not_allocate() {
     }
     q.next_uid = 10;
     q.validate().unwrap();
-    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+    let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
     tx.push(Command::Play).ok().unwrap();
     for _ in 0..77 {
         host.process(&mut l, &mut r);
@@ -741,4 +741,26 @@ fn machines_joining_mid_pattern_do_not_allocate() {
     });
     assert_eq!(n, 0);
     assert_eq!(host.engine().slot_uids().len(), q.machines.len());
+}
+
+#[test]
+fn growing_the_rack_through_the_host_does_not_allocate() {
+    use acid_engine::rack::{Growth, RackSwap};
+    let p = busy_project();
+    let (mut host, mut tx, mut rx) = host::channel(Engine::from_project(SR, &p));
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    let mut q = p.clone();
+    q.machines.swap(0, 1);
+    let mut swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, 16);
+    swap.capacity = 32;
+    swap.growth = Some(Growth::new(32));
+    tx.push(Command::SetRack(swap)).ok().unwrap();
+    let n = count_allocs(|| {
+        for _ in 0..400 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    assert_eq!(host.engine().capacity(), 32);
+    while rx.pop().is_ok() {}
 }

@@ -575,7 +575,7 @@ mod tests {
         let (mut host, mut tx, mut rx) = host_with_demo();
         let mut q = crate::demo::demo_project();
         q.machines.retain(|m| m.uid != MachineUid(3));
-        let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR);
+        let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
         tx.push(Command::SetRack(swap)).unwrap();
         run(&mut host, SR as usize / 30);
         let (mut rack, mut gens) = (None, Vec::new());
@@ -615,7 +615,12 @@ mod tests {
         assert_eq!(last_gen(&mut rx), Some(1), "a new engine is a new rack");
         let mut q = p.clone();
         q.machines.pop();
-        let swap = crate::rack::RackSwap::build(&q, &host.engine().slot_uids(), SR);
+        let swap = crate::rack::RackSwap::build(
+            &q,
+            &host.engine().slot_uids(),
+            SR,
+            host.engine().capacity(),
+        );
         tx.push(Command::SetRack(swap)).unwrap();
         run(&mut host, 2048);
         assert_eq!(last_gen(&mut rx), Some(2));
@@ -632,7 +637,12 @@ mod tests {
         );
         p.machines.push(extra);
         p.next_uid = 8;
-        let mut swap = crate::rack::RackSwap::build(&p, &host.engine().slot_uids(), SR);
+        let mut swap = crate::rack::RackSwap::build(
+            &p,
+            &host.engine().slot_uids(),
+            SR,
+            host.engine().capacity(),
+        );
         // Malformed: uid 7 is neither a fresh slot nor in the engine.
         swap.fresh[6] = None;
         tx.push(Command::SetRack(swap)).unwrap();
