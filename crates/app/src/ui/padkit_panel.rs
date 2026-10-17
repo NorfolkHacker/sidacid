@@ -9,7 +9,7 @@ impl SidAcidApp {
     pub(crate) fn padkit_panel(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let slot = self.selected(uid);
         let title = format!(
-            "{} PADS   {}",
+            "{}   {}",
             self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label()
         );
