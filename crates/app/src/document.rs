@@ -4,7 +4,7 @@
 
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
-use acid_engine::machine::{MachineType, MachineUid, default_name};
+use acid_engine::machine::{MACHINE_COLOURS, MachineType, MachineUid, default_name};
 use acid_engine::padkit::MAX_LAYERS;
 use acid_engine::padkit::pad::Pad;
 use acid_engine::padkit::play::PadPlay;
@@ -157,6 +157,12 @@ pub enum Edit {
         uid: MachineUid,
         name: String,
     },
+    /// Setting a machine's colour (an index into the palette, below
+    /// `machine::MACHINE_COLOURS`).
+    MachineColour {
+        uid: MachineUid,
+        colour: u8,
+    },
     /// Several edits as one undo step (a record pass), applied in order.
     Group(Vec<Edit>),
 }
@@ -218,7 +224,8 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::InsertMachine { .. }
         | Edit::RemoveMachine { .. }
         | Edit::MoveMachine { .. }
-        | Edit::RenameMachine { .. } => MergeKey::Rack,
+        | Edit::RenameMachine { .. }
+        | Edit::MachineColour { .. } => MergeKey::Rack,
     }
 }
 
@@ -521,6 +528,9 @@ impl Document {
             }
             Edit::MoveMachine { uid, to } => p.position(*uid).expect(NO_MACHINE) == *to,
             Edit::RenameMachine { uid, name } => p.machine(*uid).expect(NO_MACHINE).name == *name,
+            Edit::MachineColour { uid, colour } => {
+                p.machine(*uid).expect(NO_MACHINE).colour == *colour
+            }
             Edit::PadKitMeta {
                 uid,
                 pad,
@@ -818,6 +828,15 @@ impl Document {
         self.apply(Edit::RenameMachine { uid, name }, false)
     }
 
+    /// Gives `uid` (in the rack) palette colour `colour`; one past the
+    /// palette is no edit.
+    pub fn set_machine_colour(&mut self, uid: MachineUid, colour: u8) -> Vec<Command> {
+        if colour as usize >= MACHINE_COLOURS {
+            return Vec::new();
+        }
+        self.apply(Edit::MachineColour { uid, colour }, false)
+    }
+
     /// Why the last `apply` or `record` changed nothing, once.
     pub fn take_refusal(&mut self) -> Option<&'static str> {
         self.refusal.take()
@@ -1111,6 +1130,13 @@ impl Document {
                 uid,
                 name: std::mem::replace(&mut p.machine_mut(uid).expect(NO_MACHINE).name, name),
             },
+            Edit::MachineColour { uid, colour } => Edit::MachineColour {
+                uid,
+                colour: std::mem::replace(
+                    &mut p.machine_mut(uid).expect(NO_MACHINE).colour,
+                    colour,
+                ),
+            },
             // All or nothing: a refused child undoes the ones before it.
             Edit::Group(edits) => {
                 let mut inverses = Vec::with_capacity(edits.len());
@@ -1212,11 +1238,13 @@ impl Document {
                         .map_or(SlotPlay::EMPTY, |d| SlotPlay::from_meta(&d.meta)),
                 ),
             }],
-            // The app resends the whole rack after any rack edit.
+            // The app resends the whole rack after any rack edit; a
+            // colour is the app's alone.
             Edit::InsertMachine { .. }
             | Edit::RemoveMachine { .. }
             | Edit::MoveMachine { .. }
-            | Edit::RenameMachine { .. } => Vec::new(),
+            | Edit::RenameMachine { .. }
+            | Edit::MachineColour { .. } => Vec::new(),
             Edit::Group(edits) => edits.iter().flat_map(|e| self.commands_for(e)).collect(),
         }
     }
@@ -2681,6 +2709,28 @@ mod tests {
         assert_eq!(d.project, end);
         assert!(d.project.machine(copy).is_some());
         assert_eq!(d.project.machines[0].name, "Breaks");
+    }
+
+    #[test]
+    fn a_colour_change_is_one_undo_step() {
+        let mut d = Document::new(acid_engine::demo::demo_project());
+        let colour = |d: &Document| d.project.machine(KIT808).unwrap().colour;
+        assert_eq!(colour(&d), 2);
+        assert!(
+            d.set_machine_colour(KIT808, 4).is_empty(),
+            "no engine commands"
+        );
+        assert_eq!(colour(&d), 4);
+        assert_eq!(d.undo_depth(), 1);
+        d.set_machine_colour(KIT808, 4);
+        d.set_machine_colour(KIT808, MACHINE_COLOURS as u8);
+        assert_eq!(d.undo_depth(), 1, "the same colour, or none, is no step");
+        assert!(d.is_dirty());
+        d.undo();
+        assert_eq!(colour(&d), 2);
+        assert!(!d.is_dirty());
+        d.redo();
+        assert_eq!(colour(&d), 4);
     }
 
     #[test]

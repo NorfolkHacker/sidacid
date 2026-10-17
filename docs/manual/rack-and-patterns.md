@@ -1,12 +1,12 @@
 # The rack and patterns
 
-This chapter covers the rack: the machine types, how to add, duplicate, remove, move and rename machines, and what a machine panel's header shows. It also covers patterns: the 128 patterns each machine holds, selecting them, queued switching while playing, pattern length and transpose, copying patterns, and the dice that write or rewrite a whole pattern. Each machine's own knobs are covered in its own chapter.
+This chapter covers the rack: the machine types, how to add, duplicate, remove, move, rename and recolour machines, and what a machine panel's header shows. It also covers patterns: the 128 patterns each machine holds, selecting them, queued switching while playing, pattern length and transpose, copying patterns, and the dice that write or rewrite a whole pattern. Each machine's own knobs are covered in its own chapter.
 
 ## Machines
 
 A *machine* is one sound source in the rack, with its own patterns, its own knobs and its own mixer channel. The rack lists the machines from top to bottom, and the same order is used for the lanes in the editor dock, the mixer strips and the song lanes.
 
-Each machine has its own colour, taken from its place in the rack: the first machine is green, then cyan, magenta, yellow and blue, and the sixth starts again at green. The colour is used for the machine's panel title and frame, its notes in the editor dock, its blocks in Song mode, and its name and meter in the mixer. Moving a machine changes its colour.
+Each machine has a colour: green, cyan, magenta, yellow or blue. A new machine gets the colour fewest machines in the rack have (the first in that order when several tie), and you can pick another with the colour square in its panel header (see [Changing a machine's colour](#changing-a-machines-colour)). The colour is used for the machine's panel title and frame, its notes in the editor dock, its blocks in Song mode, and its name and meter in the mixer. A machine keeps its colour when you move it.
 
 These are the machine types, as the **+ Add machine** menu names them:
 
@@ -38,7 +38,7 @@ Click **+ Add machine ⏷** below the last panel and pick a type. The new machin
 
 ### Duplicating a machine
 
-Click the duplicate button (🗐) in a panel's header. The copy goes directly below the original and is named after it with " copy" added, for example "Synth 1 copy". It gets everything the original has: every pattern, every knob, its mixer channel settings and, for a sampler, its loaded samples. It doesn't get the original's blocks in the song: its song lane starts empty. The copy becomes the focused machine.
+Click the duplicate button (🗐) in a panel's header. The copy goes directly below the original and is named after it with " copy" added, for example "Synth 1 copy". It gets everything the original has: every pattern, every knob, its mixer channel settings and, for a sampler, its loaded samples. It doesn't get the original's blocks in the song: its song lane starts empty. Like a new machine, it gets the colour fewest machines have, so it usually differs from the original's. The copy becomes the focused machine.
 
 Duplicating a sampler copies its samples too, so it can use a lot of memory. If that would leave the system short of free memory, SidAcid asks first (see [the low-memory warning](mixer-and-effects.md#the-low-memory-warning)).
 
@@ -48,7 +48,7 @@ Click the remove button (🗙) in a panel's header. The machine goes at once, wi
 
 ### Moving a machine
 
-Click ⬆ (Move up) or ⬇ (Move down) in a panel's header to move the machine one place. Move up is greyed out on the first machine, and Move down on the last. The machine takes the colour of its new place (see [Machines](#machines)).
+Click ⬆ (Move up) or ⬇ (Move down) in a panel's header to move the machine one place. Move up is greyed out on the first machine, and Move down on the last. The machine keeps its colour.
 
 ### Renaming a machine
 
@@ -56,11 +56,16 @@ Double-click the machine's name in its panel header. Type the new name, then pre
 
 Names are shown in capitals in the panel header and as typed elsewhere, for example in the dock's lanes.
 
+### Changing a machine's colour
+
+Click the colour square in front of the machine's name in its panel header. A row of the five colours opens below it, with the current one outlined. Click a colour to give it to the machine: its panel, notes, song blocks and mixer strip change at once, and **Ctrl+Z** puts the old colour back. **Esc**, or clicking somewhere else, closes the row without a change.
+
 ## Panel headers
 
 Each machine panel starts with a header row. From left to right:
 
 - **Collapse arrow.** Click it to fold the panel down to its header, or open it again. Only the arrow does this: clicking the name doesn't.
+- **Colour square.** The machine's colour. Click it to pick another (see [Changing a machine's colour](#changing-a-machines-colour)).
 - **Title.** The machine's name in capitals, followed by the selected pattern, for example "SYNTH 1   A01". Drum kit titles add "DRUMS" after the name ("KIT A DRUMS   A01"). The FM and Mono titles end with the name of the voice or patch last loaded. The title is drawn in the machine's colour, and so is the thin frame around the panel. The focused machine's frame is brighter than the others.
 - **CPU n%.** The share of the audio time this machine takes, shown while audio runs. It turns amber above 25 % and red above 50 %.
 - **⬆ ⬇ 🗐 🗙.** Move up, Move down, Duplicate and Remove, as described above.

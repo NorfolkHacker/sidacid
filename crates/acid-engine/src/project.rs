@@ -4,7 +4,7 @@
 //! `validate` on load.
 
 use crate::drums::KitKind;
-use crate::machine::{MachineType, MachineUid, standard_rack};
+use crate::machine::{MACHINE_COLOURS, MachineType, MachineUid, standard_rack};
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::scale::Key;
 use serde::{Deserialize, Serialize};
@@ -579,6 +579,11 @@ pub struct MachineEntry {
     /// How this machine's lane looks in the editor dock.
     #[serde(default, skip_serializing_if = "LaneView::is_default")]
     pub lane: LaneView,
+    /// Its colour, an index into the palette (below
+    /// `machine::MACHINE_COLOURS`). Absent in older files: loading gives
+    /// such a machine its rack position's colour.
+    #[serde(default = "MachineEntry::no_colour")]
+    pub colour: u8,
 }
 
 /// A machine's lane in the editor dock: its height and what it shows.
@@ -650,7 +655,16 @@ impl MachineEntry {
                 .collect(),
             body: MachineBody::new(ty),
             lane: LaneView::for_type(ty),
+            colour: 0,
         }
+    }
+
+    /// A machine read from a file without a colour, until loading gives
+    /// it one.
+    pub(crate) const NO_COLOUR: u8 = u8::MAX;
+
+    fn no_colour() -> u8 {
+        Self::NO_COLOUR
     }
 
     pub fn machine_type(&self) -> MachineType {
@@ -706,7 +720,11 @@ impl Default for Project {
             swing: 0.0,
             machines: standard_rack()
                 .into_iter()
-                .map(|(uid, ty, name)| MachineEntry::new(uid, ty, name.into()))
+                .enumerate()
+                .map(|(i, (uid, ty, name))| MachineEntry {
+                    colour: (i % MACHINE_COLOURS) as u8,
+                    ..MachineEntry::new(uid, ty, name.into())
+                })
                 .collect(),
             next_uid: 7,
             globals: GlobalParam::all()
@@ -978,6 +996,9 @@ impl Project {
         if m.selected as usize >= PATTERNS {
             return bad("selected pattern out of range".into());
         }
+        if m.colour as usize >= MACHINE_COLOURS {
+            return bad(format!("colour {} is out of range", m.colour));
+        }
         let count = match &m.body {
             MachineBody::Synth(s) => s.patterns.len(),
             MachineBody::Kit(k) => k.patterns.len(),
@@ -1064,6 +1085,16 @@ impl Project {
         Ok(())
     }
 
+    /// A machine read without a colour (saved before machines kept one)
+    /// takes the one its rack position gave it then.
+    pub(crate) fn colour_uncoloured(&mut self) {
+        for (i, m) in self.machines.iter_mut().enumerate() {
+            if m.colour == MachineEntry::NO_COLOUR {
+                m.colour = (i % MACHINE_COLOURS) as u8;
+            }
+        }
+    }
+
     pub fn to_ron(&self) -> String {
         ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .expect("project serialises")
@@ -1109,6 +1140,7 @@ impl Project {
             v => return Err(ProjectError::TooNew(v)),
         };
         p.version = PROJECT_VERSION;
+        p.colour_uncoloured();
         // Kits older builds named "808"/"909" (plus a number) take today's
         // default names; a name the user typed is kept.
         for m in &mut p.machines {
@@ -1162,6 +1194,61 @@ mod tests {
         // a file without the field loads as Chromatic
         let old = Project::default().to_ron();
         assert_eq!(Project::from_ron(&old).unwrap().key, Key::default());
+    }
+
+    fn colours(p: &Project) -> Vec<u8> {
+        p.machines.iter().map(|m| m.colour).collect()
+    }
+
+    #[test]
+    fn the_standard_rack_and_the_demo_take_the_colours_in_rack_order() {
+        assert_eq!(colours(&Project::default()), [0, 1, 2, 3, 4, 0]);
+        assert_eq!(colours(&crate::demo::demo_project()), [0, 1, 2, 3, 4, 0]);
+    }
+
+    #[test]
+    fn machine_colours_round_trip_and_one_past_the_palette_is_refused() {
+        let mut p = Project::default();
+        for (m, c) in p.machines.iter_mut().zip([4, 4, 0, 2, 1, 3]) {
+            m.colour = c;
+        }
+        let ron = p.to_ron();
+        assert!(ron.contains("colour: 4"));
+        assert_eq!(Project::from_ron(&ron).unwrap(), p);
+        p.machines[2].colour = MACHINE_COLOURS as u8 - 1;
+        assert!(p.validate().is_ok());
+        p.machines[2].colour = MACHINE_COLOURS as u8;
+        match p.validate() {
+            Err(ProjectError::Invalid(e)) => assert_eq!(e, "Kit A: colour 5 is out of range"),
+            other => panic!("{other:?}"),
+        }
+        let ron = p.to_ron();
+        assert!(Project::from_ron(&ron).is_err(), "nor is it loaded");
+    }
+
+    #[test]
+    fn a_file_without_colours_loads_with_rack_order_colours() {
+        // Today's version, saved before machines kept a colour: seven
+        // machines, so the sixth and seventh start the palette again.
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::Mono).unwrap();
+        p.insert_machine(2, m).unwrap();
+        for m in &mut p.machines {
+            m.colour = 4;
+        }
+        let text: String = p
+            .to_ron()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("colour:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(!text.contains("colour"));
+        let back = Project::from_ron(&text).unwrap();
+        assert_eq!(colours(&back), [0, 1, 2, 3, 4, 0, 1]);
+        // An older version's file.
+        let v4 = crate::migrate::ProjectV4::standard();
+        let back = Project::from_ron(&ron::ser::to_string(&v4).unwrap()).unwrap();
+        assert_eq!(colours(&back), [0, 1, 2, 3, 4, 0]);
     }
 
     #[test]

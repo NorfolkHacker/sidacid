@@ -94,7 +94,7 @@ impl SidAcidApp {
                                 .collect();
                             for (pos, (uid, name)) in strips.into_iter().enumerate() {
                                 ui.vertical(|ui| {
-                                    let colour = theme::machine_colour(pos);
+                                    let colour = self.machine_colour(uid);
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(name).strong().color(colour));
                                         meter(ui, self.shown.meter(pos), colour);

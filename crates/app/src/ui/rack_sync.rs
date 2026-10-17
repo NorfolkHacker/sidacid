@@ -94,6 +94,15 @@ impl SidAcidApp {
         self.sync_rack();
     }
 
+    /// Gives `uid` palette colour `colour`, as one undo step.
+    pub(crate) fn set_machine_colour(&mut self, uid: MachineUid, colour: u8) {
+        if self.doc.project.machine(uid).is_none() {
+            return;
+        }
+        let cmds = self.doc.set_machine_colour(uid, colour);
+        self.send(cmds);
+    }
+
     /// After any document change that can change the rack: if the rack
     /// differs from the engine's, sends one `SetRack` built against the
     /// engine's order, drops the UI state of machines that left and shows

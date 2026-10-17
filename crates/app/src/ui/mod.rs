@@ -803,13 +803,15 @@ impl SidAcidApp {
             .collect()
     }
 
-    /// `uid`'s colour, by its rack position (`theme::machine_colour`);
+    /// `uid`'s colour (its entry's index into `theme::MACHINE_COLOURS`);
     /// ACID when it is not in the rack.
     pub(crate) fn machine_colour(&self, uid: MachineUid) -> egui::Color32 {
         self.doc
             .project
-            .position(uid)
-            .map_or(theme::ACID, theme::machine_colour)
+            .machine(uid)
+            .and_then(|m| theme::MACHINE_COLOURS.get(m.colour as usize))
+            .copied()
+            .unwrap_or(theme::ACID)
     }
 
     /// The machine keyboard shortcuts act on: the focused one while it is
@@ -1019,7 +1021,7 @@ pub(crate) mod tests {
     use acid_engine::project::Project;
 
     #[test]
-    fn a_machine_takes_the_colour_of_its_rack_position() {
+    fn a_machine_keeps_its_colour_until_another_is_picked() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         assert_eq!(app.machine_colour(SYNTH1), theme::MACHINE_COLOURS[0]);
         assert_eq!(app.machine_colour(KIT808), theme::MACHINE_COLOURS[2]);
@@ -1031,10 +1033,24 @@ pub(crate) mod tests {
         app.move_machine(SAMPLER, 1);
         assert_eq!(
             app.machine_colour(SAMPLER),
-            theme::MACHINE_COLOURS[1],
-            "moving recolours"
+            theme::MACHINE_COLOURS[0],
+            "moving keeps it"
         );
-        assert_eq!(app.machine_colour(SYNTH2), theme::MACHINE_COLOURS[2]);
+        assert_eq!(app.machine_colour(SYNTH2), theme::MACHINE_COLOURS[1]);
+        app.set_machine_colour(SAMPLER, 3);
+        assert_eq!(app.machine_colour(SAMPLER), theme::MACHINE_COLOURS[3]);
+        app.undo();
+        assert_eq!(app.machine_colour(SAMPLER), theme::MACHINE_COLOURS[0]);
+        app.redo();
+        assert_eq!(app.machine_colour(SAMPLER), theme::MACHINE_COLOURS[3]);
+        let added = app
+            .add_machine(acid_engine::machine::MachineType::Fm)
+            .unwrap();
+        assert_eq!(
+            app.machine_colour(added),
+            theme::MACHINE_COLOURS[0],
+            "a new machine takes the least-used colour"
+        );
         assert_eq!(
             app.machine_colour(MachineUid(99)),
             theme::ACID,

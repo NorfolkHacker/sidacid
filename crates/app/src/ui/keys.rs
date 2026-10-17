@@ -87,8 +87,9 @@ impl SidAcidApp {
         // A combo's list open in the tool's popup takes Esc first: egui
         // closes just that, and the next Esc cancels. Only the popup's own
         // combo counts (as it last drew), so a list left behind when the
-        // tool closed some other way never holds Esc.
-        let popup = self.tool_combo_open();
+        // tool closed some other way never holds Esc. A machine's colour
+        // popup takes Esc the same way.
+        let popup = self.tool_combo_open() || self.colour_popup_open(ctx);
         if self.view.tool.is_some() && !popup {
             let esc = |e: &egui::Event| {
                 matches!(

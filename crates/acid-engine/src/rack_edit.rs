@@ -1,7 +1,7 @@
 //! Rack edits on a [`Project`]: add, duplicate, remove/restore, move, rename.
 //! Pure data; re-exported from `project`.
 
-use crate::machine::{MachineType, MachineUid, default_name};
+use crate::machine::{MACHINE_COLOURS, MachineType, MachineUid, default_name};
 use crate::params::ParamId;
 use crate::project::{AutoLane, Block, MachineBody, MachineEntry, ParamLane, Project};
 
@@ -20,21 +20,39 @@ pub struct RemovedMachine {
 }
 
 impl Project {
-    /// A fresh machine of `ty` with the next uid and a default name; does not insert it.
-    /// None once every uid has been used.
+    /// The palette colour fewest machines in the rack have; the first such
+    /// in palette order on a tie. What a new machine or a copy takes.
+    pub fn least_used_colour(&self) -> u8 {
+        let mut used = [0usize; MACHINE_COLOURS];
+        for m in &self.machines {
+            if let Some(n) = used.get_mut(m.colour as usize) {
+                *n += 1;
+            }
+        }
+        // `min_by_key` keeps the first of equal counts.
+        (0..MACHINE_COLOURS).min_by_key(|&c| used[c]).unwrap_or(0) as u8
+    }
+
+    /// A fresh machine of `ty` with the next uid, a default name and the least-used colour;
+    /// does not insert it. None once every uid has been used.
     pub fn new_machine(&mut self, ty: MachineType) -> Option<MachineEntry> {
         let names: Vec<&str> = self.machines.iter().map(|m| m.name.as_str()).collect();
         let name = default_name(ty, &names);
-        Some(MachineEntry::new(self.take_uid()?, ty, name))
+        let colour = self.least_used_colour();
+        Some(MachineEntry {
+            colour,
+            ..MachineEntry::new(self.take_uid()?, ty, name)
+        })
     }
 
-    /// Deep copy of `uid` with a new uid and "<name> copy"; synth param lanes on the source
-    /// itself are retargeted to the copy. Does not insert it. None if absent or the uids have
-    /// run out.
+    /// Deep copy of `uid` with a new uid, "<name> copy" and the least-used colour; synth
+    /// param lanes on the source itself are retargeted to the copy. Does not insert it. None
+    /// if absent or the uids have run out.
     pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineEntry> {
         let mut copy = self.machine(uid)?.clone();
         copy.uid = self.take_uid()?;
         copy.name = format!("{} copy", copy.name);
+        copy.colour = self.least_used_colour();
         // The copy's own lanes drive the copy, not the source; other targets stay.
         if let MachineBody::Synth(s) = &mut copy.body {
             for lane in s.patterns.iter_mut().filter_map(|p| p.param_lane.as_mut()) {
@@ -197,6 +215,46 @@ mod tests {
         assert_eq!((b.uid, b.name.as_str()), (MachineUid(8), "Synth 3"));
         assert_eq!(p.next_uid, 9);
         p.validate().unwrap();
+    }
+
+    fn colours(p: &Project) -> Vec<u8> {
+        p.machines.iter().map(|m| m.colour).collect()
+    }
+
+    #[test]
+    fn a_machine_keeps_its_colour_when_moved() {
+        let mut p = Project::default();
+        p.machines[5].colour = 3;
+        p.move_machine(MachineUid(6), 1).unwrap();
+        assert_eq!(p.machine(MachineUid(6)).unwrap().colour, 3);
+        assert_eq!(colours(&p), [0, 3, 1, 2, 3, 4], "the others keep theirs");
+    }
+
+    #[test]
+    fn new_machines_and_copies_take_the_least_used_colour() {
+        let mut p = Project::default();
+        assert_eq!(colours(&p), [0, 1, 2, 3, 4, 0]);
+        assert_eq!(p.least_used_colour(), 1, "a tie goes to palette order");
+        for (set, want) in [
+            ([0, 0, 1, 1, 2, 3], 4),
+            ([2, 2, 2, 2, 2, 2], 0),
+            ([4, 3, 0, 1, 0, 1], 2),
+            ([1, 1, 2, 2, 3, 4], 0),
+        ] {
+            for (m, c) in p.machines.iter_mut().zip(set) {
+                m.colour = c;
+            }
+            assert_eq!(p.least_used_colour(), want, "{set:?}");
+            assert_eq!(p.new_machine(MachineType::Fm).unwrap().colour, want);
+            assert_eq!(p.duplicate_machine(MachineUid(1)).unwrap().colour, want);
+        }
+        // A copy beside its source differs, unless every colour ties.
+        let mut p = Project::default();
+        assert_eq!(p.duplicate_machine(MachineUid(2)).unwrap().colour, 1);
+        p.remove_machine(MachineUid(6)).unwrap();
+        assert_eq!(p.duplicate_machine(MachineUid(1)).unwrap().colour, 0);
+        p.machines.clear();
+        assert_eq!(p.least_used_colour(), 0, "an empty rack");
     }
 
     #[test]

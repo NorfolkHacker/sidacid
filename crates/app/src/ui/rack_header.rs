@@ -1,11 +1,11 @@
-//! Machine panel headers with the rack controls (move, duplicate, remove,
-//! rename by double-click), and the Add bar below the last machine.
+//! Machine panel headers with the rack controls (colour, move, duplicate,
+//! remove, rename by double-click), and the Add bar below the last machine.
 //!
 //! Clicks are queued in `ViewState::rack_action` and applied once the
 //! whole rack has been drawn (`rack_action_after_draw`): the rack must not
 //! change while its panels are being drawn from it.
 
-use super::SidAcidApp;
+use super::{SidAcidApp, theme};
 use acid_engine::machine::{MachineType, MachineUid};
 use eframe::egui::{self, collapsing_header::CollapsingState};
 
@@ -28,6 +28,28 @@ pub enum RackAction {
     Duplicate(MachineUid),
     Remove(MachineUid),
     Add(MachineType),
+    /// A swatch picked in the machine's colour popup.
+    Colour(MachineUid, u8),
+}
+
+/// Side of the colour square in a panel header and of the swatches in
+/// its popup.
+const SQUARE: f32 = 12.0;
+const SWATCH: f32 = 18.0;
+
+/// The colour square in `uid`'s panel header.
+pub(crate) fn colour_square_id(uid: MachineUid) -> egui::Id {
+    egui::Id::new(("machine_colour", uid))
+}
+
+/// `uid`'s colour popup.
+fn colour_popup_id(uid: MachineUid) -> egui::Id {
+    egui::Id::new(("machine_colour_popup", uid))
+}
+
+/// Swatch `colour` in `uid`'s colour popup.
+pub(crate) fn colour_swatch_id(uid: MachineUid, colour: u8) -> egui::Id {
+    egui::Id::new(("machine_colour_swatch", uid, colour))
 }
 
 /// The id of panel `(salt, uid)`'s open/closed state, made in the panel's
@@ -97,6 +119,17 @@ impl SidAcidApp {
         }
     }
 
+    /// A machine's colour popup is open: Esc is its, to close it.
+    pub(crate) fn colour_popup_open(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| {
+            self.doc
+                .project
+                .machines
+                .iter()
+                .any(|e| m.is_popup_open(colour_popup_id(e.uid)))
+        })
+    }
+
     /// Ends the rename, keeping the name.
     pub(crate) fn cancel_rename(&mut self) {
         self.view.renaming = None;
@@ -131,6 +164,7 @@ impl SidAcidApp {
             RackAction::Add(ty) => {
                 self.add_machine(ty);
             }
+            RackAction::Colour(uid, colour) => self.set_machine_colour(uid, colour),
         }
     }
 
@@ -165,9 +199,10 @@ impl SidAcidApp {
         });
     }
 
-    /// The header row after the collapse arrow: the title (or the rename
-    /// box), then the rack buttons at the right.
+    /// The header row after the collapse arrow: the colour square, the
+    /// title (or the rename box), then the rack buttons at the right.
     fn panel_header(&mut self, ui: &mut egui::Ui, uid: MachineUid, title: &str) {
+        self.colour_square(ui, uid);
         let renaming = self.view.renaming.as_ref().is_some_and(|(u, _)| *u == uid);
         if renaming {
             self.rename_box(ui, uid, title);
@@ -231,6 +266,56 @@ impl SidAcidApp {
                 .on_hover_text("Share of the audio time this machine takes");
             }
         });
+    }
+
+    /// The square in the machine's colour; a click opens a popup of the
+    /// palette's swatches (the current one ringed). Picking one queues it;
+    /// a click elsewhere or Esc closes the popup with no change.
+    fn colour_square(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
+        let current = self.doc.project.machine(uid).map(|m| m.colour);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(SQUARE, SQUARE), egui::Sense::hover());
+        let square = ui
+            .interact(rect, colour_square_id(uid), egui::Sense::click())
+            .on_hover_text("Colour");
+        ui.painter()
+            .rect_filled(rect, 2.0, self.machine_colour(uid));
+        if square.hovered() {
+            let stroke = ui.visuals().widgets.hovered.fg_stroke;
+            ui.painter()
+                .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Outside);
+        }
+        let popup = colour_popup_id(uid);
+        if square.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup));
+        }
+        let close = egui::PopupCloseBehavior::CloseOnClickOutside;
+        let picked = egui::popup_below_widget(ui, popup, &square, close, |ui| {
+            ui.horizontal(|ui| {
+                let mut picked = None;
+                for (i, &c) in theme::MACHINE_COLOURS.iter().enumerate() {
+                    let i = i as u8;
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(SWATCH, SWATCH), egui::Sense::hover());
+                    let r = ui.interact(rect, colour_swatch_id(uid, i), egui::Sense::click());
+                    ui.painter().rect_filled(rect.shrink(2.0), 2.0, c);
+                    if current == Some(i) || r.hovered() {
+                        let stroke = ui.visuals().widgets.active.fg_stroke;
+                        ui.painter()
+                            .rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+                    }
+                    if r.clicked() {
+                        picked = Some(i);
+                    }
+                }
+                picked
+            })
+            .inner
+        })
+        .flatten();
+        if let Some(colour) = picked {
+            ui.memory_mut(|m| m.close_popup());
+            self.view.rack_action = Some(RackAction::Colour(uid, colour));
+        }
     }
 
     /// The inline name editor: Enter commits; Escape or clicking elsewhere
@@ -301,6 +386,97 @@ mod tests {
         assert_eq!(on.color, c);
         assert_eq!(off.color, c.gamma_multiply(0.35));
         assert_eq!(on.width, off.width, "the panel does not shift on focus");
+    }
+
+    /// One frame of `events` at egui time `time`.
+    fn frame(app: &mut SidAcidApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+    }
+
+    /// Clicks at `at`, from egui time `time`, then draws a frame more.
+    fn click(app: &mut SidAcidApp, ctx: &egui::Context, at: egui::Pos2, time: f64) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(app, ctx, time, vec![egui::Event::PointerMoved(at)]);
+        frame(app, ctx, time + 0.05, vec![button(true)]);
+        frame(app, ctx, time + 0.1, vec![button(false)]);
+        frame(app, ctx, time + 0.15, vec![]);
+    }
+
+    fn centre(ctx: &egui::Context, id: egui::Id) -> egui::Pos2 {
+        ctx.read_response(id)
+            .unwrap_or_else(|| panic!("{id:?} is not drawn"))
+            .rect
+            .center()
+    }
+
+    #[test]
+    fn the_colour_square_opens_the_swatches_and_a_pick_is_one_undo_step() {
+        let ctx = egui::Context::default();
+        let mut app = demo();
+        crate::ui::run_frames_in(&ctx, &mut app, 2);
+        click(&mut app, &ctx, centre(&ctx, colour_square_id(KIT808)), 1.0);
+        assert!(app.colour_popup_open(&ctx), "the square opens the popup");
+        click(
+            &mut app,
+            &ctx,
+            centre(&ctx, colour_swatch_id(KIT808, 4)),
+            2.0,
+        );
+        assert!(!app.colour_popup_open(&ctx), "a pick closes it");
+        assert_eq!(app.machine_colour(KIT808), theme::MACHINE_COLOURS[4]);
+        assert_eq!(app.doc.undo_depth(), 1);
+        app.undo();
+        assert_eq!(app.machine_colour(KIT808), theme::MACHINE_COLOURS[2]);
+        app.redo();
+        assert_eq!(app.machine_colour(KIT808), theme::MACHINE_COLOURS[4]);
+    }
+
+    #[test]
+    fn esc_or_a_click_elsewhere_closes_the_swatches_with_no_change() {
+        let ctx = egui::Context::default();
+        let mut app = demo();
+        crate::ui::run_frames_in(&ctx, &mut app, 2);
+        let square = centre(&ctx, colour_square_id(SYNTH2));
+        click(&mut app, &ctx, square, 1.0);
+        assert!(app.colour_popup_open(&ctx));
+        let esc = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, &ctx, 2.0, vec![esc.clone()]);
+        frame(&mut app, &ctx, 2.1, vec![]);
+        assert!(!app.colour_popup_open(&ctx), "Esc closes it");
+        click(&mut app, &ctx, square, 3.0);
+        assert!(app.colour_popup_open(&ctx));
+        let elsewhere = square + egui::vec2(0.0, 150.0);
+        click(&mut app, &ctx, elsewhere, 4.0);
+        assert!(!app.colour_popup_open(&ctx), "a click elsewhere closes it");
+        assert_eq!(app.machine_colour(SYNTH2), theme::MACHINE_COLOURS[1]);
+        assert!(!app.doc.can_undo(), "no edit");
+        // With a note tool open, Esc closes the popup first, then the tool.
+        app.open_tool(crate::ui::tool_menu::ToolKind::Quantize);
+        assert!(app.view.tool.is_some());
+        click(&mut app, &ctx, square, 5.0);
+        assert!(app.colour_popup_open(&ctx));
+        frame(&mut app, &ctx, 6.0, vec![esc.clone()]);
+        frame(&mut app, &ctx, 6.1, vec![]);
+        assert!(!app.colour_popup_open(&ctx));
+        assert!(app.view.tool.is_some(), "the tool stays open");
+        frame(&mut app, &ctx, 7.0, vec![esc]);
+        assert!(app.view.tool.is_none(), "the next Esc cancels it");
     }
 
     #[test]

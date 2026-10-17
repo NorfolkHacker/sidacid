@@ -307,6 +307,7 @@ impl ProjectV4 {
                     params: m.params,
                     body: m.body.upgrade(),
                     lane: Default::default(),
+                    colour: MachineEntry::NO_COLOUR,
                 })
                 .collect(),
             next_uid: self.next_uid,
@@ -420,9 +421,10 @@ impl ProjectV5 {
     /// A v6 project: each bar's cells become blocks at the bar's start,
     /// as long as the bar (`len: None` when the pattern is exactly that
     /// long), so the song plays, ends and loops exactly as before.
+    /// Machines take their rack position's colour.
     pub(crate) fn upgrade(self) -> Project {
         let song = convert_song(&self.song, Banks::of_machines(&self.machines));
-        Project {
+        let mut p = Project {
             version: PROJECT_VERSION,
             name: self.name,
             bpm: self.bpm,
@@ -433,7 +435,9 @@ impl ProjectV5 {
             song,
             key: Default::default(),
             seed: 0,
-        }
+        };
+        p.colour_uncoloured();
+        p
     }
 }
 

@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 /// Rack capacity grows in steps of this many machines.
 pub const RACK_CHUNK: usize = 16;
 
+/// Size of the machine colour palette: a machine's `colour` is an index
+/// below this (the app holds the colours themselves).
+pub const MACHINE_COLOURS: usize = 5;
+
 /// The capacity an engine holds for a rack of `machines`.
 pub fn rack_capacity(machines: usize) -> usize {
     machines.div_ceil(RACK_CHUNK).max(1) * RACK_CHUNK

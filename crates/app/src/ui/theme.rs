@@ -18,8 +18,8 @@ pub const KNOB_TRACK: Color32 = Color32::from_rgb(0x55, 0x5A, 0x60);
 pub const GRID_BG: Color32 = Color32::from_rgb(0x1A, 0x1C, 0x20);
 pub const GRID_DARK: Color32 = Color32::from_rgb(0x14, 0x15, 0x18);
 pub const GRID_LINE: Color32 = Color32::from_rgb(0x30, 0x33, 0x38);
-/// Each machine's own colour, by rack position (cycling): its notes in
-/// the dock and Song mode, its panel title and frame, its mixer strip.
+/// The machine colours, by a machine's `colour` index: its notes in the
+/// dock and Song mode, its panel title and frame, its mixer strip.
 pub const MACHINE_COLOURS: [Color32; 5] = [
     Color32::from_rgb(0x00, 0xFF, 0x41),
     Color32::from_rgb(0x00, 0xE5, 0xFF),
@@ -27,11 +27,6 @@ pub const MACHINE_COLOURS: [Color32; 5] = [
     Color32::from_rgb(0xFF, 0xFF, 0x00),
     Color32::from_rgb(0x00, 0x80, 0xFF),
 ];
-
-/// The colour of the machine at rack position `pos`.
-pub fn machine_colour(pos: usize) -> Color32 {
-    MACHINE_COLOURS[pos % MACHINE_COLOURS.len()]
-}
 
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
@@ -74,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_colours_cycle_in_rack_order() {
+    fn the_machine_palette_is_the_engines_five() {
         let hex = |c: Color32| (c.r(), c.g(), c.b());
         let want = [
             (0x00, 0xFF, 0x41),
@@ -84,14 +79,6 @@ mod tests {
             (0x00, 0x80, 0xFF),
         ];
         assert_eq!(MACHINE_COLOURS.map(hex), want);
-        for (pos, &c) in MACHINE_COLOURS.iter().enumerate() {
-            assert_eq!(machine_colour(pos), c);
-        }
-        assert_eq!(
-            machine_colour(5),
-            MACHINE_COLOURS[0],
-            "the sixth starts again"
-        );
-        assert_eq!(machine_colour(6), MACHINE_COLOURS[1]);
+        assert_eq!(MACHINE_COLOURS.len(), acid_engine::machine::MACHINE_COLOURS);
     }
 }
