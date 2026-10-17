@@ -1,7 +1,7 @@
 //! Rack edits on a [`Project`]: add, duplicate, remove/restore, move, rename.
 //! Pure data; re-exported from `project`.
 
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid, default_name};
+use crate::machine::{MachineType, MachineUid, default_name};
 use crate::params::ParamId;
 use crate::project::{AutoLane, Block, MachineBody, MachineEntry, ParamLane, Project};
 
@@ -21,17 +21,19 @@ pub struct RemovedMachine {
 
 impl Project {
     /// A fresh machine of `ty` with the next uid and a default name; does not insert it.
-    pub fn new_machine(&mut self, ty: MachineType) -> MachineEntry {
+    /// None once every uid has been used.
+    pub fn new_machine(&mut self, ty: MachineType) -> Option<MachineEntry> {
         let names: Vec<&str> = self.machines.iter().map(|m| m.name.as_str()).collect();
         let name = default_name(ty, &names);
-        MachineEntry::new(self.take_uid(), ty, name)
+        Some(MachineEntry::new(self.take_uid()?, ty, name))
     }
 
     /// Deep copy of `uid` with a new uid and "<name> copy"; synth param lanes on the source
-    /// itself are retargeted to the copy. Does not insert it. None if absent.
+    /// itself are retargeted to the copy. Does not insert it. None if absent or the uids have
+    /// run out.
     pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineEntry> {
         let mut copy = self.machine(uid)?.clone();
-        copy.uid = self.take_uid();
+        copy.uid = self.take_uid()?;
         copy.name = format!("{} copy", copy.name);
         // The copy's own lanes drive the copy, not the source; other targets stay.
         if let MachineBody::Synth(s) = &mut copy.body {
@@ -46,9 +48,9 @@ impl Project {
         Some(copy)
     }
 
-    /// Inserts at `index` (clamped to len); None if the rack is full or the uid is taken.
+    /// Inserts at `index` (clamped to len); None if the uid is taken.
     pub fn insert_machine(&mut self, index: usize, entry: MachineEntry) -> Option<()> {
-        if self.machines.len() >= MAX_MACHINES || self.machine(entry.uid).is_some() {
+        if self.machine(entry.uid).is_some() {
             return None;
         }
         // Keep `next_uid` above every uid in the rack, whatever the entry's origin.
@@ -164,11 +166,13 @@ impl Project {
         Some(std::mem::replace(&mut m.name, name))
     }
 
-    /// The next uid; uids are never reused.
-    fn take_uid(&mut self) -> MachineUid {
+    /// The next uid, or None once every u16 uid has been used; uids are
+    /// never reused. `u16::MAX` itself is never handed out, so `next_uid`
+    /// stays above every uid in the rack.
+    fn take_uid(&mut self) -> Option<MachineUid> {
         let uid = MachineUid(self.next_uid);
-        self.next_uid += 1;
-        uid
+        self.next_uid = self.next_uid.checked_add(1)?;
+        Some(uid)
     }
 }
 
@@ -186,24 +190,17 @@ mod tests {
     #[test]
     fn new_machines_take_fresh_uids_and_default_names() {
         let mut p = Project::default();
-        let a = p.new_machine(MachineType::Kit909);
+        let a = p.new_machine(MachineType::Kit909).unwrap();
         assert_eq!((a.uid, a.name.as_str()), (MachineUid(7), "Kit B 2"));
         p.insert_machine(p.machines.len(), a).unwrap();
-        let b = p.new_machine(MachineType::Synth);
+        let b = p.new_machine(MachineType::Synth).unwrap();
         assert_eq!((b.uid, b.name.as_str()), (MachineUid(8), "Synth 3"));
         assert_eq!(p.next_uid, 9);
         p.validate().unwrap();
     }
 
     #[test]
-    fn the_rack_refuses_a_seventeenth_machine_and_a_taken_uid() {
-        let mut p = Project::default();
-        while p.machines.len() < MAX_MACHINES {
-            let m = p.new_machine(MachineType::Fm);
-            p.insert_machine(p.machines.len(), m).unwrap();
-        }
-        let extra = p.new_machine(MachineType::Fm);
-        assert!(p.insert_machine(0, extra).is_none());
+    fn the_rack_refuses_a_taken_uid() {
         let mut q = Project::default();
         let dup = q.machines[0].clone();
         assert!(q.insert_machine(0, dup).is_none());

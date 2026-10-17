@@ -1,4 +1,4 @@
-//! The whole groovebox: a rack of up to `MAX_MACHINES` slots (each a
+//! The whole groovebox: a rack of slots (each a
 //! machine's DSP, knobs, patterns and channel strip), the shared send
 //! effects and master bus, and the sequencer, rendered sample-accurately.
 //! process() is real-time safe: no allocation, locking or I/O.
@@ -945,7 +945,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::fm::FmSynth;
-    use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
+    use crate::machine::{MachineType, MachineUid, RACK_CHUNK};
     use crate::params::{
         ChannelParam, DrumParam, FmParam, KitParam, MasterParam, OpParam, SynthParam,
     };
@@ -955,11 +955,10 @@ mod tests {
     use crate::testutil::{all_finite, peak, rms};
 
     #[test]
-    #[ignore = "needs Task 6"]
     fn a_rack_edit_past_the_capacity_grows_it_and_keeps_playing_state() {
         let mut p = Project::default();
         while p.machines.len() < 16 {
-            let m = p.new_machine(MachineType::Kit909);
+            let m = p.new_machine(MachineType::Kit909).unwrap();
             p.insert_machine(p.machines.len(), m).unwrap();
         }
         let mut e = Engine::from_project(SR, &p);
@@ -971,7 +970,7 @@ mod tests {
         }
         let before = e.positions();
         let mut q = p.clone();
-        let m = q.new_machine(MachineType::Fm);
+        let m = q.new_machine(MachineType::Fm).unwrap();
         q.insert_machine(q.machines.len(), m).unwrap();
         let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
         assert_eq!(swap.capacity, 32);
@@ -994,13 +993,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs Task 6"]
     fn a_swap_beyond_the_engines_capacity_without_growth_is_refused() {
         let p = Project::default();
         let mut e = Engine::from_project(SR, &p);
         let mut q = p.clone();
         for _ in 0..12 {
-            let m = q.new_machine(MachineType::Fm);
+            let m = q.new_machine(MachineType::Fm).unwrap();
             q.insert_machine(q.machines.len(), m).unwrap();
         }
         let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
@@ -1127,11 +1125,11 @@ mod tests {
         q.machines[2].selected = 2;
         eng.load_project(&q);
         let patterns = |eng: &Engine| -> Vec<u8> {
-            (0..MAX_MACHINES)
+            (0..RACK_CHUNK)
                 .map(|i| eng.seq.current_pattern(i))
                 .collect()
         };
-        let mut want = vec![0; MAX_MACHINES];
+        let mut want = vec![0; RACK_CHUNK];
         want[2] = 2;
         assert_eq!(patterns(&eng), want, "positions past the rack reset too");
         eng.load_project(&p);
@@ -1149,11 +1147,11 @@ mod tests {
         use crate::project::{MachineBody, Note, ParamLane};
         use crate::steps::{ACID_VEL, DrumGrid, DrumHit};
         let mut p = Project::default();
-        p.machines = (1..=MAX_MACHINES as u16)
+        p.machines = (1..=RACK_CHUNK as u16)
             .zip(types.iter().cycle())
             .map(|(u, &ty)| MachineEntry::new(MachineUid(u), ty, format!("M{u}")))
             .collect();
-        p.next_uid = MAX_MACHINES as u16 + 1;
+        p.next_uid = RACK_CHUNK as u16 + 1;
         for m in &mut p.machines {
             let uid = m.uid;
             match &mut m.body {
@@ -1209,8 +1207,8 @@ mod tests {
     /// tick produced, asserting the event buffer never grew.
     fn busiest_tick(p: &Project) -> usize {
         let mut eng = Engine::from_project(SR, p);
-        assert_eq!(eng.slots.len(), MAX_MACHINES);
-        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
+        assert_eq!(eng.slots.len(), RACK_CHUNK);
+        assert_eq!(eng.slot_capacity(), RACK_CHUNK);
         assert_eq!(p.song.automation.len(), eng.param_count, "a lane per param");
         let reserve = eng.events.capacity();
         assert!(reserve >= event_reserve(eng.capacity()));
@@ -1232,10 +1230,10 @@ mod tests {
     #[test]
     fn a_full_rack_tick_fits_the_event_reserve() {
         let mixed = busiest_tick(&dense_rack(&MachineType::ALL));
-        assert!(mixed > MAX_MACHINES * 128, "{mixed}");
+        assert!(mixed > RACK_CHUNK * 128, "{mixed}");
         let notes = busiest_tick(&dense_rack(&[MachineType::Fm, MachineType::Sampler]));
         assert!(
-            notes >= MAX_MACHINES * (128 + MAX_NOTES),
+            notes >= RACK_CHUNK * (128 + MAX_NOTES),
             "every note slot releases 128 and starts MAX_NOTES on a wrap: {notes}"
         );
     }
@@ -1285,7 +1283,7 @@ mod tests {
         p.next_uid = 17;
         p.validate().unwrap();
         let eng = Engine::from_project(48000.0, &p);
-        assert_eq!(eng.slot_capacity(), MAX_MACHINES);
+        assert_eq!(eng.slot_capacity(), RACK_CHUNK);
         let mut too_many = p.clone();
         too_many.machines.push(MachineEntry::new(
             MachineUid(17),
@@ -1293,7 +1291,9 @@ mod tests {
             "FM 2".into(),
         ));
         too_many.next_uid = 18;
-        assert!(too_many.validate().is_err());
+        too_many.validate().unwrap();
+        let eng = Engine::from_project(48000.0, &too_many);
+        assert_eq!(eng.slot_capacity(), 2 * RACK_CHUNK);
     }
 
     #[test]
@@ -1576,7 +1576,7 @@ mod tests {
         let mut e = Engine::from_project(SR, &p);
         let mut q = p.clone();
         q.machines.swap(0, 2);
-        let added = q.new_machine(MachineType::Fm);
+        let added = q.new_machine(MachineType::Fm).unwrap();
         q.insert_machine(q.machines.len(), added).unwrap();
         let mut swap = RackSwap::build(&q, &e.slot_uids(), SR, e.capacity());
         assert!(e.set_rack(&mut swap));
@@ -1626,7 +1626,7 @@ mod tests {
         for _ in 0..200 {
             eng.process(&mut l, &mut r);
         }
-        let mut ns = [0u64; MAX_MACHINES];
+        let mut ns = [0u64; RACK_CHUNK];
         eng.take_slot_stats(|pos, _, t| ns[pos] = t);
         let pos_s = p.position(sampler_uid).unwrap();
         let pos_y = 1 - pos_s;
@@ -1680,12 +1680,11 @@ mod tests {
             b
         }
 
-        /// Slot peaks by rack position (unused positions 0), the master at
-        /// `MAX_MACHINES`; resets them.
-        fn take_all_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
-            let mut m = [0.0; MAX_MACHINES + 1];
+        /// Slot peaks by rack position, the master last; resets them.
+        fn take_all_meters(&mut self) -> Vec<f32> {
+            let mut m = vec![0.0; self.slots.len()];
             self.take_slot_stats(|pos, v, _| m[pos] = v);
-            m[MAX_MACHINES] = self.take_master_meter();
+            m.push(self.take_master_meter());
             m
         }
 
@@ -2223,8 +2222,9 @@ mod tests {
             m[..4].iter().all(|v| *v > 0.01),
             "both synths and kits: {m:?}"
         );
-        assert!(m[MAX_MACHINES] > 0.01, "{m:?}");
-        assert!(m[MAX_MACHINES] <= 1.0 + 1e-6, "master is post-clip");
+        let master = *m.last().unwrap();
+        assert!(master > 0.01, "{m:?}");
+        assert!(master <= 1.0 + 1e-6, "master is post-clip");
         e.stop();
         render(&mut e, 5.0);
         e.take_all_meters();
@@ -2381,7 +2381,7 @@ mod tests {
             (vec![vec![b(0, PATTERNS as u8)]], None),
             (vec![vec![b(16, 0), b(0, 0)]], None),
             (vec![vec![b(0, 0), b(0, 1)]], None),
-            (vec![vec![]; crate::machine::MAX_MACHINES + 1], None),
+            (vec![vec![]; e.capacity() + 1], None),
             (Vec::new(), Some(max + 1)),
         ] {
             let mut bad = CompiledSong {
@@ -2714,7 +2714,7 @@ mod tests {
         use crate::project::{MachineBody, Note};
         let mut p = Project::default();
         p.bpm = 120.0;
-        let mut m = p.new_machine(MachineType::Mono);
+        let mut m = p.new_machine(MachineType::Mono).unwrap();
         m.params.insert(MachineParam::Mono(MonoParam::ArpOn), 1.0);
         if let MachineBody::Mono(mono) = &mut m.body {
             let pat = &mut mono.patterns[0];
@@ -2745,7 +2745,7 @@ mod tests {
         use crate::project::{Block, MachineBody, Note, PatternRef};
         let mut p = Project::default();
         p.bpm = 120.0;
-        let mut m = p.new_machine(MachineType::Mono);
+        let mut m = p.new_machine(MachineType::Mono).unwrap();
         m.params.insert(MachineParam::Mono(MonoParam::ArpOn), 1.0);
         // 1/4: a step every 4 sixteenths.
         m.params.insert(MachineParam::Mono(MonoParam::ArpRate), 0.0);

@@ -145,17 +145,17 @@ fn pattern_mode_does_not_allocate() {
 }
 
 #[test]
-fn a_sixteen_slot_rack_does_not_allocate() {
-    use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
+fn a_forty_slot_rack_does_not_allocate() {
+    use acid_engine::machine::{MachineType, MachineUid};
     use acid_engine::project::MachineEntry;
     let mut p = busy_project();
     p.machines.swap(0, 3);
     let types = MachineType::ALL.iter().cycle();
-    for (u, &ty) in (7..=MAX_MACHINES as u16).zip(types) {
+    for (u, &ty) in (7..=40u16).zip(types) {
         p.machines
             .push(MachineEntry::new(MachineUid(u), ty, format!("M{u}")));
     }
-    p.next_uid = MAX_MACHINES as u16 + 1;
+    p.next_uid = 41;
     p.validate().unwrap();
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
@@ -168,16 +168,16 @@ fn a_sixteen_slot_rack_does_not_allocate() {
     assert_eq!(n, 0);
 }
 
-/// `busy_project` grown to `MAX_MACHINES` slots of every type, reordered,
+/// `busy_project` grown to forty slots of every type, reordered,
 /// each new machine playing its type's busy pattern, all in a looped song
 /// with automation on new machines' params.
-fn busy_sixteen_slot_project() -> Project {
-    use acid_engine::machine::{MAX_MACHINES, MachineUid};
+fn busy_forty_slot_project() -> Project {
+    use acid_engine::machine::MachineUid;
     use acid_engine::params::{ChannelParam, MachineParam};
     use acid_engine::project::{MachineBody, MachineEntry};
     let mut p = busy_project();
     p.machines.swap(0, 3);
-    for u in 7..=MAX_MACHINES as u16 {
+    for u in 7..=40u16 {
         // Clone a busy machine of the cycling type under a new uid.
         let from = p.machines[(u as usize - 7) % 6].clone();
         p.machines.push(MachineEntry {
@@ -186,7 +186,7 @@ fn busy_sixteen_slot_project() -> Project {
             ..from
         });
     }
-    p.next_uid = MAX_MACHINES as u16 + 1;
+    p.next_uid = 41;
     assert!(
         p.machines
             .iter()
@@ -205,7 +205,7 @@ fn busy_sixteen_slot_project() -> Project {
             (m.uid, blocks)
         })
         .collect();
-    for u in [8u16, 12, 16] {
+    for u in [8u16, 24, 40] {
         let id = ParamId::Machine(MachineUid(u), MachineParam::Channel(ChannelParam::Level));
         acid_engine::song::write_automation(&mut p.song, id, 0, 40, 0.4);
     }
@@ -214,8 +214,8 @@ fn busy_sixteen_slot_project() -> Project {
 }
 
 #[test]
-fn a_sixteen_slot_song_with_automation_does_not_allocate() {
-    let p = busy_sixteen_slot_project();
+fn a_forty_slot_song_with_automation_does_not_allocate() {
+    let p = busy_forty_slot_project();
     let mut e = Engine::from_project(SR, &p);
     let (mut l, mut r) = (vec![0.0; 300], vec![0.0; 300]);
     e.set_mode(Mode::Song);
@@ -473,7 +473,7 @@ fn a_stepping_mono_arp_does_not_allocate() {
     use acid_engine::params::MonoParam as M;
     use acid_engine::project::MachineBody;
     let mut p = busy_project();
-    let mut m = p.new_machine(MachineType::Mono);
+    let mut m = p.new_machine(MachineType::Mono).unwrap();
     for (param, v) in [
         (M::ArpOn, 1.0),
         (M::ArpRate, 0.8), // 1/16T

@@ -4,9 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Largest number of machines a rack may hold.
-pub const MAX_MACHINES: usize = 16;
-
 /// Rack capacity grows in steps of this many machines.
 pub const RACK_CHUNK: usize = 16;
 

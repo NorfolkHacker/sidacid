@@ -26,7 +26,7 @@ const NO_AUDIO_RATE: f32 = 48_000.0;
 
 impl SidAcidApp {
     /// Adds a fresh `ty` machine at the end of the rack (one undo step)
-    /// and focuses it. None when the rack is full.
+    /// and focuses it. None when the rack has no free machine ids.
     pub(crate) fn add_machine(&mut self, ty: MachineType) -> Option<MachineUid> {
         let (uid, cmds) = self.doc.add_machine(ty)?;
         self.send(cmds);
@@ -36,7 +36,7 @@ impl SidAcidApp {
     }
 
     /// Adds a copy of `uid` directly below it (one undo step) and focuses
-    /// it. None when the rack is full or `uid` is not in it.
+    /// it. None when the rack has no free machine ids or `uid` is not in it.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
         if let Some(src) = self.doc.project.sampler(uid) {
             let needed = src.memory_bytes();

@@ -21,7 +21,7 @@ A new project (**File → New**) starts with six machines: Synth 1, Synth 2, Kit
 
 ### The 16-machine limit
 
-The rack holds up to 16 machines. The count is shown next to **+ Add machine** as "n / 16". When the rack is full, **+ Add machine** and every panel's Duplicate button are greyed out, and pointing at them shows "Rack full (16)".
+The rack has no machine limit. The count is shown next to **+ Add machine** as "n machines". Only after every machine id has been used (over 65,000 machines added in one project) are **+ Add machine** and every panel's Duplicate button greyed out, and pointing at them shows "the rack has no free machine ids".
 
 ## Changing the rack
 

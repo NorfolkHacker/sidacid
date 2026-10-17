@@ -6,11 +6,11 @@
 //! change while its panels are being drawn from it.
 
 use super::{SidAcidApp, theme};
-use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
+use acid_engine::machine::{MachineType, MachineUid};
 use eframe::egui::{self, collapsing_header::CollapsingState};
 
-/// Tooltip of Add and Duplicate when the rack is full.
-const RACK_FULL: &str = "Rack full (16)";
+/// Tooltip of Add and Duplicate when every machine id has been used.
+const NO_FREE_IDS: &str = "the rack has no free machine ids";
 
 // Button glyphs. The spec's ↑ ↓ ⧉ ✕ ▾ are not in egui's built-in fonts
 // (they draw as empty boxes), so the nearest glyphs that are stand in.
@@ -39,9 +39,9 @@ fn header_id(ui: &egui::Ui, salt: &'static str, uid: MachineUid) -> egui::Id {
 }
 
 impl SidAcidApp {
-    /// There is room for another machine.
+    /// A fresh machine id is left.
     pub(crate) fn can_add(&self) -> bool {
-        self.doc.project.machines.len() < MAX_MACHINES
+        self.doc.project.next_uid < u16::MAX
     }
 
     /// `uid` is in the rack and not first.
@@ -55,9 +55,12 @@ impl SidAcidApp {
         self.doc.project.position(uid).is_some_and(|i| i + 1 < n)
     }
 
-    /// The Add bar's count, "n / 16".
+    /// The Add bar's count, "1 machine" or "n machines".
     pub(crate) fn rack_count_text(&self) -> String {
-        format!("{} / {MAX_MACHINES}", self.doc.project.machines.len())
+        match self.doc.project.machines.len() {
+            1 => "1 machine".into(),
+            n => format!("{n} machines"),
+        }
     }
 
     /// Starts editing `uid`'s name, from its current name.
@@ -176,7 +179,7 @@ impl SidAcidApp {
             let dup = ui.add_enabled(can_add, egui::Button::new(DUPLICATE));
             if dup
                 .on_hover_text("Duplicate")
-                .on_disabled_hover_text(RACK_FULL)
+                .on_disabled_hover_text(NO_FREE_IDS)
                 .clicked()
             {
                 clicked = Some(RackAction::Duplicate(uid));
@@ -252,7 +255,7 @@ impl SidAcidApp {
                 })
                 .response
             });
-            menu.inner.on_disabled_hover_text(RACK_FULL);
+            menu.inner.on_disabled_hover_text(NO_FREE_IDS);
             ui.label(self.rack_count_text());
         });
     }
@@ -264,7 +267,8 @@ mod tests {
     use crate::document::Document;
     use crate::test_rack::*;
     use crate::ui::run_frames;
-    use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
+    use acid_engine::machine::{MachineType, MachineUid};
+    use acid_engine::project::Project;
     use eframe::egui;
 
     fn demo() -> SidAcidApp {
@@ -372,17 +376,15 @@ mod tests {
     }
 
     #[test]
-    fn a_full_rack_refuses_add_and_duplicate() {
-        let mut app = demo();
-        while app.doc.project.machines.len() < MAX_MACHINES {
+    fn the_add_menu_stays_open_past_sixteen() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        for _ in 0..20 {
             assert!(app.can_add());
             app.add_machine(MachineType::Fm).unwrap();
         }
-        assert!(!app.can_add());
-        assert_eq!(app.rack_count_text(), "16 / 16");
-        assert!(app.add_machine(MachineType::Fm).is_none());
-        assert!(app.duplicate_machine(SYNTH1).is_none());
-        run_frames(&mut app, 2); // a full rack draws its disabled controls
+        assert_eq!(app.doc.project.machines.len(), 26);
+        assert_eq!(app.rack_count_text(), "26 machines");
+        assert_eq!(app.engine_capacity, 32);
     }
 
     #[test]

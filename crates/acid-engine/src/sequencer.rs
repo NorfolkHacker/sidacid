@@ -1615,8 +1615,7 @@ fn next_plays(roll: &NotePattern, t: &Track, p: u16, pos: usize, seed: u32, fill
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::MAX_MACHINES;
-    use crate::machine::{MachineUid, standard_rack};
+    use crate::machine::{MachineUid, RACK_CHUNK, standard_rack};
     use crate::project::{DrumPattern, NotePattern, PatternRef, SynthPattern};
     use crate::steps::{ACID_VEL, DrumGrid, DrumHit, Gate, SynthGrid, SynthStep};
 
@@ -1643,7 +1642,7 @@ mod tests {
 
     #[test]
     fn non_finite_tempo_is_ignored() {
-        let mut seq = Sequencer::new(SR, MAX_MACHINES);
+        let mut seq = Sequencer::new(SR, RACK_CHUNK);
         seq.set_bpm(140.0);
         seq.set_swing(0.3);
         seq.set_bpm(f32::NAN);
@@ -1772,7 +1771,7 @@ mod tests {
     }
 
     fn new_seq() -> Sequencer {
-        let mut s = Sequencer::new(SR, MAX_MACHINES);
+        let mut s = Sequencer::new(SR, RACK_CHUNK);
         s.set_bpm(120.0); // 16th = 5512.5 samples
         s
     }
@@ -3566,7 +3565,7 @@ mod tests {
 
     /// Per (slot, pitch): every acid or poly start is released by the end.
     fn nothing_hangs(ev: &[(usize, SeqEvent)]) {
-        let mut acid = [false; MAX_MACHINES];
+        let mut acid = [false; RACK_CHUNK];
         let mut poly = std::collections::HashSet::new();
         for &(_, e) in ev {
             match e {
@@ -3581,7 +3580,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(acid, [false; MAX_MACHINES], "an acid gate hangs");
+        assert_eq!(acid, [false; RACK_CHUNK], "an acid gate hangs");
         assert!(poly.is_empty(), "poly notes hang: {poly:?}");
     }
 
@@ -3595,15 +3594,10 @@ mod tests {
         s.play();
         let mut ev = f.run(&mut s, at_ticks(3.0) + 1);
         assert!(s.samples_to_due() < usize::MAX, "a gate-off is held back");
-        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
+        let mut map: Vec<Option<usize>> = (0..RACK_CHUNK).map(Some).collect();
         map.swap(0, 1);
         let song = CompiledSong::default();
-        s.rearrange(
-            &map,
-            Banks::of_machines(&f.rack()),
-            &song,
-            &[0; MAX_MACHINES],
-        );
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; RACK_CHUNK]);
         let after = f.run(&mut s, 1500);
         assert_eq!(acid_at(&after), [], "nothing reaches B, now at position 0");
         assert!(
@@ -3633,15 +3627,10 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let mut ev = f.run(&mut s, 1);
-        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
+        let mut map: Vec<Option<usize>> = (0..RACK_CHUNK).map(Some).collect();
         map.swap(4, 5);
         let song = CompiledSong::default();
-        s.rearrange(
-            &map,
-            Banks::of_machines(&f.rack()),
-            &song,
-            &[0; MAX_MACHINES],
-        );
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; RACK_CHUNK]);
         let after = f.run(&mut s, 3000);
         assert!(
             after
@@ -3670,15 +3659,10 @@ mod tests {
         s.play();
         let _ = f.run(&mut s, 1);
         assert!(s.samples_to_due() < usize::MAX);
-        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
+        let mut map: Vec<Option<usize>> = (0..RACK_CHUNK).map(Some).collect();
         map[4] = None;
         f.notes[0][0].notes.clear();
-        s.rearrange(
-            &map,
-            Banks::of_machines(&f.rack()),
-            &song,
-            &[0; MAX_MACHINES],
-        );
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; RACK_CHUNK]);
         assert_eq!(s.samples_to_due(), usize::MAX, "dropped");
         nothing_hangs(&f.run(&mut s, 3000));
     }
@@ -4057,15 +4041,10 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let _ = run_ticks(&f, &mut s, 8);
-        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
+        let mut map: Vec<Option<usize>> = (0..RACK_CHUNK).map(Some).collect();
         map[2] = None;
         let song = CompiledSong::default();
-        s.rearrange(
-            &map,
-            Banks::of_machines(&f.rack()),
-            &song,
-            &[0; MAX_MACHINES],
-        );
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; RACK_CHUNK]);
         assert_eq!(kit(&run_ticks(&f, &mut s, 8)), [(0, 0)]);
     }
 

@@ -4,7 +4,7 @@
 //! `validate` on load.
 
 use crate::drums::KitKind;
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
+use crate::machine::{MachineType, MachineUid, standard_rack};
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::scale::Key;
 use serde::{Deserialize, Serialize};
@@ -806,9 +806,6 @@ impl Project {
         if self.key.root >= 12 {
             return bad(format!("key root {} is out of range", self.key.root));
         }
-        if self.machines.len() > MAX_MACHINES {
-            return bad(format!("rack has {} machines", self.machines.len()));
-        }
         let mut uids = std::collections::BTreeSet::new();
         if !self.machines.iter().all(|m| uids.insert(m.uid)) {
             return bad("two machines share a uid".into());
@@ -1287,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn any_rack_layout_of_up_to_sixteen_validates() {
+    fn any_rack_layout_validates() {
         let mut p = Project::default();
         p.machines.swap(0, 2);
         p.validate().unwrap();
@@ -1295,15 +1292,25 @@ mod tests {
         p.validate().unwrap();
         p.machines.clear();
         p.validate().unwrap();
+    }
+
+    #[test]
+    fn a_project_may_hold_forty_machines() {
         let mut p = Project::default();
-        let extra: Vec<_> = (0..MAX_MACHINES as u16 - 5)
-            .map(|i| MachineEntry::new(MachineUid(7 + i), MachineType::Fm, format!("FM {i}")))
-            .collect();
-        p.machines.extend(extra);
-        p.next_uid = 100;
-        assert!(p.validate().is_err(), "more than MAX_MACHINES");
-        p.machines.pop();
+        while p.machines.len() < 40 {
+            let m = p.new_machine(MachineType::Fm).unwrap();
+            p.insert_machine(p.machines.len(), m).unwrap();
+        }
         p.validate().unwrap();
+        let text = p.to_ron();
+        assert_eq!(Project::from_ron(&text).unwrap().machines.len(), 40);
+    }
+
+    #[test]
+    fn uids_run_out_at_the_top_of_the_range() {
+        let mut p = Project::default();
+        p.next_uid = u16::MAX;
+        assert!(p.new_machine(MachineType::Fm).is_none());
     }
 
     #[test]
@@ -1503,12 +1510,12 @@ mod tests {
     #[test]
     fn the_pool_is_shared_across_samplers() {
         let mut p = Project::default();
-        let s2 = p.new_machine(MachineType::Sampler);
+        let s2 = p.new_machine(MachineType::Sampler).unwrap();
         p.insert_machine(p.machines.len(), s2.clone()).unwrap();
         fill_sampler(&mut p, MachineUid(6), 100 * 1024 * 1024);
         fill_sampler(&mut p, s2.uid, 100 * 1024 * 1024);
         p.validate().unwrap(); // 200 MB < 256 MB
-        let s3 = p.new_machine(MachineType::Sampler);
+        let s3 = p.new_machine(MachineType::Sampler).unwrap();
         p.insert_machine(p.machines.len(), s3.clone()).unwrap();
         fill_sampler(&mut p, s3.uid, 100 * 1024 * 1024);
         assert!(
@@ -1978,7 +1985,7 @@ mod tests {
     #[test]
     fn a_project_with_a_mono_machine_round_trips() {
         let mut p = Project::default();
-        let m = p.new_machine(MachineType::Mono);
+        let m = p.new_machine(MachineType::Mono).unwrap();
         let uid = m.uid;
         p.machines.push(m);
         p.mono_mut(uid).unwrap().patch_name = "Squelch".into();

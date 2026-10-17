@@ -4,7 +4,7 @@
 
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
-use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid, default_name};
+use acid_engine::machine::{MachineType, MachineUid, default_name};
 use acid_engine::params::{DRUM_INSTRUMENTS, ParamId};
 use acid_engine::project::{
     DrumPattern, MachineBody, MachineEntry, NotePattern, Project, RemovedMachine, STEPS, Song,
@@ -27,7 +27,7 @@ const NO_NOTES: &str = "the edit names a machine with patterns in the rack";
 const NO_FM: &str = "the edit names an FM machine in the rack";
 const NO_MONO: &str = "the edit names a Mono machine in the rack";
 const NO_SAMPLER: &str = "the edit names a sampler in the rack";
-const NO_ROOM: &str = "the rack has room for the machine and its uid is free";
+const NO_ROOM: &str = "the machine's uid is free";
 
 /// One change to the project. Each edit names its machine by `uid`, which
 /// must be a machine of the edit's type in the rack (a note edit's: any
@@ -658,22 +658,17 @@ impl Document {
     }
 
     /// Adds a fresh machine of `ty` at the end of the rack as one undo
-    /// step. Returns its uid, or None when the rack is full.
+    /// step. Returns its uid, or None when the rack has no free machine ids.
     pub fn add_machine(&mut self, ty: MachineType) -> Option<(MachineUid, Vec<Command>)> {
-        if self.project.machines.len() >= MAX_MACHINES {
-            return None;
-        }
         let index = self.project.machines.len();
-        let entry = self.project.new_machine(ty);
+        let entry = self.project.new_machine(ty)?;
         Some(self.insert_new(index, entry))
     }
 
     /// Adds a deep copy of `uid` directly below it as one undo step.
-    /// Returns the copy's uid, or None when the rack is full or `uid` absent.
+    /// Returns the copy's uid, or None when the rack has no free machine ids
+    /// or `uid` is absent.
     pub fn duplicate_machine(&mut self, uid: MachineUid) -> Option<(MachineUid, Vec<Command>)> {
-        if self.project.machines.len() >= MAX_MACHINES {
-            return None;
-        }
         let index = self.project.position(uid)? + 1;
         let entry = self.project.duplicate_machine(uid)?;
         Some(self.insert_new(index, entry))
@@ -950,10 +945,7 @@ impl Document {
             },
             Edit::InsertMachine { removed } => {
                 let uid = removed.entry.uid;
-                assert!(
-                    p.machines.len() < MAX_MACHINES && p.machine(uid).is_none(),
-                    "{NO_ROOM}"
-                );
+                assert!(p.machine(uid).is_none(), "{NO_ROOM}");
                 p.restore_machine(*removed);
                 Edit::RemoveMachine { uid }
             }
@@ -2407,11 +2399,12 @@ mod tests {
     }
 
     #[test]
-    fn the_rack_cap_and_no_op_edits() {
+    fn spent_uids_and_no_op_edits() {
         let mut d = Document::new(acid_engine::project::Project::default());
-        while d.project.machines.len() < 16 {
+        for _ in 0..20 {
             d.add_machine(MachineType::Kit808).unwrap();
         }
+        d.project.next_uid = u16::MAX;
         assert!(d.add_machine(MachineType::Fm).is_none());
         assert!(d.duplicate_machine(MachineUid(1)).is_none());
         let depth = d.undo_depth();
