@@ -15,6 +15,7 @@ cpal.workspace = true
 rfd.workspace = true
 rtrb.workspace = true
 memory-stats.workspace = true
+sysinfo.workspace = true
 serde.workspace = true
 ron.workspace = true
 

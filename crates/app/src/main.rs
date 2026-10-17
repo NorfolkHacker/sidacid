@@ -6,6 +6,7 @@ mod audio_scan;
 mod audio_select;
 mod document;
 mod settings;
+mod sysmem;
 #[cfg(test)]
 mod test_rack;
 mod ui;
