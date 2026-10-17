@@ -45,6 +45,27 @@ impl SampleData {
         )
     }
 
+    /// The engine's copy of interleaved 16-bit audio: only whole frames,
+    /// a file with more than two channels plays its first one.
+    /// Allocates: call off the audio thread.
+    pub fn from_pcm(pcm: &[i16], channels: u8, sample_rate: u32) -> SampleData {
+        let ch = channels.max(1) as usize;
+        let whole = &pcm[..(pcm.len() / ch) * ch];
+        let side = |c: usize| -> Box<[f32]> {
+            whole
+                .iter()
+                .skip(c)
+                .step_by(ch)
+                .map(|&s| s as f32 / 32_768.0)
+                .collect()
+        };
+        SampleData {
+            sample_rate,
+            left: side(0),
+            right: (ch == 2).then(|| side(1)),
+        }
+    }
+
     /// Cubic-interpolated (left, right) at fractional frame `pos`,
     /// clamped to the sample.
     pub fn read(&self, pos: f64) -> (f32, f32) {
@@ -82,6 +103,25 @@ mod tests {
         assert!((l - 0.105).abs() < 1e-6);
         assert_eq!(s.read(-5.0).0, 0.0, "clamped at the start");
         assert!((s.read(500.0).0 - 0.99).abs() < 1e-6, "clamped at the end");
+    }
+
+    #[test]
+    fn from_pcm_matches_a_slots_sample() {
+        use crate::sampler::slot::{SlotData, SlotMeta};
+        let samples: Vec<f32> = (0..300).map(|i| (i as f32 / 300.0) - 0.5).collect();
+        let slot = SlotData::new(
+            "x",
+            44_100,
+            2,
+            &samples,
+            SlotMeta::chromatic(36, 36, 36, 150),
+        );
+        let a = slot.to_sample();
+        let b = SampleData::from_pcm(&slot.pcm, slot.channels, slot.sample_rate);
+        assert_eq!(a.frames(), b.frames());
+        for f in [0.0, 10.5, 149.0] {
+            assert_eq!(a.read(f), b.read(f));
+        }
     }
 
     #[test]

@@ -221,26 +221,11 @@ impl SlotData {
     }
 
     /// Builds the engine's copy. Allocates: call off the audio thread.
-    /// Safe for an invalid slot too: only whole frames are read, a slot
-    /// with more than two channels plays its first one, and markers past
-    /// the audio (which the sample doesn't carry) are kept inside it when
-    /// played (`voice::segment`).
+    /// Safe for an invalid slot too (see `SampleData::from_pcm`). Markers
+    /// past the audio (which the sample doesn't carry) are kept inside it
+    /// when played (`voice::segment`).
     pub fn to_sample(&self) -> SampleData {
-        let ch = self.channels.max(1) as usize;
-        let whole = &self.pcm[..self.frames() as usize * ch];
-        let side = |c: usize| -> Box<[f32]> {
-            whole
-                .iter()
-                .skip(c)
-                .step_by(ch)
-                .map(|&s| s as f32 / 32_768.0)
-                .collect()
-        };
-        SampleData {
-            sample_rate: self.sample_rate,
-            left: side(0),
-            right: (ch == 2).then(|| side(1)),
-        }
+        SampleData::from_pcm(&self.pcm, self.channels, self.sample_rate)
     }
 
     /// Why this slot could not be saved and reopened, if it could not.
