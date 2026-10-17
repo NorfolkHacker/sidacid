@@ -113,6 +113,15 @@ pub enum Edit {
         data: Box<Pad>,
         values: Vec<(ParamId, f32)>,
     },
+    /// Renaming a pad or changing its layers' velocity ranges: no audio
+    /// moves, so the engine gets only the new ranges.
+    PadKitMeta {
+        uid: MachineUid,
+        pad: usize,
+        name: String,
+        /// One `(vel_lo, vel_hi)` per layer, in order.
+        ranges: Vec<(u8, u8)>,
+    },
     /// Replacing all the pads at once (loading a kit), with knob values.
     PadKitKit {
         uid: MachineUid,
@@ -176,6 +185,7 @@ enum MergeKey {
     SamplerSlot(MachineUid, usize),
     SlotMeta(MachineUid, usize),
     PadKitPad(MachineUid, usize),
+    PadKitMeta(MachineUid, usize),
     /// Loading a kit never merges.
     PadKitKit,
     Group,
@@ -202,6 +212,7 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::SamplerSlot { uid, slot, .. } => MergeKey::SamplerSlot(*uid, *slot),
         Edit::SlotMeta { uid, slot, .. } => MergeKey::SlotMeta(*uid, *slot),
         Edit::PadKitPad { uid, pad, .. } => MergeKey::PadKitPad(*uid, *pad),
+        Edit::PadKitMeta { uid, pad, .. } => MergeKey::PadKitMeta(*uid, *pad),
         Edit::PadKitKit { .. } => MergeKey::PadKitKit,
         Edit::Group(_) => MergeKey::Group,
         Edit::InsertMachine { .. }
@@ -510,6 +521,20 @@ impl Document {
             }
             Edit::MoveMachine { uid, to } => p.position(*uid).expect(NO_MACHINE) == *to,
             Edit::RenameMachine { uid, name } => p.machine(*uid).expect(NO_MACHINE).name == *name,
+            Edit::PadKitMeta {
+                uid,
+                pad,
+                name,
+                ranges,
+            } => {
+                let pad = &p.padkit(*uid).expect(NO_PADKIT).pads[*pad];
+                pad.name == *name
+                    && pad
+                        .layers
+                        .iter()
+                        .zip(ranges)
+                        .all(|(l, r)| (l.vel_lo, l.vel_hi) == *r)
+            }
             _ => false,
         }
     }
@@ -1021,6 +1046,31 @@ impl Document {
                     values: old_values,
                 }
             }
+            Edit::PadKitMeta {
+                uid,
+                pad,
+                name,
+                ranges,
+            } => {
+                let data = &mut p.padkit_mut(uid).expect(NO_PADKIT).pads[pad];
+                let old_name = std::mem::replace(&mut data.name, name);
+                let old_ranges = data
+                    .layers
+                    .iter_mut()
+                    .zip(ranges)
+                    .map(|(l, (lo, hi))| {
+                        let old = (l.vel_lo, l.vel_hi);
+                        (l.vel_lo, l.vel_hi) = (lo, hi);
+                        old
+                    })
+                    .collect();
+                Edit::PadKitMeta {
+                    uid,
+                    pad,
+                    name: old_name,
+                    ranges: old_ranges,
+                }
+            }
             Edit::PadKitKit { uid, pads, values } => {
                 let old = std::mem::replace(&mut p.padkit_mut(uid).expect(NO_PADKIT).pads, *pads);
                 let old_values = swap_values(p, values);
@@ -1140,6 +1190,9 @@ impl Document {
                 cmds.push(pad_play(*uid, pads));
                 cmds.extend(set_params(p, values));
                 cmds
+            }
+            Edit::PadKitMeta { uid, .. } => {
+                vec![pad_play(*uid, &p.padkit(*uid).expect(NO_PADKIT).pads)]
             }
             Edit::PadKitKit { uid, values, .. } => {
                 let pads = &p.padkit(*uid).expect(NO_PADKIT).pads;
@@ -2101,6 +2154,52 @@ mod tests {
         assert_eq!(d.project.padkit(uid).unwrap().pads[2], pad);
         d.undo();
         assert_eq!(d.project.padkit(uid).unwrap().pads[2], Pad::default());
+    }
+
+    #[test]
+    fn a_pad_rename_or_range_edit_sends_only_the_play_data() {
+        use acid_engine::padkit::pad::{Layer, Pad};
+        let mut d = Document::new(Project::default());
+        let (uid, _) = d.add_machine(MachineType::PadKit).unwrap();
+        let mut pad = Pad::default();
+        pad.layers.push(Layer::new("a", 44_100, 1, &[0.5; 100]));
+        pad.layers.push(Layer::new("b", 44_100, 1, &[0.5; 100]));
+        pad.split_evenly();
+        d.apply(
+            Edit::PadKitPad {
+                uid,
+                pad: 1,
+                data: Box::new(pad),
+                values: vec![],
+            },
+            false,
+        );
+        let only_play =
+            |cmds: &[Command]| matches!(cmds, [Command::PadPlay { uid: u, .. }] if *u == uid);
+        let edits = [
+            ("Snare", vec![(1, 63), (64, 127)]),
+            ("", vec![(1, 40), (41, 127)]),
+        ];
+        for (name, ranges) in edits {
+            let before = d.project.padkit(uid).unwrap().pads[1].clone();
+            let cmds = d.apply(
+                Edit::PadKitMeta {
+                    uid,
+                    pad: 1,
+                    name: name.into(),
+                    ranges: ranges.clone(),
+                },
+                false,
+            );
+            assert!(only_play(&cmds), "apply");
+            let after = &d.project.padkit(uid).unwrap().pads[1];
+            assert_eq!(after.name, name);
+            let got: Vec<_> = after.layers.iter().map(|l| (l.vel_lo, l.vel_hi)).collect();
+            assert_eq!(got, ranges);
+            assert!(only_play(&d.undo()), "undo");
+            assert_eq!(d.project.padkit(uid).unwrap().pads[1], before);
+            assert!(only_play(&d.redo()), "redo");
+        }
     }
 
     #[test]

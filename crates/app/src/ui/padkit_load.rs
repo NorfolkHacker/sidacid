@@ -1,6 +1,7 @@
 //! Loading, clearing and editing Pad Kit pads and their layers. Files go
 //! through the same decode and memory warning as the Sampler's; each
-//! change is one undoable `PadKitPad` edit.
+//! change is one undoable `PadKitPad` edit (`PadKitMeta` for a rename or
+//! a range, which moves no audio).
 
 use super::SidAcidApp;
 use super::mem_warn::MemAction;
@@ -219,9 +220,8 @@ impl SidAcidApp {
         if old.name == name {
             return;
         }
-        let mut data = old.clone();
-        data.name = name.to_string();
-        self.apply_pad(uid, pad, data, false);
+        let ranges = old.layers.iter().map(|l| (l.vel_lo, l.vel_hi)).collect();
+        self.apply_pad_meta(uid, pad, name.to_string(), ranges, false);
     }
 
     /// Sets a layer's velocity range, each end within 1..=127 and `lo`
@@ -246,10 +246,9 @@ impl SidAcidApp {
         if (l.vel_lo, l.vel_hi) == (lo, hi) {
             return;
         }
-        let mut data = old.clone();
-        data.layers[layer].vel_lo = lo;
-        data.layers[layer].vel_hi = hi;
-        self.apply_pad(uid, pad, data, merge);
+        let mut ranges: Vec<_> = old.layers.iter().map(|l| (l.vel_lo, l.vel_hi)).collect();
+        ranges[layer] = (lo, hi);
+        self.apply_pad_meta(uid, pad, old.name.clone(), ranges, merge);
     }
 
     /// Several files dropped on the grid: one per pad from `first`, in
@@ -340,6 +339,28 @@ impl SidAcidApp {
                 pad,
                 data: Box::new(data),
                 values: Vec::new(),
+            },
+            merge,
+        );
+        self.send(cmds);
+    }
+
+    /// A name or range change: no audio is cloned or sent, so the pad's
+    /// sound plays on.
+    fn apply_pad_meta(
+        &mut self,
+        uid: MachineUid,
+        pad: usize,
+        name: String,
+        ranges: Vec<(u8, u8)>,
+        merge: bool,
+    ) {
+        let cmds = self.doc.apply(
+            Edit::PadKitMeta {
+                uid,
+                pad,
+                name,
+                ranges,
             },
             merge,
         );
@@ -437,6 +458,29 @@ mod tests {
         assert_eq!(pad(&app, uid, 2).layers[0].vel_hi, 80);
         app.doc.undo();
         assert_eq!(pad(&app, uid, 2).layers[0].vel_hi, 127, "one step");
+    }
+
+    #[test]
+    fn renames_and_range_drags_move_no_audio() {
+        use acid_engine::host::Command;
+        let (mut app, uid) = app_with_kit();
+        let wav = crate::ui::tests::test_wav(0.1);
+        app.load_pad_bytes(uid, 0, "a", Some("wav"), &wav);
+        app.load_pad_bytes(uid, 0, "b", Some("wav"), &wav);
+        let no_audio = |cmds: &[Command]| {
+            !cmds.is_empty() && cmds.iter().all(|c| matches!(c, Command::PadPlay { .. }))
+        };
+        app.rename_pad(uid, 0, "Kick");
+        assert!(no_audio(&app.doc.undo()), "rename undo");
+        assert!(no_audio(&app.doc.redo()), "rename redo");
+        for hi in [60, 50, 40] {
+            app.set_layer_range(uid, 0, 0, 1, hi, true);
+        }
+        assert!(no_audio(&app.doc.undo()), "range undo");
+        assert_eq!(pad(&app, uid, 0).layers[0].vel_hi, 63, "one step");
+        assert_eq!(pad(&app, uid, 0).name, "Kick");
+        assert!(no_audio(&app.doc.redo()), "range redo");
+        assert_eq!(pad(&app, uid, 0).layers[0].vel_hi, 40);
     }
 
     #[test]

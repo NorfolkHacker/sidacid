@@ -46,12 +46,7 @@ impl SidAcidApp {
     /// has no free machine ids, `uid` is not in it or the warning asks.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
         let m = self.doc.project.machine(uid)?;
-        let samples = self
-            .doc
-            .project
-            .sampler(uid)
-            .map_or(0, |s| s.memory_bytes());
-        let extra = m.machine_type().memory_estimate() + samples;
+        let extra = m.machine_type().memory_estimate() + m.sample_bytes();
         self.with_memory_check(extra as u64, MemAction::Duplicate(uid))
     }
 

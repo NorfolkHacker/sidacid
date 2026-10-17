@@ -558,7 +558,7 @@ mod tests {
         let note = |pitch| acid_engine::project::Note::new(0, 6, pitch, 100);
         roll.notes = vec![note(3), note(40)];
         app.view.focus = Some(uid);
-        app.view.clipboard = Some(crate::ui::files::Clip::Notes(roll));
+        app.view.clipboard = Some(crate::ui::files::Clip::Notes(roll.clone()));
         app.paste_pattern();
         let slot = app.selected(uid) as usize;
         let pitches: Vec<u8> = app.doc.project.padkit(uid).unwrap().patterns[slot]
@@ -568,5 +568,15 @@ mod tests {
             .collect();
         assert_eq!(pitches, [3]);
         assert!(app.doc.project.validate().is_ok());
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("Left out 1 note above pad 16: a Pad Kit has 16 pads.")
+        );
+        // A paste that fits says nothing.
+        roll.notes = vec![note(3), note(15)];
+        app.view.clipboard = Some(crate::ui::files::Clip::Notes(roll));
+        app.view.message = None;
+        app.paste_pattern();
+        assert!(app.view.message.is_none());
     }
 }

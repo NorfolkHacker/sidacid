@@ -628,6 +628,10 @@ impl SidAcidApp {
                 };
                 grid.rect_filled(row, 0.0, shade);
                 keys.rect_filled(key, 1.0, Color32::from_gray(190));
+                // Rows too short for a readable label would overlap.
+                if row_h < 8.0 {
+                    continue;
+                }
                 let name = match kind {
                     LaneKind::Pads => pad_labels.get(pitch as usize).map_or("", String::as_str),
                     _ => INST_NAMES[pitch as usize],

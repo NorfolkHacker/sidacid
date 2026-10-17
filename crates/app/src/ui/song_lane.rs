@@ -19,7 +19,6 @@ use super::lane_geom::{ZOOMS, tick_w};
 use super::song_ops::{self, BAR};
 use super::{SidAcidApp, theme};
 use acid_engine::machine::MachineUid;
-use acid_engine::params::DRUM_INSTRUMENTS;
 use acid_engine::project::{Block, LaneView, PatternRef, TICKS_PER_STEP};
 use acid_engine::sequencer::Mode;
 use acid_engine::song::{self, Lens, MAX_SONG_STEPS};
@@ -330,8 +329,8 @@ impl SidAcidApp {
     }
 
     /// The pattern's notes inside a block, repeated every `period` steps
-    /// up to its `end`: pitches scaled to the area's height, drum hits as
-    /// dots on their instrument's row. Only what is in view is drawn.
+    /// up to its `end`: pitches scaled to the area's height, drum and pad
+    /// hits as dots on their row. Only what is in view is drawn.
     #[allow(clippy::too_many_arguments)]
     fn block_preview(
         &self,
@@ -349,9 +348,11 @@ impl SidAcidApp {
         };
         let visible = roll.ticks();
         let notes = || roll.notes.iter().filter(|n| n.start < visible);
-        let drums = self.doc.project.kit(uid).is_some();
+        // Drum and pad rows keep their places; pitches fit the notes.
+        let kind = self.lane_kind(uid);
+        let drums = kind.is_rows();
         let (lo, hi) = if drums {
-            (0, DRUM_INSTRUMENTS as u8 - 1)
+            (0, kind.top_pitch())
         } else {
             let lo = notes().map(|n| n.pitch).min();
             let hi = notes().map(|n| n.pitch).max();

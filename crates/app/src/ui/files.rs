@@ -499,6 +499,8 @@ impl SidAcidApp {
         let Some(entry) = self.doc.project.machine(uid) else {
             return;
         };
+        // Notes a Pad Kit has no pad for, left out of the paste.
+        let mut dropped = 0;
         let edit = match (&self.view.clipboard, &entry.body) {
             (None, _) => return,
             (Some(Clip::Synth(p)), MachineBody::Synth(_)) => {
@@ -530,9 +532,11 @@ impl SidAcidApp {
             (Some(Clip::Notes(p)), MachineBody::PadKit(_)) => {
                 let mut pattern = Box::new(p.clone());
                 // A Pad Kit has 16 pads: higher notes would make the project invalid.
+                let before = pattern.notes.len();
                 pattern
                     .notes
                     .retain(|n| (n.pitch as usize) < acid_engine::padkit::PADS);
+                dropped = before - pattern.notes.len();
                 Edit::NotePattern { uid, slot, pattern }
             }
             _ => {
@@ -542,6 +546,13 @@ impl SidAcidApp {
         };
         let cmds = self.doc.apply(edit, false);
         self.send(cmds);
+        if dropped > 0 {
+            let notes = if dropped == 1 { "note" } else { "notes" };
+            let pads = acid_engine::padkit::PADS;
+            self.view.message = Some(format!(
+                "Left out {dropped} {notes} above pad {pads}: a Pad Kit has {pads} pads."
+            ));
+        }
     }
 
     /// The file's name without extension, or the project name if unsaved.

@@ -1062,7 +1062,9 @@ impl SidAcidApp {
             let to = self.lane_kind(focus);
             if melodic(*kind) != melodic(to) {
                 self.view.message = Some(
-                    if melodic(to) {
+                    if melodic(to) && *kind == LaneKind::Pads {
+                        "Pad notes can't be pasted onto a melodic part"
+                    } else if melodic(to) {
                         "Drum notes can't be pasted onto a melodic part"
                     } else if to == LaneKind::Pads {
                         "Melodic notes can't be pasted onto pads"
@@ -2386,6 +2388,23 @@ mod tests {
         assert_eq!(
             app.view.message.as_deref(),
             Some("Drum notes can't be pasted onto a melodic part")
+        );
+        assert_eq!(app.doc.project, before);
+        // Pads onto a melodic part say pads.
+        let kit = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        app.doc.project.roll_mut(kit, 0).unwrap().notes =
+            vec![acid_engine::project::Note::new(0, 4, 1, 100)];
+        app.view.focus = Some(kit);
+        app.select_all_notes();
+        app.copy_notes(false);
+        app.view.focus = Some(FM);
+        let before = app.doc.project.clone();
+        app.paste_notes();
+        assert_eq!(
+            app.view.message.as_deref(),
+            Some("Pad notes can't be pasted onto a melodic part")
         );
         assert_eq!(app.doc.project, before);
     }

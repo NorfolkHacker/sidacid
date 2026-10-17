@@ -285,6 +285,26 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_counts_the_pad_kits_audio() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app.add_machine(MachineType::PadKit).unwrap();
+        let wav = super::super::tests::test_wav(2.0);
+        app.load_pad_bytes(uid, 0, "Kick", Some("wav"), &wav);
+        let audio = app.doc.project.sample_bytes() as u64;
+        assert!(audio > 0);
+        let est = MachineType::PadKit.memory_estimate() as u64;
+        // Just enough free that the estimate alone passes, the audio not.
+        app.sysmem = Box::new(crate::sysmem::FakeMemory(Some(MemSnapshot {
+            total: 4 * GIB,
+            available: 512 * MIB + est + audio / 2,
+        })));
+        assert!(app.duplicate_machine(uid).is_none());
+        assert!(app.pending_warn.is_some());
+        app.resolve_memory_warning(false);
+        assert_eq!(app.doc.project.machines.len(), 7);
+    }
+
+    #[test]
     fn the_window_focuses_cancel_and_esc_cancels() {
         let mut app = short_app();
         let ctx = egui::Context::default();
