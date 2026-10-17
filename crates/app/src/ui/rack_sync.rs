@@ -12,13 +12,11 @@
 //! host are taken back out (`discard_pending`).
 
 use super::SidAcidApp;
-use super::sampler_load::{pool_message, sample_memory};
 use acid_engine::host::{Command, Status};
 use acid_engine::machine::{MachineType, MachineUid, rack_capacity};
 use acid_engine::params::ParamId;
 use acid_engine::project::BANK_SIZE;
 use acid_engine::rack::RackSwap;
-use acid_engine::sampler::SAMPLE_POOL;
 
 /// The rate fresh slots are built for when no stream runs (no engine to
 /// match; the next stream builds its engine from the project).
@@ -38,14 +36,6 @@ impl SidAcidApp {
     /// Adds a copy of `uid` directly below it (one undo step) and focuses
     /// it. None when the rack has no free machine ids or `uid` is not in it.
     pub(crate) fn duplicate_machine(&mut self, uid: MachineUid) -> Option<MachineUid> {
-        if let Some(src) = self.doc.project.sampler(uid) {
-            let needed = src.memory_bytes();
-            let free = SAMPLE_POOL.saturating_sub(sample_memory(&self.doc.project));
-            if needed > free {
-                self.view.message = Some(pool_message(needed, free));
-                return None;
-            }
-        }
         let (copy, cmds) = self.doc.duplicate_machine(uid)?;
         self.send(cmds);
         self.sync_rack();

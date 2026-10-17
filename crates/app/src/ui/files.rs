@@ -3,6 +3,7 @@
 
 use super::SidAcidApp;
 use crate::document::{Document, Edit};
+use crate::sysmem::{MemSnapshot, SystemMemory, format_bytes};
 use acid_engine::host::Command;
 use acid_engine::project::{
     BANK_SIZE, DrumPattern, MachineBody, NotePattern, PatternRef, Project, SynthPattern,
@@ -73,6 +74,19 @@ pub fn export_status(song: bool, bars: u32, progress: Option<f32>) -> String {
         (true, Some(p)) => format!("Exporting song {:.0}%…", (p * 100.0).floor()),
         (true, None) => "Exporting song…".to_string(),
         (false, _) => format!("Exporting {bars} bars…"),
+    }
+}
+
+/// Refuses a project whose decoded audio exceeds the system's available RAM.
+fn check_fits(p: &Project, mem: Option<MemSnapshot>) -> Result<(), String> {
+    let audio = p.sample_bytes() as u64;
+    match mem {
+        Some(m) if audio > m.available => Err(format!(
+            "Not enough memory to open this project: {} of audio, {} free",
+            format_bytes(audio),
+            format_bytes(m.available)
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -167,16 +181,16 @@ impl SidAcidApp {
             Pending::New => self.load_document(Document::new(Project::default())),
             Pending::Open => {
                 if let Some(path) = project_dialog().pick_file() {
-                    match Project::load(&path) {
+                    let loaded = Project::load(&path)
+                        .map_err(|e| format!("Could not open {}:\n{e}", path.display()));
+                    let mem = crate::sysmem::SysinfoMemory::new().snapshot();
+                    match loaded.and_then(|p| check_fits(&p, mem).map(|()| p)) {
                         Ok(project) => {
                             let mut doc = Document::new(project);
                             doc.path = Some(path);
                             self.load_document(doc);
                         }
-                        Err(e) => {
-                            self.view.message =
-                                Some(format!("Could not open {}:\n{e}", path.display()))
-                        }
+                        Err(e) => self.view.message = Some(e),
                     }
                 }
             }
@@ -689,6 +703,36 @@ impl SidAcidApp {
 mod tests {
     use super::*;
     use crate::test_rack::*;
+
+    #[test]
+    fn opening_a_project_bigger_than_free_memory_is_refused() {
+        use crate::sysmem::{GIB, MemSnapshot};
+        let none = Project::default();
+        let tiny = Some(MemSnapshot {
+            total: GIB,
+            available: 0,
+        });
+        assert!(check_fits(&none, tiny).is_ok(), "no audio always fits");
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        crate::ui::tests::sampler_with_frames(&mut app, 1 << 20); // 4 MB decoded
+        let big = &app.doc.project;
+        let err = check_fits(
+            big,
+            Some(MemSnapshot {
+                total: GIB,
+                available: 1 << 20,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Not enough memory to open this project: 4 MB of audio, 1 MB free"
+        );
+        assert!(
+            check_fits(big, None).is_ok(),
+            "unknown memory never refuses"
+        );
+    }
 
     #[test]
     fn export_status_text() {

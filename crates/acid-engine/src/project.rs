@@ -664,13 +664,6 @@ impl From<std::io::Error> for ProjectError {
     }
 }
 
-/// Parses with embedded 16-bit PCM limited to half the f32 sample pool,
-/// one budget shared by every sampler in the file.
-fn with_pcm_budget<T>(f: impl FnOnce() -> T) -> T {
-    let budget = crate::sampler::SAMPLE_POOL as u64 / 2;
-    crate::sampler::slot::pcm_codec::with_budget(budget, f)
-}
-
 #[derive(Deserialize)]
 struct VersionOnly {
     version: u32,
@@ -717,6 +710,17 @@ impl Project {
     body_accessors!(kit, kit_mut, Kit, DrumMachine);
     body_accessors!(fm, fm_mut, Fm, FmMachine);
     body_accessors!(sampler, sampler_mut, Sampler, SamplerMachine);
+
+    /// Decoded bytes (f32, as `memory_bytes` counts) of every sample in the project.
+    pub fn sample_bytes(&self) -> usize {
+        self.machines
+            .iter()
+            .filter_map(|m| match &m.body {
+                MachineBody::Sampler(s) => Some(s.memory_bytes()),
+                _ => None,
+            })
+            .sum()
+    }
     body_accessors!(mono, mono_mut, Mono, MonoMachine);
 
     /// Note patterns of an FM, Mono or Sampler machine.
@@ -816,15 +820,8 @@ impl Project {
         if self.globals.values().any(|v| !v.is_finite()) {
             return bad("invalid parameter value".into());
         }
-        let mut sampler_bytes = 0usize;
         for m in &self.machines {
             self.validate_machine(m)?;
-            if let MachineBody::Sampler(s) = &m.body {
-                sampler_bytes = sampler_bytes.saturating_add(s.memory_bytes());
-            }
-        }
-        if sampler_bytes > crate::sampler::SAMPLE_POOL {
-            return bad("sampler audio exceeds 256 MB".into());
         }
         self.validate_lanes()?;
         let mut seen = std::collections::BTreeSet::new();
@@ -987,21 +984,13 @@ impl Project {
                 .map_err(parse)?
                 .upgrade()
                 .upgrade())?,
-            2 => v4(
-                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV2>(text))
-                    .map_err(parse)?
-                    .upgrade(),
-            )?,
+            2 => v4(ron::from_str::<crate::migrate::ProjectV2>(text)
+                .map_err(parse)?
+                .upgrade())?,
             // v4 only added the Mono machine: a v3 file reads as v4.
-            3 | 4 => v4(
-                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV4>(text))
-                    .map_err(parse)?,
-            )?,
-            5 => v5(
-                with_pcm_budget(|| ron::from_str::<crate::migrate::ProjectV5>(text))
-                    .map_err(parse)?,
-            )?,
-            PROJECT_VERSION => with_pcm_budget(|| ron::from_str::<Project>(text)).map_err(parse)?,
+            3 | 4 => v4(ron::from_str::<crate::migrate::ProjectV4>(text).map_err(parse)?)?,
+            5 => v5(ron::from_str::<crate::migrate::ProjectV5>(text).map_err(parse)?)?,
+            PROJECT_VERSION => ron::from_str::<Project>(text).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
         // Kits older builds named "808"/"909" (plus a number) take today's
@@ -1508,22 +1497,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_is_shared_across_samplers() {
+    fn a_project_may_hold_more_than_256_mb_of_audio() {
         let mut p = Project::default();
-        let s2 = p.new_machine(MachineType::Sampler).unwrap();
-        p.insert_machine(p.machines.len(), s2.clone()).unwrap();
-        fill_sampler(&mut p, MachineUid(6), 100 * 1024 * 1024);
-        fill_sampler(&mut p, s2.uid, 100 * 1024 * 1024);
-        p.validate().unwrap(); // 200 MB < 256 MB
-        let s3 = p.new_machine(MachineType::Sampler).unwrap();
-        p.insert_machine(p.machines.len(), s3.clone()).unwrap();
-        fill_sampler(&mut p, s3.uid, 100 * 1024 * 1024);
-        assert!(
-            p.validate()
-                .unwrap_err()
-                .to_string()
-                .contains("exceeds 256 MB")
-        );
+        fill_sampler(&mut p, MachineUid(6), 300 * 1024 * 1024);
+        p.validate().unwrap();
+        assert_eq!(p.sample_bytes(), 300 * 1024 * 1024);
     }
 
     #[test]
@@ -1532,25 +1510,6 @@ mod tests {
         fill_sampler(&mut p, MachineUid(6), 90 * 1024 * 1024); // > 64 MB, < 256 MB
         let q = Project::from_ron(&p.to_ron()).unwrap();
         assert_eq!(q, p);
-    }
-
-    #[test]
-    fn embedded_audio_over_the_memory_limit_is_refused_while_parsing() {
-        // 9 slots of 16 MB of 16-bit audio: 144 MB, over the 128 MB of PCM
-        // (half of SAMPLE_POOL, which counts f32) one parse may inflate.
-        let entries: Vec<String> = (0..9u8).map(|i| slot_entry(i * 8, 8_000_000).0).collect();
-        let mut entries = entries;
-        entries.resize(crate::sampler::SLOTS, "None".into());
-        match Project::from_ron(&ron_with_slot_entries(&entries)) {
-            Err(ProjectError::Parse(e)) => assert!(e.contains("memory"), "{e}"),
-            other => panic!("expected a parse error, got {other:?}"),
-        }
-        // The budget is per parse: a project within it still loads afterwards.
-        let few: Vec<String> = (0..2u8).map(|i| slot_entry(i * 8, 1_100_000).0).collect();
-        let mut few = few;
-        few.resize(crate::sampler::SLOTS, "None".into());
-        assert!(Project::from_ron(&ron_with_slot_entries(&few)).is_ok());
-        assert!(Project::from_ron(&ron_with_slot_entries(&few)).is_ok());
     }
 
     /// A project saved by Plan 4, before the FM voice name and bank and

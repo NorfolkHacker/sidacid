@@ -22,7 +22,9 @@ pub struct SysinfoMemory {
 
 impl SysinfoMemory {
     pub fn new() -> Self {
-        Self { sys: sysinfo::System::new() }
+        Self {
+            sys: sysinfo::System::new(),
+        }
     }
 }
 
@@ -44,6 +46,15 @@ pub struct FakeMemory(pub Option<MemSnapshot>);
 impl SystemMemory for FakeMemory {
     fn snapshot(&mut self) -> Option<MemSnapshot> {
         self.0
+    }
+}
+
+/// "2.1 GB" from 1 GB up, whole megabytes below.
+pub fn format_bytes(b: u64) -> String {
+    if b >= GIB {
+        format!("{:.1} GB", b as f64 / GIB as f64)
+    } else {
+        format!("{} MB", b / MIB)
     }
 }
 
@@ -87,8 +98,18 @@ mod tests {
     }
 
     #[test]
+    fn bytes_read_as_gb_or_mb() {
+        assert_eq!(format_bytes(2 * GIB + GIB / 10), "2.1 GB");
+        assert_eq!(format_bytes(300 * MIB), "300 MB");
+        assert_eq!(format_bytes(4 * MIB), "4 MB");
+        assert_eq!(format_bytes(0), "0 MB");
+    }
+
+    #[test]
     fn sysinfo_reports_something_sane() {
-        let s = SysinfoMemory::new().snapshot().expect("this OS reports memory");
+        let s = SysinfoMemory::new()
+            .snapshot()
+            .expect("this OS reports memory");
         assert!(s.total > 256 * MIB && s.available <= s.total);
     }
 }

@@ -1,43 +1,20 @@
 //! Loading, clearing and editing sampler slots. Files are decoded here,
-//! on the UI thread; zones and the memory limit are checked before the
+//! on the UI thread; zones are checked before the
 //! undoable edit is applied.
 
 use super::SidAcidApp;
 use crate::document::Edit;
 use acid_engine::machine::MachineUid;
 use acid_engine::params::{MachineParam, SlotParam};
+use acid_engine::sampler::SLOTS;
 use acid_engine::sampler::decode::decode;
 use acid_engine::sampler::slicing::{detect_slices, equal_slices, guess_bpm, mono_mix};
 use acid_engine::sampler::slot::{SlotData, SlotMeta};
-use acid_engine::sampler::{SAMPLE_POOL, SLOTS};
 
 /// Samples at least this long load as slice slots.
 const SLICE_MIN_SECONDS: f32 = 1.0;
 /// Keys a new chromatic zone covers.
 const CHROMATIC_SPAN: u8 = 24;
-
-/// Sample memory in use across every sampler in the rack: the project's
-/// `SAMPLE_POOL` covers them all.
-pub(crate) fn sample_memory(project: &acid_engine::project::Project) -> usize {
-    let samplers = project
-        .machines
-        .iter()
-        .filter_map(|m| project.sampler(m.uid));
-    samplers.map(|s| s.memory_bytes()).sum()
-}
-
-/// The refusal shown when `needed_bytes` of new audio do not fit in the
-/// `free_bytes` left in the pool. Needed rounds up and free rounds down,
-/// so the figures never suggest it would fit.
-pub fn pool_message(needed_bytes: usize, free_bytes: usize) -> String {
-    const MIB: usize = 1024 * 1024;
-    format!(
-        "Not enough sample memory: {} MB needed, {} MB free of {} MB",
-        needed_bytes.div_ceil(MIB),
-        free_bytes / MIB,
-        SAMPLE_POOL / MIB
-    )
-}
 
 impl SidAcidApp {
     pub(crate) fn load_sample_dialog(&mut self, uid: MachineUid, slot: usize) {
@@ -105,14 +82,6 @@ impl SidAcidApp {
         let Some(sampler) = self.doc.project.sampler(uid) else {
             return;
         };
-        let old = sampler.slots[slot].as_ref().map_or(0, |d| d.memory_bytes());
-        let in_use = sample_memory(&self.doc.project);
-        let needed = decoded.samples.len() * 4;
-        let free = SAMPLE_POOL.saturating_sub(in_use - old);
-        if needed > free {
-            self.view.message = Some(pool_message(needed, free));
-            return;
-        }
         let frames = decoded.frames() as u32;
         let slice_mode = decoded.seconds() >= SLICE_MIN_SECONDS;
         let mut slices = Vec::new();
