@@ -2,7 +2,7 @@
 //! block lanes (ends, lookup, placement without overlap, ripple, time
 //! insert/delete, recorded pattern changes) and automation.
 
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
+use crate::machine::{MachineType, MachineUid};
 use crate::params::ParamId;
 use crate::project::{
     AutoLane, Block, DrumPattern, MachineEntry, NotePattern, PATTERNS, PatternRef, Project, STEPS,
@@ -56,32 +56,24 @@ impl<'a> Bank<'a> {
 }
 
 /// Every rack position's pattern bank, borrowed, with the machine there.
-/// Cheap to copy. Positions past the rack hold `None`.
+/// Cheap to copy. Positions past the rack read `None`.
 #[derive(Clone, Copy)]
-pub struct Banks<'a> {
-    pub slots: [Option<Bank<'a>>; MAX_MACHINES],
-    /// The machine at each position: song lanes are keyed by its uid, and
-    /// its type says whether the song transpose applies.
-    pub machines: [Option<(MachineUid, MachineType)>; MAX_MACHINES],
+pub enum Banks<'a> {
+    /// The engine's rack, in order.
+    Slots(&'a [Slot]),
+    /// A project's rack, in order.
+    Machines(&'a [MachineEntry]),
 }
 
 impl<'a> Banks<'a> {
     /// No machines.
     pub fn empty() -> Self {
-        Self {
-            slots: [None; MAX_MACHINES],
-            machines: [None; MAX_MACHINES],
-        }
+        Banks::Slots(&[])
     }
 
     /// The engine's rack, in order.
     pub fn of_slots(slots: &'a [Slot]) -> Self {
-        let mut b = Self::empty();
-        for (i, s) in slots.iter().take(MAX_MACHINES).enumerate() {
-            b.slots[i] = Some(Bank::of_slot(&s.patterns));
-            b.machines[i] = Some((s.uid, s.ty));
-        }
-        b
+        Banks::Slots(slots)
     }
 
     /// The project's rack, in order.
@@ -91,42 +83,58 @@ impl<'a> Banks<'a> {
 
     /// A rack of machine entries, in order.
     pub fn of_machines(machines: &'a [MachineEntry]) -> Self {
+        Banks::Machines(machines)
+    }
+
+    /// Machines in the rack.
+    pub fn len(&self) -> usize {
+        match self {
+            Banks::Slots(s) => s.len(),
+            Banks::Machines(m) => m.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The pattern bank at rack position `pos`; `None` past the rack.
+    pub fn bank(&self, pos: usize) -> Option<Bank<'a>> {
         use crate::project::MachineBody;
-        let mut b = Self::empty();
-        for (i, m) in machines.iter().take(MAX_MACHINES).enumerate() {
-            b.slots[i] = Some(match &m.body {
+        match *self {
+            Banks::Slots(s) => s.get(pos).map(|s| Bank::of_slot(&s.patterns)),
+            Banks::Machines(m) => m.get(pos).map(|m| match &m.body {
                 MachineBody::Synth(x) => Bank::Synth(&x.patterns),
                 MachineBody::Kit(x) => Bank::Drum(&x.patterns),
                 MachineBody::Fm(x) => Bank::Notes(&x.patterns),
                 MachineBody::Sampler(x) => Bank::Notes(&x.patterns),
                 MachineBody::Mono(x) => Bank::Notes(&x.patterns),
-            });
-            b.machines[i] = Some((m.uid, m.machine_type()));
+            }),
         }
-        b
+    }
+
+    /// The machine at rack position `pos`: song lanes are keyed by its
+    /// uid, and its type says whether the song transpose applies.
+    pub fn machine(&self, pos: usize) -> Option<(MachineUid, MachineType)> {
+        match *self {
+            Banks::Slots(s) => s.get(pos).map(|s| (s.uid, s.ty)),
+            Banks::Machines(m) => m.get(pos).map(|m| (m.uid, m.machine_type())),
+        }
     }
 
     /// Patterns in the bank at rack position `pos`; 0 for an empty position.
     pub fn bank_len(&self, pos: usize) -> usize {
-        self.slots
-            .get(pos)
-            .copied()
-            .flatten()
-            .map_or(0, |b| b.len())
+        self.bank(pos).map_or(0, |b| b.len())
     }
 
     /// Length in steps (1..=STEPS) of pattern `slot` at rack position `pos`.
     pub fn length(&self, pos: usize, slot: u8) -> Option<usize> {
-        self.slots.get(pos).copied().flatten()?.length(slot)
+        self.bank(pos)?.length(slot)
     }
 
     /// Whether the song transpose applies at rack position `pos`.
     pub fn transposes(&self, pos: usize) -> bool {
-        self.machines
-            .get(pos)
-            .copied()
-            .flatten()
-            .is_some_and(|(_, ty)| ty.transposes())
+        self.machine(pos).is_some_and(|(_, ty)| ty.transposes())
     }
 }
 
@@ -184,10 +192,8 @@ pub type Lens<'a> = &'a dyn Fn(MachineUid, u8) -> u32;
 pub fn lens_of(p: &Project) -> impl Fn(MachineUid, u8) -> u32 {
     let banks = Banks::of(p);
     move |uid, slot| {
-        banks
-            .machines
-            .iter()
-            .position(|m| m.is_some_and(|(u, _)| u == uid))
+        (0..banks.len())
+            .position(|pos| banks.machine(pos).is_some_and(|(u, _)| u == uid))
             .and_then(|pos| banks.length(pos, slot))
             .map_or(DEFAULT_PATTERN_STEPS, |n| n as u32)
     }
@@ -500,6 +506,20 @@ mod tests {
     use crate::params::{MasterParam, SynthParam};
 
     const U: MachineUid = MachineUid(1);
+
+    #[test]
+    fn banks_see_every_machine_of_a_long_rack() {
+        use crate::project::MachineEntry;
+        let machines: Vec<MachineEntry> = (1..=40u16)
+            .map(|u| MachineEntry::new(MachineUid(u), MachineType::Fm, format!("F{u}")))
+            .collect();
+        let b = Banks::of_machines(&machines);
+        assert_eq!(b.len(), 40);
+        assert_eq!(b.machine(39), Some((MachineUid(40), MachineType::Fm)));
+        assert!(b.bank(39).is_some());
+        assert!(b.bank(40).is_none() && b.machine(40).is_none());
+        assert_eq!(Banks::empty().len(), 0);
+    }
 
     /// Slot 1 is 32 steps, slot 2 is 8, the rest 16.
     fn lens(_: MachineUid, slot: u8) -> u32 {

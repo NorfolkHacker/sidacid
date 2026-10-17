@@ -708,12 +708,12 @@ impl Sequencer {
         }
         if self.song_step >= compiled_song_end(song, banks) {
             for pos in 0..MAX_MACHINES {
-                if matches!(banks.slots[pos], Some(Bank::Synth(_))) && self.tracks[pos].gate_open {
+                if matches!(banks.bank(pos), Some(Bank::Synth(_))) && self.tracks[pos].gate_open {
                     out.push(SeqEvent::NoteOff { slot: pos });
                 }
             }
             for pos in 0..MAX_MACHINES {
-                if matches!(banks.slots[pos], Some(Bank::Notes(_))) {
+                if matches!(banks.bank(pos), Some(Bank::Notes(_))) {
                     release_all(&mut self.tracks[pos], pos, out);
                 }
             }
@@ -864,14 +864,14 @@ impl Sequencer {
         for (pos, old) in map.iter().enumerate() {
             if let Some(o) = *old
                 && o < MAX_MACHINES
-                && banks.slots[pos].is_some()
+                && banks.bank(pos).is_some()
             {
                 new_of[o] = Some(pos);
             }
         }
         self.pending.remap(&new_of);
         for pos in 0..MAX_MACHINES {
-            let in_rack = banks.slots[pos].is_some();
+            let in_rack = banks.bank(pos).is_some();
             let old = map[pos].filter(|&o| o < MAX_MACHINES && in_rack);
             (self.tracks[pos], self.chosen[pos]) = match old {
                 Some(o) => (old_tracks[o], old_chosen[o]),
@@ -1122,12 +1122,12 @@ impl Sequencer {
         self.pending.base = self.samples_to_next;
         self.pending.quarter = quarter;
         for pos in 0..MAX_MACHINES {
-            if let Some(Bank::Synth(bank)) = banks.slots[pos] {
+            if let Some(Bank::Synth(bank)) = banks.bank(pos) {
                 self.synth_tick(pos, bank, out);
             }
         }
         for pos in 0..MAX_MACHINES {
-            if let Some(Bank::Drum(bank)) = banks.slots[pos] {
+            if let Some(Bank::Drum(bank)) = banks.bank(pos) {
                 self.drum_tick(pos, bank, out);
             }
         }
@@ -1411,7 +1411,7 @@ impl Sequencer {
     /// One tick of each note track: releases, then starts, then advance.
     fn note_ticks(&mut self, banks: Banks<'_>, out: &mut Vec<SeqEvent>) {
         for m in 0..MAX_MACHINES {
-            let Some(Bank::Notes(bank)) = banks.slots[m] else {
+            let Some(Bank::Notes(bank)) = banks.bank(m) else {
                 continue;
             };
             let (seed, fill) = (self.seed, self.fill);
@@ -1593,7 +1593,8 @@ mod tests {
         /// the bar; the song lasts every bar, empty ones too.
         fn set_bars(&mut self, rows: &[[Option<u8>; 4]]) {
             let mut song = crate::project::Song::default();
-            let banks = self.banks();
+            let rack = self.rack();
+            let banks = Banks::of_machines(&rack);
             let mut start = 0u32;
             for row in rows {
                 let bar = (0..4)
@@ -1620,18 +1621,24 @@ mod tests {
             &mut self.song.lane_mut(MachineUid(uid))[i]
         }
 
-        /// The standard rack's six tracks at positions 0..6.
-        fn banks(&self) -> Banks<'_> {
-            let mut b = Banks::empty();
-            for (pos, (uid, ty, _)) in standard_rack().into_iter().enumerate() {
-                b.machines[pos] = Some((uid, ty));
-                b.slots[pos] = Some(match pos {
-                    0 | 1 => Bank::Synth(&self.synths[pos]),
-                    2 | 3 => Bank::Drum(&self.drums[pos - 2]),
-                    _ => Bank::Notes(&self.notes[pos - 4]),
-                });
-            }
-            b
+        /// The standard rack's six machines at positions 0..6.
+        fn rack(&self) -> Vec<crate::project::MachineEntry> {
+            use crate::project::{MachineBody, MachineEntry};
+            standard_rack()
+                .into_iter()
+                .enumerate()
+                .map(|(pos, (uid, ty, name))| {
+                    let mut m = MachineEntry::new(uid, ty, name.into());
+                    match &mut m.body {
+                        MachineBody::Synth(x) => x.patterns = self.synths[pos].clone(),
+                        MachineBody::Kit(x) => x.patterns = self.drums[pos - 2].clone(),
+                        MachineBody::Fm(x) => x.patterns = self.notes[0].clone(),
+                        MachineBody::Sampler(x) => x.patterns = self.notes[1].clone(),
+                        MachineBody::Mono(_) => unreachable!(),
+                    }
+                    m
+                })
+                .collect()
         }
 
         fn run(&self, seq: &mut Sequencer, total: usize) -> Vec<(usize, SeqEvent)> {
@@ -1649,7 +1656,7 @@ mod tests {
                     if due == 0 {
                         seq.take_due(&mut buf);
                     } else {
-                        seq.tick(self.banks(), &song, &mut buf);
+                        seq.tick(Banks::of_machines(&self.rack()), &song, &mut buf);
                     }
                     out.extend(buf.iter().map(|e| (pos, *e)));
                     continue;
@@ -2194,7 +2201,7 @@ mod tests {
         while s.is_playing() {
             if s.samples_to_next_tick() == 0 {
                 buf.clear();
-                s.tick(f.banks(), &song, &mut buf);
+                s.tick(Banks::of_machines(&f.rack()), &song, &mut buf);
                 ticks.push(s.tick_clocks()[0].0);
                 kit.push(s.tick_clocks()[2].0);
             } else {
@@ -3027,16 +3034,25 @@ mod tests {
         set_hits(&mut drums[0], 16, &[(0, 3, DrumHit::On)]);
         let mut notes = vec![NotePattern::default(); 2];
         notes[0].notes.push(note(0, 2, 60));
-        let mut b = Banks::empty();
-        let rack = [
-            (MachineUid(9), MachineType::Kit909, Bank::Drum(&drums)),
-            (MachineUid(3), MachineType::Sampler, Bank::Notes(&notes)),
-            (MachineUid(4), MachineType::Fm, Bank::Notes(&notes)),
-        ];
-        for (pos, (uid, ty, bank)) in rack.into_iter().enumerate() {
-            b.machines[pos] = Some((uid, ty));
-            b.slots[pos] = Some(bank);
+        use crate::project::{MachineBody, MachineEntry};
+        let mut rack: Vec<MachineEntry> = [
+            (MachineUid(9), MachineType::Kit909),
+            (MachineUid(3), MachineType::Sampler),
+            (MachineUid(4), MachineType::Fm),
+        ]
+        .into_iter()
+        .map(|(uid, ty)| MachineEntry::new(uid, ty, String::new()))
+        .collect();
+        if let MachineBody::Kit(k) = &mut rack[0].body {
+            k.patterns = drums;
         }
+        if let MachineBody::Sampler(x) = &mut rack[1].body {
+            x.patterns = notes.clone();
+        }
+        if let MachineBody::Fm(x) = &mut rack[2].body {
+            x.patterns = notes;
+        }
+        let b = Banks::of_machines(&rack);
         let mut song = crate::project::Song::default();
         for uid in [9, 3, 4].map(MachineUid) {
             song.lane_mut(uid).push(Block {
@@ -3087,7 +3103,7 @@ mod tests {
         for k in 0..n {
             s.advance(s.samples_to_next_tick());
             buf.clear();
-            s.tick(f.banks(), &song, &mut buf);
+            s.tick(Banks::of_machines(&f.rack()), &song, &mut buf);
             while s.samples_to_due() != usize::MAX && s.samples_to_due() <= s.samples_to_next_tick()
             {
                 s.advance(s.samples_to_due());
@@ -3489,7 +3505,7 @@ mod tests {
         let mut map: RackMap = std::array::from_fn(Some);
         map.swap(0, 1);
         let song = CompiledSong::default();
-        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
         let after = f.run(&mut s, 1500);
         assert_eq!(acid_at(&after), [], "nothing reaches B, now at position 0");
         assert!(
@@ -3522,7 +3538,7 @@ mod tests {
         let mut map: RackMap = std::array::from_fn(Some);
         map.swap(4, 5);
         let song = CompiledSong::default();
-        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
         let after = f.run(&mut s, 3000);
         assert!(
             after
@@ -3554,7 +3570,7 @@ mod tests {
         let mut map: RackMap = std::array::from_fn(Some);
         map[4] = None;
         f.notes[0][0].notes.clear();
-        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
         assert_eq!(s.samples_to_due(), usize::MAX, "dropped");
         nothing_hangs(&f.run(&mut s, 3000));
     }
@@ -3936,7 +3952,7 @@ mod tests {
         let mut map: RackMap = std::array::from_fn(Some);
         map[2] = None;
         let song = CompiledSong::default();
-        s.rearrange(&map, f.banks(), &song, &[0; MAX_MACHINES]);
+        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
         assert_eq!(kit(&run_ticks(&f, &mut s, 8)), [(0, 0)]);
     }
 

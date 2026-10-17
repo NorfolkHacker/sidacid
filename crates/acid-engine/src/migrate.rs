@@ -5,7 +5,7 @@
 //! v1 to v5 songs are rows of bars; v6 songs are lanes of blocks.
 
 use crate::drums::KitKind;
-use crate::machine::{MAX_MACHINES, MachineType, MachineUid, standard_rack};
+use crate::machine::{MachineType, MachineUid, standard_rack};
 use crate::params::{
     ChannelParam, DRUM_INSTRUMENTS, DrumParam, FmParam, FxParam, GlobalParam, KitParam,
     MachineParam, MasterParam, OpParam, ParamId, SamplerParam, SlotParam, SynthParam,
@@ -351,9 +351,9 @@ const DEFAULT_BAR_STEPS: usize = 16;
 
 /// Steps in a bar: its longest assigned pattern, or 16 when none is assigned.
 fn bar_steps(bar: &BarV5, banks: Banks<'_>) -> usize {
-    (0..MAX_MACHINES)
+    (0..banks.len())
         .filter_map(|pos| {
-            let (uid, _) = banks.machines[pos]?;
+            let (uid, _) = banks.machine(pos)?;
             banks.length(pos, bar.cell(uid).pattern?.0)
         })
         .max()
@@ -444,8 +444,8 @@ fn convert_song(old: &SongV5, banks: Banks<'_>) -> Song {
         .collect();
     let total = starts[old.bars.len()];
     let mut lanes = Vec::new();
-    for pos in 0..MAX_MACHINES {
-        let Some((uid, _)) = banks.machines[pos] else {
+    for pos in 0..banks.len() {
+        let Some((uid, _)) = banks.machine(pos) else {
             continue;
         };
         let blocks: Vec<Block> = old
