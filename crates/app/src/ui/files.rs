@@ -246,6 +246,9 @@ impl SidAcidApp {
             }
         }
         self.view.overwrite = None;
+        // An action held behind the low-memory warning was for the old
+        // document (its machine uids mean other machines here).
+        self.pending_warn = None;
         // Gestures, selections and scroll positions start over; the snap stays.
         for panel in self.view.panels.values_mut() {
             panel.writer = None;

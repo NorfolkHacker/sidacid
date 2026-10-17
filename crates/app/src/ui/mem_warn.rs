@@ -271,4 +271,18 @@ mod tests {
         assert!(app.pending_warn.is_none());
         assert_eq!(app.doc.project.machines.len(), 6);
     }
+
+    #[test]
+    fn a_new_document_drops_a_held_action() {
+        let mut app = short_app();
+        app.with_memory_check(1, MemAction::Add(MachineType::Fm));
+        assert!(app.pending_warn.is_some());
+        app.load_document(Document::new(Project::default()));
+        assert!(
+            app.pending_warn.is_none(),
+            "it belonged to the old document"
+        );
+        app.resolve_memory_warning(true);
+        assert_eq!(app.doc.project.machines.len(), 6);
+    }
 }
