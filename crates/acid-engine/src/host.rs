@@ -363,9 +363,10 @@ impl EngineHost {
                 Command::Touch(id, on) => self.engine.touch(id, on),
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
                 Command::SetRack(mut swap) => {
-                    match self.engine.set_rack(&mut swap) {
-                        Some(_) => self.rack_gen = self.rack_gen.wrapping_add(1),
-                        None => self.rack_rejected = true,
+                    if self.engine.set_rack(&mut swap) {
+                        self.rack_gen = self.rack_gen.wrapping_add(1);
+                    } else {
+                        self.rack_rejected = true;
                     }
                     self.dispose(Event::DisposeRack(swap));
                 }

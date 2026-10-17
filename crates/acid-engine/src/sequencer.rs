@@ -20,7 +20,7 @@ use crate::params::{DRUM_INSTRUMENTS, ParamId};
 use crate::project::{
     Block, DrumPattern, MAX_NOTES, Note, NotePattern, SynthPattern, TICKS_PER_STEP,
 };
-use crate::rack::{CompiledSong, RackMap};
+use crate::rack::CompiledSong;
 use crate::song::{
     Bank, Banks, compiled_block_at, compiled_block_end, compiled_song_end, value_at,
 };
@@ -158,7 +158,7 @@ impl Pending {
     /// Follows a rack edit: each held event goes to its machine's new
     /// position (`new_of`, by old position); a removed machine's are
     /// dropped.
-    fn remap(&mut self, new_of: &[Option<usize>; MAX_MACHINES]) {
+    fn remap(&mut self, new_of: &[Option<usize>]) {
         self.evs.retain_mut(|(_, ev)| match ev.slot_mut() {
             Some(slot) => match new_of.get(*slot).copied().flatten() {
                 Some(new) => {
@@ -339,6 +339,8 @@ pub struct Sequencer {
     samples_to_next: f64,
     /// By rack position.
     tracks: [Track; MAX_MACHINES],
+    /// Scratch for `rearrange`: each old position's new one.
+    new_of: Vec<Option<usize>>,
     mode: Mode,
     /// Song mode: the step Play starts from.
     song_start: u32,
@@ -496,6 +498,7 @@ impl Sequencer {
             sub: 0,
             samples_to_next: 0.0,
             tracks: [Track::default(); MAX_MACHINES],
+            new_of: vec![None; MAX_MACHINES],
             mode: Mode::Pattern,
             song_start: 0,
             song_step: 0,
@@ -852,35 +855,40 @@ impl Sequencer {
     /// `song` is the song for the new rack.
     pub fn rearrange(
         &mut self,
-        map: &RackMap,
+        map: &[Option<usize>],
         banks: Banks<'_>,
         song: &CompiledSong,
-        selected: &[u8; MAX_MACHINES],
+        selected: &[u8],
     ) {
         let (old_tracks, old_chosen) = (self.tracks, self.chosen);
         // Held-back hits follow their machines (they can outlive a render
         // block, and so meet a rack edit).
-        let mut new_of = [None; MAX_MACHINES];
+        self.new_of.fill(None);
         for (pos, old) in map.iter().enumerate() {
             if let Some(o) = *old
                 && o < MAX_MACHINES
                 && banks.bank(pos).is_some()
             {
-                new_of[o] = Some(pos);
+                self.new_of[o] = Some(pos);
             }
         }
-        self.pending.remap(&new_of);
+        self.pending.remap(&self.new_of);
         for pos in 0..MAX_MACHINES {
             let in_rack = banks.bank(pos).is_some();
-            let old = map[pos].filter(|&o| o < MAX_MACHINES && in_rack);
+            let old = map
+                .get(pos)
+                .copied()
+                .flatten()
+                .filter(|&o| o < MAX_MACHINES && in_rack);
             (self.tracks[pos], self.chosen[pos]) = match old {
                 Some(o) => (old_tracks[o], old_chosen[o]),
                 None if in_rack => {
+                    let sel = selected.get(pos).copied().unwrap_or(0);
                     let t = Track {
-                        pattern: selected[pos],
+                        pattern: sel,
                         ..Track::default()
                     };
-                    (t, selected[pos])
+                    (t, sel)
                 }
                 None => (Track::default(), 0),
             };
@@ -3502,10 +3510,15 @@ mod tests {
         s.play();
         let mut ev = f.run(&mut s, at_ticks(3.0) + 1);
         assert!(s.samples_to_due() < usize::MAX, "a gate-off is held back");
-        let mut map: RackMap = std::array::from_fn(Some);
+        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
         map.swap(0, 1);
         let song = CompiledSong::default();
-        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
+        s.rearrange(
+            &map,
+            Banks::of_machines(&f.rack()),
+            &song,
+            &[0; MAX_MACHINES],
+        );
         let after = f.run(&mut s, 1500);
         assert_eq!(acid_at(&after), [], "nothing reaches B, now at position 0");
         assert!(
@@ -3535,10 +3548,15 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let mut ev = f.run(&mut s, 1);
-        let mut map: RackMap = std::array::from_fn(Some);
+        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
         map.swap(4, 5);
         let song = CompiledSong::default();
-        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
+        s.rearrange(
+            &map,
+            Banks::of_machines(&f.rack()),
+            &song,
+            &[0; MAX_MACHINES],
+        );
         let after = f.run(&mut s, 3000);
         assert!(
             after
@@ -3567,10 +3585,15 @@ mod tests {
         s.play();
         let _ = f.run(&mut s, 1);
         assert!(s.samples_to_due() < usize::MAX);
-        let mut map: RackMap = std::array::from_fn(Some);
+        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
         map[4] = None;
         f.notes[0][0].notes.clear();
-        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
+        s.rearrange(
+            &map,
+            Banks::of_machines(&f.rack()),
+            &song,
+            &[0; MAX_MACHINES],
+        );
         assert_eq!(s.samples_to_due(), usize::MAX, "dropped");
         nothing_hangs(&f.run(&mut s, 3000));
     }
@@ -3949,10 +3972,15 @@ mod tests {
         let mut s = new_seq();
         s.play();
         let _ = run_ticks(&f, &mut s, 8);
-        let mut map: RackMap = std::array::from_fn(Some);
+        let mut map: Vec<Option<usize>> = (0..MAX_MACHINES).map(Some).collect();
         map[2] = None;
         let song = CompiledSong::default();
-        s.rearrange(&map, Banks::of_machines(&f.rack()), &song, &[0; MAX_MACHINES]);
+        s.rearrange(
+            &map,
+            Banks::of_machines(&f.rack()),
+            &song,
+            &[0; MAX_MACHINES],
+        );
         assert_eq!(kit(&run_ticks(&f, &mut s, 8)), [(0, 0)]);
     }
 

@@ -210,10 +210,6 @@ impl CompiledSong {
     }
 }
 
-/// Where each new rack position's slot came from: its old position, or
-/// `None` for a fresh slot (and for positions past the rack).
-pub type RackMap = [Option<usize>; MAX_MACHINES];
-
 /// A rack edit for the audio thread (`Command::SetRack`): everything the
 /// new rack needs that the engine doesn't already hold, built on the UI
 /// thread. After `Engine::set_rack` it carries what left the engine (the
@@ -231,7 +227,13 @@ pub struct RackSwap {
     pub song: Box<CompiledSong>,
     /// Pattern selection per new position; taken (at once, not queued)
     /// by fresh slots only. Surviving slots keep their track state.
-    pub selected: [u8; MAX_MACHINES],
+    /// Same length as `order`.
+    pub selected: Vec<u8>,
+    /// Same length as `order`; filled by the engine: where each new
+    /// position's slot came from (its old position), `None` for a fresh slot.
+    pub map: Vec<Option<usize>>,
+    /// Same length as `order`; engine scratch: each new position's type.
+    pub tys: Vec<Option<MachineType>>,
 }
 
 impl RackSwap {
@@ -245,17 +247,17 @@ impl RackSwap {
             .iter()
             .map(|m| (!current.contains(&m.uid)).then(|| Slot::from_entry(m, sample_rate)))
             .collect();
-        let mut selected = [0; MAX_MACHINES];
-        for (s, m) in selected.iter_mut().zip(machines) {
-            *s = m.selected;
-        }
+        let selected = machines.iter().map(|m| m.selected).collect();
+        let n = order.len();
         let song = Box::new(CompiledSong::compile(&project.song, &order));
         Box::new(RackSwap {
             order,
             fresh,
-            into: Vec::with_capacity(MAX_MACHINES),
+            into: Vec::with_capacity(n.max(MAX_MACHINES)),
             song,
             selected,
+            map: vec![None; n],
+            tys: vec![None; n],
         })
     }
 }

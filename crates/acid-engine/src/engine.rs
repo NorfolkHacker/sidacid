@@ -8,7 +8,7 @@ use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::project::{MAX_NOTES, PATTERNS, Project};
-use crate::rack::{CompiledSong, MachineDsp, RackMap, RackSwap, Slot, SlotPatterns};
+use crate::rack::{CompiledSong, MachineDsp, RackSwap, Slot, SlotPatterns};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
@@ -193,32 +193,37 @@ impl Engine {
     /// without repeats, `fresh` as long as `order` with each slot under its
     /// own uid, every other uid in the rack now, an empty `into` with room
     /// for a full rack, and a song that fits the new rack.
-    fn check_rack(&self, swap: &RackSwap) -> Option<RackMap> {
+    fn check_rack(&self, swap: &mut RackSwap) -> bool {
         let n = swap.order.len();
         if n > MAX_MACHINES
             || swap.fresh.len() != n
+            || swap.map.len() != n
+            || swap.tys.len() != n
+            || swap.selected.len() != n
             || !swap.into.is_empty()
-            || swap.into.capacity() < MAX_MACHINES
+            || swap.into.capacity() < n.max(MAX_MACHINES)
         {
-            return None;
+            return false;
         }
-        let mut map: RackMap = [None; MAX_MACHINES];
-        let mut tys: [Option<MachineType>; MAX_MACHINES] = [None; MAX_MACHINES];
+        swap.map.fill(None);
+        swap.tys.fill(None);
         let mut param_count = GLOBALS;
         for (i, &uid) in swap.order.iter().enumerate() {
             if swap.order[..i].contains(&uid) {
-                return None;
+                return false;
             }
             let slot = match &swap.fresh[i] {
                 Some(s) if s.uid == uid => s,
-                Some(_) => return None,
+                Some(_) => return false,
                 None => {
-                    let old = self.position(uid)?;
-                    map[i] = Some(old);
+                    let Some(old) = self.position(uid) else {
+                        return false;
+                    };
+                    swap.map[i] = Some(old);
                     &self.slots[old]
                 }
             };
-            tys[i] = Some(slot.ty);
+            swap.tys[i] = Some(slot.ty);
             param_count += slot.knobs.len();
         }
         let fits = |id: ParamId| match id {
@@ -226,12 +231,12 @@ impl Engine {
                 .order
                 .iter()
                 .position(|&u| u == uid)
-                .and_then(|i| tys[i])
+                .and_then(|i| swap.tys[i])
                 .is_some_and(|ty| p.index_for(ty).is_some()),
             ParamId::Fx(_) | ParamId::Master(_) => id.global().is_some(),
         };
         let fits_events = event_reserve(param_count) <= self.events.capacity();
-        (fits_events && song_fits(&swap.song, param_count, fits)).then_some(map)
+        fits_events && song_fits(&swap.song, param_count, fits)
     }
 
     /// Swaps in a new rack (real-time safe: nothing is built, dropped or
@@ -241,10 +246,12 @@ impl Engine {
     /// plays), in phase with the running tracks. Afterwards `swap.into` holds the
     /// old slot `Vec` with the removed machines, `swap.fresh` any unused
     /// slots and `swap.song` the old song, all for disposal off the audio
-    /// thread. A malformed swap changes nothing and returns `None`;
-    /// otherwise returns where each new position came from.
-    pub fn set_rack(&mut self, swap: &mut RackSwap) -> Option<RackMap> {
-        let map = self.check_rack(swap)?;
+    /// thread. A malformed swap changes nothing and returns `false`;
+    /// otherwise `swap.map` says where each new position came from.
+    pub fn set_rack(&mut self, swap: &mut RackSwap) -> bool {
+        if !self.check_rack(swap) {
+            return false;
+        }
         let bpm = self.seq.bpm();
         for i in 0..swap.order.len() {
             let slot = match swap.fresh[i].take() {
@@ -271,13 +278,13 @@ impl Engine {
         self.param_count = GLOBALS + self.slots.iter().map(|s| s.knobs.len()).sum::<usize>();
         std::mem::swap(&mut self.song, &mut swap.song);
         self.seq.rearrange(
-            &map,
+            &swap.map,
             Banks::of_slots(&self.slots),
             &self.song,
             &swap.selected,
         );
         self.seq.resync();
-        Some(map)
+        true
     }
 
     /// How many slots the rack holds without reallocating.
@@ -1244,7 +1251,7 @@ mod tests {
         ));
         q.next_uid = 8;
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
-        eng.set_rack(&mut swap).unwrap();
+        assert!(eng.set_rack(&mut swap));
         // Position 4 is the demo's FM, on the same default pattern.
         assert_ne!(eng.positions().playhead[4], 0, "past step 0");
         assert_eq!(eng.positions().playhead[6], eng.positions().playhead[4]);
@@ -1276,7 +1283,7 @@ mod tests {
             [0, 16].map(|start| crate::project::Block::new(start, crate::project::PatternRef(2))),
         );
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
-        eng.set_rack(&mut swap).unwrap();
+        assert!(eng.set_rack(&mut swap));
         assert_eq!(
             eng.positions().patterns[6],
             2,
@@ -1334,7 +1341,7 @@ mod tests {
         q.next_uid = 8;
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR);
         assert!(swap.fresh[0].is_some() && swap.fresh[1..].iter().all(Option::is_none));
-        assert!(eng.set_rack(&mut swap).is_some());
+        assert!(eng.set_rack(&mut swap));
         let pats = eng.positions().patterns;
         assert_eq!(&pats[..4], &[9, 5, 0, 3], "new slot switched, not queued");
         assert_eq!(eng.positions().queued[0], None);
@@ -1370,7 +1377,7 @@ mod tests {
         short.fresh.pop();
         for mut swap in [dup, unknown, long, short] {
             let fresh = swap.fresh.iter().filter(|s| s.is_some()).count();
-            assert!(eng.set_rack(&mut swap).is_none());
+            assert!(!eng.set_rack(&mut swap));
             assert_eq!(eng.slot_uids(), before);
             assert!(swap.into.is_empty());
             assert_eq!(swap.fresh.iter().filter(|s| s.is_some()).count(), fresh);
@@ -1396,7 +1403,7 @@ mod tests {
         let first = q.machines.remove(0);
         q.machines.push(first);
         let mut swap = RackSwap::build(&q, &b.slot_uids(), SR);
-        assert!(b.set_rack(&mut swap).is_some());
+        assert!(b.set_rack(&mut swap));
         let by_uid = |e: &mut Engine| {
             let uids = e.slot_uids();
             let mut v = Vec::new();
@@ -1425,12 +1432,29 @@ mod tests {
         let fm = q.machines.remove(4);
         q.machines.insert(0, fm);
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR);
-        let map = eng.set_rack(&mut swap).unwrap();
+        assert!(eng.set_rack(&mut swap));
+        let map = &swap.map;
         assert_eq!(map[0], Some(4));
         assert_eq!(map[1], Some(0));
         let meters = eng.take_all_meters();
         assert!(meters[0] > 0.0, "the FM's peak moved with it");
         assert_eq!(meters[4], 0.0);
+    }
+
+    #[test]
+    fn a_rack_swap_reports_where_each_slot_came_from() {
+        let p = Project::default();
+        let mut e = Engine::from_project(SR, &p);
+        let mut q = p.clone();
+        q.machines.swap(0, 2);
+        let added = q.new_machine(MachineType::Fm);
+        q.insert_machine(q.machines.len(), added).unwrap();
+        let mut swap = RackSwap::build(&q, &e.slot_uids(), SR);
+        assert!(e.set_rack(&mut swap));
+        assert_eq!(
+            swap.map,
+            vec![Some(2), Some(1), Some(0), Some(3), Some(4), Some(5), None]
+        );
     }
 
     /// Gives `uid`'s sampler slot 0 about two seconds of noise played
