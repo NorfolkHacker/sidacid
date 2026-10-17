@@ -22,6 +22,7 @@ mod mono_patches;
 mod note_ops;
 mod note_panel;
 mod note_tools;
+mod padkit_panel;
 mod pads;
 mod params_ui;
 mod perf;
@@ -747,8 +748,7 @@ impl SidAcidApp {
                 MachineType::Fm => self.fm_panel(ui, uid),
                 MachineType::Sampler => self.sampler_panel(ui, uid),
                 MachineType::Mono => self.mono_panel(ui, uid),
-                // Placeholder: the Pad Kit panel arrives in a later task.
-                MachineType::PadKit => {}
+                MachineType::PadKit => self.padkit_panel(ui, uid),
             }
             ui.add_space(6.0);
         }

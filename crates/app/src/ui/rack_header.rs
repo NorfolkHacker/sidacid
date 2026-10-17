@@ -546,4 +546,27 @@ mod tests {
         }
         assert!(app.doc.project.validate().is_ok());
     }
+
+    #[test]
+    fn a_pad_kit_is_named_pads_and_a_paste_onto_it_drops_notes_past_pad_16() {
+        let mut app = demo();
+        app.view.rack_action = Some(RackAction::Add(MachineType::PadKit));
+        run_frames(&mut app, 2);
+        let uid = *app.doc.project.rack_uids().last().unwrap();
+        assert_eq!(app.doc.project.machine(uid).unwrap().name, "Pads");
+        let mut roll = app.doc.project.padkit(uid).unwrap().patterns[0].clone();
+        let note = |pitch| acid_engine::project::Note::new(0, 6, pitch, 100);
+        roll.notes = vec![note(3), note(40)];
+        app.view.focus = Some(uid);
+        app.view.clipboard = Some(crate::ui::files::Clip::Notes(roll));
+        app.paste_pattern();
+        let slot = app.selected(uid) as usize;
+        let pitches: Vec<u8> = app.doc.project.padkit(uid).unwrap().patterns[slot]
+            .notes
+            .iter()
+            .map(|n| n.pitch)
+            .collect();
+        assert_eq!(pitches, [3]);
+        assert!(app.doc.project.validate().is_ok());
+    }
 }

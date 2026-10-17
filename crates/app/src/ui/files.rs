@@ -523,6 +523,14 @@ impl SidAcidApp {
                 slot,
                 pattern: Box::new(p.clone()),
             },
+            (Some(Clip::Notes(p)), MachineBody::PadKit(_)) => {
+                let mut pattern = Box::new(p.clone());
+                // A Pad Kit has 16 pads: higher notes would make the project invalid.
+                pattern
+                    .notes
+                    .retain(|n| (n.pitch as usize) < acid_engine::padkit::PADS);
+                Edit::NotePattern { uid, slot, pattern }
+            }
             _ => {
                 self.view.message = Some("The clipboard holds a different kind of pattern.".into());
                 return;

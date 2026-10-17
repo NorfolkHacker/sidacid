@@ -5,6 +5,9 @@
 use acid_engine::fm::sysex::Dx7Voice;
 use acid_engine::host::{Command, PatternData};
 use acid_engine::machine::{MachineType, MachineUid, default_name};
+use acid_engine::padkit::MAX_LAYERS;
+use acid_engine::padkit::pad::Pad;
+use acid_engine::padkit::play::PadPlay;
 use acid_engine::params::{DRUM_INSTRUMENTS, ParamId};
 use acid_engine::project::{
     DrumPattern, MachineBody, MachineEntry, NotePattern, Project, RemovedMachine, STEPS, Song,
@@ -27,6 +30,7 @@ const NO_NOTES: &str = "the edit names a machine with patterns in the rack";
 const NO_FM: &str = "the edit names an FM machine in the rack";
 const NO_MONO: &str = "the edit names a Mono machine in the rack";
 const NO_SAMPLER: &str = "the edit names a sampler in the rack";
+const NO_PADKIT: &str = "the edit names a Pad Kit in the rack";
 const NO_ROOM: &str = "the machine's uid is free";
 
 /// One change to the project. Each edit names its machine by `uid`, which
@@ -102,6 +106,23 @@ pub enum Edit {
         data: Option<Box<SlotData>>,
         values: Vec<(ParamId, f32)>,
     },
+    /// Replacing one pad (layers, ranges, name), with knob values: one undo step.
+    #[allow(dead_code)] // the pad panel uses it in a later task
+    PadKitPad {
+        uid: MachineUid,
+        pad: usize,
+        data: Box<Pad>,
+        values: Vec<(ParamId, f32)>,
+    },
+    /// Replacing all the pads at once (loading a kit), with knob values.
+    #[allow(dead_code)] // the kit loader uses it in a later task
+    PadKitKit {
+        uid: MachineUid,
+        // Boxed to keep `Edit` small.
+        #[allow(clippy::box_collection)]
+        pads: Box<Vec<Pad>>,
+        values: Vec<(ParamId, f32)>,
+    },
     /// Changing a loaded slot's zone, slices, mode or markers.
     SlotMeta {
         uid: MachineUid,
@@ -156,6 +177,9 @@ enum MergeKey {
     FmBank(MachineUid),
     SamplerSlot(MachineUid, usize),
     SlotMeta(MachineUid, usize),
+    PadKitPad(MachineUid, usize),
+    /// Loading a kit never merges.
+    PadKitKit,
     Group,
     /// Rack edits: never merge, each is its own undo step.
     Rack,
@@ -179,6 +203,8 @@ fn merge_key(edit: &Edit) -> MergeKey {
         Edit::FmBank { uid, .. } => MergeKey::FmBank(*uid),
         Edit::SamplerSlot { uid, slot, .. } => MergeKey::SamplerSlot(*uid, *slot),
         Edit::SlotMeta { uid, slot, .. } => MergeKey::SlotMeta(*uid, *slot),
+        Edit::PadKitPad { uid, pad, .. } => MergeKey::PadKitPad(*uid, *pad),
+        Edit::PadKitKit { .. } => MergeKey::PadKitKit,
         Edit::Group(_) => MergeKey::Group,
         Edit::InsertMachine { .. }
         | Edit::RemoveMachine { .. }
@@ -204,10 +230,53 @@ struct Step {
     generation: u64,
 }
 
+/// Sets each value, returning the old ones in reverse order (an edit's inverse).
+fn swap_values(p: &mut Project, values: Vec<(ParamId, f32)>) -> Vec<(ParamId, f32)> {
+    let mut old: Vec<_> = values
+        .into_iter()
+        .map(|(id, v)| {
+            let before = p.param(id);
+            p.set_param(id, v.clamp(0.0, 1.0));
+            (id, before)
+        })
+        .collect();
+    old.reverse();
+    old
+}
+
+fn set_params(p: &Project, values: &[(ParamId, f32)]) -> impl Iterator<Item = Command> {
+    values
+        .iter()
+        .map(|(id, _)| Command::SetParam(*id, p.param(*id)))
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// One `PadSample` for each layer of pad `pad`, `None` past its last.
+fn pad_commands(uid: MachineUid, pads: &[Pad], pad: usize) -> Vec<Command> {
+    (0..MAX_LAYERS)
+        .map(|layer| Command::PadSample {
+            uid,
+            pad: pad as u8,
+            layer: layer as u8,
+            sample: pads[pad].layers.get(layer).map(|l| Arc::new(l.to_sample())),
+        })
+        .collect()
+}
+
+fn pad_play(uid: MachineUid, pads: &[Pad]) -> Command {
+    Command::PadPlay {
+        uid,
+        play: Box::new(PadPlay::from_pads(pads)),
+    }
+}
+
 /// Approximate size of the sample data an edit holds.
 fn edit_bytes(edit: &Edit) -> usize {
     match edit {
         Edit::SamplerSlot { data: Some(d), .. } => d.pcm.len() * std::mem::size_of::<i16>(),
+        Edit::PadKitPad { data, .. } => pad_bytes(std::slice::from_ref(&**data)),
+        Edit::PadKitKit { pads, .. } => pad_bytes(pads),
         Edit::Group(edits) => edits.iter().map(edit_bytes).sum(),
         Edit::InsertMachine { removed } => match &removed.entry.body {
             MachineBody::Sampler(s) => s
@@ -216,10 +285,19 @@ fn edit_bytes(edit: &Edit) -> usize {
                 .flatten()
                 .map(|d| d.pcm.len() * std::mem::size_of::<i16>())
                 .sum(),
+            MachineBody::PadKit(k) => pad_bytes(&k.pads),
             _ => 0,
         },
         _ => 0,
     }
+}
+
+/// Approximate size of the audio in `pads`, counted like a sampler slot's.
+fn pad_bytes(pads: &[Pad]) -> usize {
+    pads.iter()
+        .flat_map(|p| &p.layers)
+        .map(|l| l.pcm.len() * std::mem::size_of::<i16>())
+        .sum()
 }
 
 pub struct Document {
@@ -929,6 +1007,31 @@ impl Document {
                     values: old_values,
                 }
             }
+            Edit::PadKitPad {
+                uid,
+                pad,
+                data,
+                values,
+            } => {
+                let old =
+                    std::mem::replace(&mut p.padkit_mut(uid).expect(NO_PADKIT).pads[pad], *data);
+                let old_values = swap_values(p, values);
+                Edit::PadKitPad {
+                    uid,
+                    pad,
+                    data: Box::new(old),
+                    values: old_values,
+                }
+            }
+            Edit::PadKitKit { uid, pads, values } => {
+                let old = std::mem::replace(&mut p.padkit_mut(uid).expect(NO_PADKIT).pads, *pads);
+                let old_values = swap_values(p, values);
+                Edit::PadKitKit {
+                    uid,
+                    pads: Box::new(old),
+                    values: old_values,
+                }
+            }
             Edit::SlotMeta { uid, slot, meta } => {
                 match p.sampler_mut(uid).expect(NO_SAMPLER).slots[slot].as_mut() {
                     Some(d) => Edit::SlotMeta {
@@ -1029,6 +1132,24 @@ impl Document {
                         .iter()
                         .map(|(id, _)| Command::SetParam(*id, p.param(*id))),
                 );
+                cmds
+            }
+            Edit::PadKitPad {
+                uid, pad, values, ..
+            } => {
+                let pads = &p.padkit(*uid).expect(NO_PADKIT).pads;
+                let mut cmds = pad_commands(*uid, pads, *pad);
+                cmds.push(pad_play(*uid, pads));
+                cmds.extend(set_params(p, values));
+                cmds
+            }
+            Edit::PadKitKit { uid, values, .. } => {
+                let pads = &p.padkit(*uid).expect(NO_PADKIT).pads;
+                let mut cmds: Vec<Command> = (0..pads.len())
+                    .flat_map(|i| pad_commands(*uid, pads, i))
+                    .collect();
+                cmds.push(pad_play(*uid, pads));
+                cmds.extend(set_params(p, values));
                 cmds
             }
             Edit::SlotMeta { uid, slot, .. } => vec![Command::SamplerPlay {
@@ -1954,6 +2075,91 @@ mod tests {
             }]
         ));
         assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn a_pad_edit_sends_its_audio_and_play_and_undoes() {
+        use acid_engine::padkit::pad::{Layer, Pad};
+        let mut d = Document::new(Project::default());
+        let (uid, _) = d.add_machine(MachineType::PadKit).unwrap();
+        let mut pad = Pad::default();
+        pad.layers.push(Layer::new("k", 44_100, 1, &[0.5; 100]));
+        pad.split_evenly();
+        let cmds = d.apply(
+            Edit::PadKitPad {
+                uid,
+                pad: 2,
+                data: Box::new(pad.clone()),
+                values: vec![],
+            },
+            false,
+        );
+        let samples = cmds
+            .iter()
+            .filter(|c| matches!(c, Command::PadSample { pad: 2, .. }))
+            .count();
+        assert_eq!(samples, acid_engine::padkit::MAX_LAYERS);
+        assert!(cmds.iter().any(|c| matches!(c, Command::PadPlay { .. })));
+        assert_eq!(d.project.padkit(uid).unwrap().pads[2], pad);
+        d.undo();
+        assert_eq!(d.project.padkit(uid).unwrap().pads[2], Pad::default());
+    }
+
+    #[test]
+    fn pad_drags_merge_and_a_kit_load_and_a_removed_kit_count_their_audio() {
+        use acid_engine::padkit::pad::{Layer, Pad};
+        let mut d = Document::new(Project::default());
+        let (uid, _) = d.add_machine(MachineType::PadKit).unwrap();
+        let depth = d.undo_depth();
+        let pad_with = |n: usize| {
+            let mut p = Pad::default();
+            p.layers.push(Layer::new("k", 44_100, 1, &vec![0.5; n]));
+            p.split_evenly();
+            p
+        };
+        for n in [10, 20, 30] {
+            let edit = Edit::PadKitPad {
+                uid,
+                pad: 1,
+                data: Box::new(pad_with(n)),
+                values: vec![],
+            };
+            d.apply(edit, true);
+        }
+        assert_eq!(d.undo_depth(), depth + 1);
+        d.undo();
+        assert_eq!(d.project.padkit(uid).unwrap().pads[1], Pad::default());
+        let mut pads = vec![Pad::default(); acid_engine::padkit::PADS];
+        pads[0] = pad_with(50);
+        let cmds = d.apply(
+            Edit::PadKitKit {
+                uid,
+                pads: Box::new(pads.clone()),
+                values: vec![],
+            },
+            true,
+        );
+        let n = cmds
+            .iter()
+            .filter(|c| matches!(c, Command::PadSample { .. }))
+            .count();
+        assert_eq!(
+            n,
+            acid_engine::padkit::PADS * acid_engine::padkit::MAX_LAYERS
+        );
+        let e = Edit::PadKitKit {
+            uid,
+            pads: Box::new(pads),
+            values: vec![],
+        };
+        assert_eq!(edit_bytes(&e), 100);
+        let removed = d.project.remove_machine(uid).unwrap();
+        assert_eq!(
+            edit_bytes(&Edit::InsertMachine {
+                removed: Box::new(removed)
+            }),
+            100
+        );
     }
 
     #[test]
