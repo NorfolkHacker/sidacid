@@ -256,8 +256,8 @@ impl SidAcidApp {
             .panels
             .retain(|&uid, _| self.doc.project.machine(uid).is_some());
         if let Some(audio) = self.audio.as_mut() {
-            // Stale events (disposals, old status) belong to the old engine.
-            while audio.poll().is_some() {}
+            let stale: Vec<_> = std::iter::from_fn(|| audio.poll()).collect();
+            self.drop_stale_events(stale);
         }
         if let Some(audio) = self.audio.as_mut()
             && audio.load_project(&self.doc.project).is_err()

@@ -560,19 +560,11 @@ impl SidAcidApp {
             return;
         }
         while let Some(event) = self.audio.as_mut().and_then(AudioLink::poll) {
-            let back = match event {
-                Event::Status(mut status) => {
-                    let positions = status.positions.take();
-                    self.on_status(status, positions.as_deref(), now);
-                    positions
-                }
-                Event::DisposePositions(b) => Some(b),
-                // Other dispose events drop here, on the UI thread.
-                _ => None,
-            };
-            if let Some(b) = back.and_then(|b| self.pool.returned(b)) {
-                self.pending.push(Command::StatusBuffer(b));
+            let (status, buffer) = split_buffer(event);
+            if let Some(status) = status {
+                self.on_status(status, buffer.as_deref(), now);
             }
+            self.recycle(buffer);
         }
         let failed = self.audio.as_ref().is_some_and(AudioLink::has_failed);
         let fresh = self.pool.top_up();
@@ -581,6 +573,23 @@ impl SidAcidApp {
         self.flush_pending();
         if failed {
             self.on_audio_failed();
+        }
+    }
+
+    /// Hands a status buffer that came back to the pool, queueing it for
+    /// the host again when it is reused.
+    fn recycle(&mut self, buffer: Option<Box<PositionStatus>>) {
+        if let Some(b) = buffer.and_then(|b| self.pool.returned(b)) {
+            self.pending.push(Command::StatusBuffer(b));
+        }
+    }
+
+    /// Events from before a load: they belong to the old engine, but
+    /// their status buffers go back to the pool.
+    pub(crate) fn drop_stale_events(&mut self, events: impl IntoIterator<Item = Event>) {
+        for event in events {
+            let (_, buffer) = split_buffer(event);
+            self.recycle(buffer);
         }
     }
 
@@ -800,6 +809,20 @@ impl eframe::App for SidAcidApp {
 
 /// Sends commands from the front of `pending` until `send` refuses one;
 /// that one and everything after it stay queued, in order.
+/// An event's status (its `positions` taken out) and status buffer
+/// (filled, or disposed). Other dispose events drop here, on the UI
+/// thread.
+fn split_buffer(event: Event) -> (Option<Status>, Option<Box<PositionStatus>>) {
+    match event {
+        Event::Status(mut status) => {
+            let positions = status.positions.take();
+            (Some(status), positions)
+        }
+        Event::DisposePositions(b) => (None, Some(b)),
+        _ => (None, None),
+    }
+}
+
 fn send_in_order(
     pending: &mut Vec<Command>,
     send: &mut impl FnMut(Command) -> Result<(), Command>,
@@ -1019,6 +1042,29 @@ mod tests {
             app.view.fault_until, 13.0,
             "a clean status leaves the fault shown"
         );
+    }
+
+    #[test]
+    fn stale_events_hand_their_status_buffers_back() {
+        use acid_engine::host::STATUS_BUFFERS;
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        assert_eq!(app.pool.top_up().len(), STATUS_BUFFERS);
+        let filled = Status {
+            positions: Some(PositionStatus::with_capacity(16)),
+            ..Status::default()
+        };
+        app.drop_stale_events([
+            Event::Status(filled),
+            Event::DisposePositions(PositionStatus::with_capacity(16)),
+            Event::Status(Status::default()),
+        ]);
+        let resent = app
+            .pending
+            .iter()
+            .filter(|c| matches!(c, Command::StatusBuffer(_)))
+            .count();
+        assert_eq!(resent, 2, "both buffers go back to the host");
+        assert!(app.pool.top_up().is_empty(), "and still count as out");
     }
 
     #[test]
