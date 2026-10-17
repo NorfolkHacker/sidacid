@@ -53,6 +53,10 @@ pub struct Slot {
     pub patterns: SlotPatterns,
     pub strip: ChannelStrip,
     pub buf: StereoBuf,
+    /// Post-fader peak since the last take; 0 when muted.
+    pub meter: f32,
+    /// Render + strip time (ns) since the last take.
+    pub cpu_ns: u64,
 }
 
 impl Slot {
@@ -105,6 +109,8 @@ impl Slot {
             patterns,
             strip: ChannelStrip::new(sample_rate),
             buf: StereoBuf::new(Engine::MAX_BLOCK),
+            meter: 0.0,
+            cpu_ns: 0,
         };
         for i in 0..slot.params.len() {
             slot.apply(slot.params[i], slot.knobs[i]);
@@ -207,15 +213,6 @@ impl CompiledSong {
 /// Where each new rack position's slot came from: its old position, or
 /// `None` for a fresh slot (and for positions past the rack).
 pub type RackMap = [Option<usize>; MAX_MACHINES];
-
-/// Moves per-position values to the new positions in `map`; fresh slots
-/// (and positions past the rack) read the default.
-pub fn remap_positions<T: Copy + Default>(values: &mut [T; MAX_MACHINES], map: &RackMap) {
-    let old = *values;
-    for (v, from) in values.iter_mut().zip(map) {
-        *v = from.and_then(|o| old.get(o)).copied().unwrap_or_default();
-    }
-}
 
 /// A rack edit for the audio thread (`Command::SetRack`): everything the
 /// new rack needs that the engine doesn't already hold, built on the UI

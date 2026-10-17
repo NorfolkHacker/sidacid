@@ -523,8 +523,8 @@ fn cpu_timing_does_not_allocate() {
     let n = count_allocs(|| {
         for _ in 0..200 {
             e.process(&mut l, &mut r);
-            let (slots, shared) = e.take_cpu_ns();
-            total += slots.iter().sum::<u64>() + shared;
+            total += e.take_shared_ns();
+            e.take_slot_stats(|_, _, ns| total += ns);
         }
     });
     assert_eq!(n, 0);

@@ -6,10 +6,9 @@
 
 use crate::engine::Engine;
 use crate::machine::{MAX_MACHINES, MachineUid};
-use crate::mixer::remap_meters;
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
-use crate::rack::{CompiledSong, RackSwap, remap_positions};
+use crate::rack::{CompiledSong, RackSwap};
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
 use crate::sequencer::Mode;
@@ -159,7 +158,8 @@ pub struct EngineHost {
     events: Producer<Event>,
     status_every: usize,
     since_status: usize,
-    meters: [f32; MAX_MACHINES + 1],
+    /// The master peak since the previous status.
+    master_meter: f32,
     guard_fired: bool,
     song_rejected: bool,
     rack_rejected: bool,
@@ -169,8 +169,8 @@ pub struct EngineHost {
     cpu_peak: f32,
     overruns: u32,
     stops: u32,
-    /// Engine work since the previous status, by rack position and shared.
-    slot_ns: [u64; MAX_MACHINES],
+    /// Shared engine work (sequencing, sends, master) since the previous
+    /// status; each slot keeps its own until a status takes it.
     shared_ns: u64,
     /// Frames rendered since the previous status (the audio time the
     /// work above covers).
@@ -194,7 +194,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         events: event_tx,
         status_every,
         since_status: 0,
-        meters: [0.0; MAX_MACHINES + 1],
+        master_meter: 0.0,
         guard_fired: false,
         song_rejected: false,
         rack_rejected: false,
@@ -203,7 +203,6 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         cpu_peak: 0.0,
         overruns: 0,
         stops: 0,
-        slot_ns: [0; MAX_MACHINES],
         shared_ns: 0,
         cpu_frames: 0,
     };
@@ -231,16 +230,9 @@ impl EngineHost {
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         self.drain_commands();
         self.engine.process(out_l, out_r);
-        let meters = self.engine.take_meters();
-        for (acc, m) in self.meters.iter_mut().zip(&meters) {
-            *acc = acc.max(*m);
-        }
+        self.master_meter = self.master_meter.max(self.engine.take_master_meter());
         self.guard_fired |= self.engine.take_guard_fired();
-        let (slot_ns, shared_ns) = self.engine.take_cpu_ns();
-        for (acc, ns) in self.slot_ns.iter_mut().zip(slot_ns) {
-            *acc = acc.saturating_add(ns);
-        }
-        self.shared_ns = self.shared_ns.saturating_add(shared_ns);
+        self.shared_ns = self.shared_ns.saturating_add(self.engine.take_shared_ns());
         self.cpu_frames = self.cpu_frames.saturating_add(out_l.len());
         self.since_status += out_l.len();
         if self.since_status >= self.status_every {
@@ -294,14 +286,13 @@ impl EngineHost {
                     std::mem::swap(&mut self.engine, &mut engine);
                     self.dispose(Event::DisposeEngine(engine));
                     // Nothing from the old engine carries over to the new one.
-                    self.meters = [0.0; MAX_MACHINES + 1];
+                    self.master_meter = 0.0;
                     self.guard_fired = false;
                     self.song_rejected = false;
                     self.rack_rejected = false;
                     self.rack_gen = self.rack_gen.wrapping_add(1);
                     self.since_status = 0;
                     self.stops = 0;
-                    self.slot_ns = [0; MAX_MACHINES];
                     self.shared_ns = 0;
                     self.cpu_frames = 0;
                 }
@@ -315,11 +306,7 @@ impl EngineHost {
                 Command::SetParamLive(id, v) => self.engine.set_param_live(id, v),
                 Command::SetRack(mut swap) => {
                     match self.engine.set_rack(&mut swap) {
-                        Some(map) => {
-                            remap_meters(&mut self.meters, &map);
-                            remap_positions(&mut self.slot_ns, &map);
-                            self.rack_gen = self.rack_gen.wrapping_add(1);
-                        }
+                        Some(_) => self.rack_gen = self.rack_gen.wrapping_add(1),
                         None => self.rack_rejected = true,
                     }
                     self.dispose(Event::DisposeRack(swap));
@@ -341,17 +328,31 @@ impl EngineHost {
     }
 
     fn send_status(&mut self) {
+        // Statuses stop once only the disposal reserve is free; the slots
+        // keep their stats until one goes out.
+        if self.events.slots() <= DISPOSAL_RESERVE {
+            return;
+        }
         let secs = self.cpu_frames as f32 / self.engine.sample_rate();
         let share = |ns: u64| {
             let s = ns as f32 / 1e9 / secs;
             if secs > 0.0 && s.is_finite() { s } else { 0.0 }
         };
+        let mut meters = [0.0; MAX_MACHINES + 1];
+        let mut slot_cpu = [0.0; MAX_MACHINES];
+        self.engine.take_slot_stats(|pos, m, ns| {
+            if pos < MAX_MACHINES {
+                meters[pos] = m;
+                slot_cpu[pos] = share(ns);
+            }
+        });
+        meters[MAX_MACHINES] = self.master_meter;
         let status = Status {
             playing: self.engine.is_playing(),
             playhead: self.engine.playhead(),
             patterns: self.engine.current_patterns(),
             queued: self.engine.queued_patterns(),
-            meters: self.meters,
+            meters,
             cpu: self.cpu,
             cpu_peak: self.cpu_peak,
             overruns: self.overruns,
@@ -363,17 +364,15 @@ impl EngineHost {
             rack_rejected: self.rack_rejected,
             stops: self.stops,
             rack_gen: self.rack_gen,
-            slot_cpu: self.slot_ns.map(share),
+            slot_cpu,
             shared_cpu: share(self.shared_ns),
         };
-        if self.events.slots() > DISPOSAL_RESERVE && self.events.push(Event::Status(status)).is_ok()
-        {
-            self.meters = [0.0; MAX_MACHINES + 1];
+        if self.events.push(Event::Status(status)).is_ok() {
+            self.master_meter = 0.0;
             self.cpu_peak = 0.0;
             self.guard_fired = false;
             self.song_rejected = false;
             self.rack_rejected = false;
-            self.slot_ns = [0; MAX_MACHINES];
             self.shared_ns = 0;
             self.cpu_frames = 0;
         }
@@ -756,7 +755,7 @@ mod tests {
     fn replace_engine_clears_host_state() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         host.guard_fired = true;
-        host.meters = [1.0; MAX_MACHINES + 1];
+        host.master_meter = 1.0;
         host.since_status = host.status_every - 1;
         tx.push(Command::ReplaceEngine(Box::new(Engine::new(SR))))
             .unwrap();

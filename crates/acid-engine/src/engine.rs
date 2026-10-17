@@ -8,9 +8,7 @@ use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::project::{MAX_NOTES, PATTERNS, Project};
-use crate::rack::{
-    CompiledSong, MachineDsp, RackMap, RackSwap, Slot, SlotPatterns, remap_positions,
-};
+use crate::rack::{CompiledSong, MachineDsp, RackMap, RackSwap, Slot, SlotPatterns};
 use crate::sampler::Sampler;
 use crate::sampler::sample::SampleData;
 use crate::sampler::slot::SlotPlay;
@@ -108,11 +106,8 @@ pub struct Engine {
     /// The song ended by itself and no transport command came since: the
     /// next `stop` counts as the first one (it only releases).
     ended_by_song: bool,
-    /// Nanoseconds spent rendering and mixing each rack position since
-    /// the last `take_cpu_ns`.
-    slot_ns: [u64; MAX_MACHINES],
     /// Nanoseconds of the rest of `process` (sequencing, sends, master)
-    /// since the last `take_cpu_ns`.
+    /// since the last `take_shared_ns`.
     shared_ns: u64,
 }
 
@@ -142,7 +137,6 @@ impl Engine {
             guard_fired: false,
             song: CompiledSong::default(),
             ended_by_song: false,
-            slot_ns: [0; MAX_MACHINES],
             shared_ns: 0,
         };
         e.load_project(p);
@@ -155,7 +149,7 @@ impl Engine {
     /// non-audio thread before handing the engine to the audio thread.
     pub(crate) fn load_project(&mut self, p: &Project) {
         self.slots.clear();
-        self.take_cpu_ns();
+        self.take_shared_ns();
         self.slots.extend(
             p.machines
                 .iter()
@@ -277,8 +271,6 @@ impl Engine {
             &self.song,
             &swap.selected,
         );
-        self.mixer.rearrange(&map);
-        remap_positions(&mut self.slot_ns, &map);
         self.seq.resync();
         Some(map)
     }
@@ -728,19 +720,27 @@ impl Engine {
         std::array::from_fn(|m| self.seq.queued_pattern(m))
     }
 
-    /// See `Mixer::take_meters`: by rack position, master at `MAX_MACHINES`.
-    pub fn take_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
-        self.mixer.take_meters()
+    /// See `Mixer::take_master_meter`.
+    pub fn take_master_meter(&mut self) -> f32 {
+        self.mixer.take_master_meter()
     }
 
-    /// Nanoseconds of work per rack position (its machine's render and
-    /// channel strip) and for shared work (sequencing, sends, master)
-    /// since the last call; resets them.
-    pub fn take_cpu_ns(&mut self) -> ([u64; MAX_MACHINES], u64) {
-        (
-            std::mem::take(&mut self.slot_ns),
-            std::mem::take(&mut self.shared_ns),
-        )
+    /// Nanoseconds of shared work (sequencing, sends, master) since the
+    /// last call; resets it.
+    pub fn take_shared_ns(&mut self) -> u64 {
+        std::mem::take(&mut self.shared_ns)
+    }
+
+    /// Calls `f(pos, meter, cpu_ns)` for each slot in rack order and resets
+    /// both: its post-fader peak and its render and strip time.
+    pub fn take_slot_stats(&mut self, mut f: impl FnMut(usize, f32, u64)) {
+        for (pos, s) in self.slots.iter_mut().enumerate() {
+            f(
+                pos,
+                std::mem::take(&mut s.meter),
+                std::mem::take(&mut s.cpu_ns),
+            );
+        }
     }
 
     /// True once if the mixer's NaN guard fired since the last call.
@@ -860,24 +860,20 @@ impl Engine {
                 until.min(n - pos)
             }
             .min(due);
-            for (s, ns) in self.slots.iter_mut().zip(self.slot_ns.iter_mut()) {
+            for s in self.slots.iter_mut() {
                 let start = Instant::now();
                 s.render(pos..pos + run);
                 let spent = start.elapsed().as_nanos() as u64;
-                *ns = ns.saturating_add(spent);
+                s.cpu_ns = s.cpu_ns.saturating_add(spent);
                 slot_spent = slot_spent.saturating_add(spent);
             }
             self.seq.advance(run);
             pos += run;
         }
-        let mut strip_ns = [0u64; MAX_MACHINES];
-        let fired = self
-            .mixer
-            .process(&mut self.slots, n, out_l, out_r, &mut strip_ns);
-        for (ns, strip) in self.slot_ns.iter_mut().zip(strip_ns) {
-            *ns = ns.saturating_add(strip);
-            slot_spent = slot_spent.saturating_add(strip);
-        }
+        let before: u64 = self.slots.iter().map(|s| s.cpu_ns).sum();
+        let fired = self.mixer.process(&mut self.slots, n, out_l, out_r);
+        let after: u64 = self.slots.iter().map(|s| s.cpu_ns).sum();
+        slot_spent = slot_spent.saturating_add(after.saturating_sub(before));
         if fired {
             self.guard_fired = true;
             for s in &mut self.slots {
@@ -1279,11 +1275,14 @@ mod tests {
             "the block's pattern, not the selection"
         );
         assert_eq!(eng.playhead()[6], eng.playhead()[0]);
-        eng.take_meters();
+        eng.take_all_meters();
         let (mut l, mut r) = (vec![0.0; 12000], vec![0.0; 12000]);
         eng.process(&mut l, &mut r);
         assert_eq!(eng.song_bar(), 0, "still the same block");
-        assert!(eng.take_meters()[6] > 0.0, "sounds before the next block");
+        assert!(
+            eng.take_all_meters()[6] > 0.0,
+            "sounds before the next block"
+        );
     }
 
     #[test]
@@ -1373,6 +1372,40 @@ mod tests {
     }
 
     #[test]
+    fn a_slots_meter_follows_it_through_a_rack_edit() {
+        // Two identical engines render the same audio; one then moves its
+        // first machine to the end. Meters, keyed by uid, must agree.
+        let p = crate::demo::demo_project(); // the default project is silent
+        let (mut a, mut b) = (Engine::from_project(SR, &p), Engine::from_project(SR, &p));
+        a.play();
+        b.play();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for _ in 0..200 {
+            a.process(&mut l, &mut r);
+            b.process(&mut l, &mut r);
+        }
+        let mut q = p.clone();
+        let first = q.machines.remove(0);
+        q.machines.push(first);
+        let mut swap = RackSwap::build(&q, &b.slot_uids(), SR);
+        assert!(b.set_rack(&mut swap).is_some());
+        let by_uid = |e: &mut Engine| {
+            let uids = e.slot_uids();
+            let mut v = Vec::new();
+            e.take_slot_stats(|pos, m, ns| v.push((uids[pos], m, ns > 0)));
+            v.sort_by_key(|x| x.0);
+            v
+        };
+        let (sa, sb) = (by_uid(&mut a), by_uid(&mut b));
+        assert!(sa.iter().any(|x| x.1 > 0.0), "something played: {sa:?}");
+        assert_eq!(sa, sb, "each slot kept its own meter and time");
+        assert!(
+            by_uid(&mut a).iter().all(|x| x.1 == 0.0 && !x.2),
+            "taking resets"
+        );
+    }
+
+    #[test]
     fn meters_follow_their_machine_through_a_swap() {
         let mut p = Project::default();
         p.machines.truncate(5); // drop the sampler
@@ -1387,7 +1420,7 @@ mod tests {
         let map = eng.set_rack(&mut swap).unwrap();
         assert_eq!(map[0], Some(4));
         assert_eq!(map[1], Some(0));
-        let meters = eng.take_meters();
+        let meters = eng.take_all_meters();
         assert!(meters[0] > 0.0, "the FM's peak moved with it");
         assert_eq!(meters[4], 0.0);
     }
@@ -1432,7 +1465,8 @@ mod tests {
         for _ in 0..200 {
             eng.process(&mut l, &mut r);
         }
-        let (ns, _) = eng.take_cpu_ns();
+        let mut ns = [0u64; MAX_MACHINES];
+        eng.take_slot_stats(|pos, _, t| ns[pos] = t);
         let pos_s = p.position(sampler_uid).unwrap();
         let pos_y = 1 - pos_s;
         assert!(
@@ -1441,7 +1475,7 @@ mod tests {
             ns[pos_s],
             ns[pos_y]
         );
-        assert_eq!(eng.take_cpu_ns().0, [0; MAX_MACHINES], "taking resets");
+        eng.take_slot_stats(|_, _, t| assert_eq!(t, 0, "taking resets"));
     }
 
     #[test]
@@ -1470,8 +1504,20 @@ mod tests {
 
     impl Engine {
         /// The CPU accumulators, without resetting them.
-        fn peek_cpu_ns(&self) -> ([u64; MAX_MACHINES], u64) {
-            (self.slot_ns, self.shared_ns)
+        fn peek_cpu_ns(&self) -> (Vec<u64>, u64) {
+            (
+                self.slots.iter().map(|s| s.cpu_ns).collect(),
+                self.shared_ns,
+            )
+        }
+
+        /// Slot peaks by rack position (unused positions 0), the master at
+        /// `MAX_MACHINES`; resets them.
+        fn take_all_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
+            let mut m = [0.0; MAX_MACHINES + 1];
+            self.take_slot_stats(|pos, v, _| m[pos] = v);
+            m[MAX_MACHINES] = self.take_master_meter();
+            m
         }
 
         fn fm(&self) -> &FmSynth {
@@ -1541,7 +1587,7 @@ mod tests {
         let mut e = Engine::from_project(SR, &sampler_project());
         e.play();
         render(&mut e, 0.2);
-        let m = e.take_meters();
+        let m = e.take_all_meters();
         assert!(m[5] > 0.01, "{m:?}");
         assert!(m[..5].iter().all(|v| *v == 0.0), "{m:?}");
     }
@@ -1619,7 +1665,7 @@ mod tests {
         let mut e = Engine::from_project(SR, &p);
         e.play();
         render(&mut e, 0.5);
-        let m = e.take_meters();
+        let m = e.take_all_meters();
         assert!(m[4] > 0.01 && m[5] > 0.01, "{m:?}");
         assert!(m[..4].iter().all(|v| *v == 0.0), "{m:?}");
     }
@@ -2003,7 +2049,7 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         render(&mut e, 0.5);
-        let m = e.take_meters();
+        let m = e.take_all_meters();
         assert!(
             m[..4].iter().all(|v| *v > 0.01),
             "both synths and kits: {m:?}"
@@ -2012,9 +2058,9 @@ mod tests {
         assert!(m[MAX_MACHINES] <= 1.0 + 1e-6, "master is post-clip");
         e.stop();
         render(&mut e, 5.0);
-        e.take_meters();
+        e.take_all_meters();
         render(&mut e, 0.05);
-        assert!(e.take_meters().iter().all(|v| *v < 1e-3));
+        assert!(e.take_all_meters().iter().all(|v| *v < 1e-3));
         assert!(!e.take_guard_fired());
     }
 

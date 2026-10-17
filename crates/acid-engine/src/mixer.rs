@@ -3,9 +3,8 @@
 //! master compressor, master level, optional lo-fi, final clip and NaN guard.
 
 use crate::fx::{Compressor, Delay, Distortion, LoFi, Reverb};
-use crate::machine::MAX_MACHINES;
 use crate::params::{ChannelParam, FxParam, GlobalParam, MasterParam, exp, on, step_index};
-use crate::rack::{RackMap, Slot};
+use crate::rack::Slot;
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::time::Instant;
 
@@ -20,18 +19,6 @@ impl StereoBuf {
             l: vec![0.0; len],
             r: vec![0.0; len],
         }
-    }
-}
-
-/// Moves per-position slot meters (`meters[..MAX_MACHINES]`) to the new
-/// positions in `map`; new slots read 0, the master entry is kept.
-pub fn remap_meters(meters: &mut [f32; MAX_MACHINES + 1], map: &RackMap) {
-    let old = *meters;
-    for (m, from) in meters.iter_mut().zip(map) {
-        *m = from
-            .and_then(|o| old.get(o).filter(|_| o < MAX_MACHINES))
-            .copied()
-            .unwrap_or(0.0);
     }
 }
 
@@ -107,7 +94,7 @@ pub struct Mixer {
     delay_send: StereoBuf,
     reverb_send: StereoBuf,
     wet: StereoBuf,
-    meters: [f32; MAX_MACHINES + 1],
+    master_meter: f32,
 }
 
 impl Mixer {
@@ -123,7 +110,7 @@ impl Mixer {
             delay_send: StereoBuf::new(max_block),
             reverb_send: StereoBuf::new(max_block),
             wet: StereoBuf::new(max_block),
-            meters: [0.0; MAX_MACHINES + 1],
+            master_meter: 0.0,
         };
         for g in GlobalParam::all() {
             m.set_global(g, g.info().default);
@@ -135,16 +122,9 @@ impl Mixer {
         self.delay.set_bpm(bpm);
     }
 
-    /// Peak levels since the last call: slots by rack position post-fader
-    /// (unused positions 0), then the master after the final clip at
-    /// `MAX_MACHINES`. Resets them. Muted (or soloed-out) slots read 0.
-    pub fn take_meters(&mut self) -> [f32; MAX_MACHINES + 1] {
-        std::mem::take(&mut self.meters)
-    }
-
-    /// Rack edit: slot meters follow their machine to its new position.
-    pub fn rearrange(&mut self, map: &RackMap) {
-        remap_meters(&mut self.meters, map);
+    /// The master's peak (after the final clip) since the last call; resets it.
+    pub fn take_master_meter(&mut self) -> f32 {
+        std::mem::take(&mut self.master_meter)
     }
 
     pub fn set_global(&mut self, g: GlobalParam, v: f32) {
@@ -178,8 +158,8 @@ impl Mixer {
     /// Mixes `n` samples of the slots' buffers, through their strips in
     /// rack order, into `out_l`/`out_r`. Precondition: `n` is at most the
     /// `max_block` given to `Mixer::new` and no longer than any buffer
-    /// passed in; at most `MAX_MACHINES` slots. Adds each slot's strip
-    /// time (nanoseconds) to `strip_ns` at its position. Returns true when
+    /// passed in. Writes each slot's post-fader peak to `slot.meter` and
+    /// adds its strip time (nanoseconds) to `slot.cpu_ns`. Returns true when
     /// the NaN guard fired (output was silenced and effect state reset).
     pub fn process(
         &mut self,
@@ -187,7 +167,6 @@ impl Mixer {
         n: usize,
         out_l: &mut [f32],
         out_r: &mut [f32],
-        strip_ns: &mut [u64; MAX_MACHINES],
     ) -> bool {
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         out_l.fill(0.0);
@@ -196,10 +175,8 @@ impl Mixer {
             b.l[..n].fill(0.0);
             b.r[..n].fill(0.0);
         }
-        let count = slots.len().min(MAX_MACHINES);
-        let slots = &mut slots[..count];
         let any_solo = slots.iter().any(|s| s.strip.solo);
-        for ((c, slot), spent) in slots.iter_mut().enumerate().zip(strip_ns.iter_mut()) {
+        for slot in slots.iter_mut() {
             let start = Instant::now();
             let (strip, buf) = (&mut slot.strip, &mut slot.buf);
             let (l, r) = (&mut buf.l[..n], &mut buf.r[..n]);
@@ -210,7 +187,7 @@ impl Mixer {
                 for i in 0..n {
                     let sl = l[i] * gl;
                     let sr = r[i] * gr;
-                    self.meters[c] = self.meters[c].max(sl.abs()).max(sr.abs());
+                    slot.meter = slot.meter.max(sl.abs()).max(sr.abs());
                     out_l[i] += sl;
                     out_r[i] += sr;
                     self.delay_send.l[i] += sl * strip.delay_send;
@@ -219,7 +196,9 @@ impl Mixer {
                     self.reverb_send.r[i] += sr * strip.reverb_send;
                 }
             }
-            *spent = spent.saturating_add(start.elapsed().as_nanos() as u64);
+            slot.cpu_ns = slot
+                .cpu_ns
+                .saturating_add(start.elapsed().as_nanos() as u64);
         }
         self.wet.l[..n].fill(0.0);
         self.wet.r[..n].fill(0.0);
@@ -265,7 +244,7 @@ impl Mixer {
         }
         for v in out_l.iter_mut().chain(out_r.iter_mut()) {
             *v = v.clamp(-1.0, 1.0);
-            self.meters[MAX_MACHINES] = self.meters[MAX_MACHINES].max(v.abs());
+            self.master_meter = self.master_meter.max(v.abs());
         }
         false
     }
@@ -307,14 +286,14 @@ mod tests {
     fn run(m: &mut Mixer, slots: &mut [Slot]) -> (Vec<f32>, Vec<f32>) {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(slots, N, &mut l, &mut r, &mut [0; MAX_MACHINES]);
+        m.process(slots, N, &mut l, &mut r);
         (l, r)
     }
 
     fn guard_fired(m: &mut Mixer, slots: &mut [Slot]) -> bool {
         let mut l = vec![0.0; N];
         let mut r = vec![0.0; N];
-        m.process(slots, N, &mut l, &mut r, &mut [0; MAX_MACHINES])
+        m.process(slots, N, &mut l, &mut r)
     }
 
     fn quiet_mixer() -> Mixer {
@@ -389,15 +368,15 @@ mod tests {
     }
 
     #[test]
-    fn meters_are_by_position_with_master_last() {
+    fn slots_carry_their_meters_and_the_mixer_the_master() {
         let mut m = quiet_mixer();
         let mut s = slots_with(3, 0.25);
         run(&mut m, &mut s);
-        let meters = m.take_meters();
-        assert!(meters[3] > 0.1, "{meters:?}");
-        assert!(meters[MAX_MACHINES] > 0.1, "{meters:?}");
-        let others = (0..MAX_MACHINES).filter(|&i| i != 3);
-        assert!(others.into_iter().all(|i| meters[i] == 0.0), "{meters:?}");
+        assert!(s[3].meter > 0.1, "{}", s[3].meter);
+        let master = m.take_master_meter();
+        assert!(master > 0.1, "{master}");
+        let others = (0..s.len()).filter(|&i| i != 3);
+        assert!(others.into_iter().all(|i| s[i].meter == 0.0));
     }
 
     #[test]
