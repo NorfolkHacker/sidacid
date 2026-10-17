@@ -2,6 +2,8 @@
 
 An acid groovebox built on a sound engine modelled on a classic 8-bit home-computer sound chip. It runs as a native desktop app and is laid out for a 1280×800 handheld screen.
 
+**[Read the manual](docs/manual/index.md)** for a full guide to every machine, the editor, Song mode, the mixer and the keyboard shortcuts.
+
 ![SidAcid](docs/images/screenshot.png)
 
 <p>
@@ -44,7 +46,7 @@ An acid groovebox built on a sound engine modelled on a classic 8-bit home-compu
   - Load WAV, FLAC, MP3 or OGG with Load… or by dragging the file onto the panel. Audio is saved inside the project file. Sample rates from 8 to 192 kHz are accepted; there is no resampling filter, so samples above 48 kHz, or pitched up an octave or more, may alias.
 - **Editor dock:**
   - Every part's pattern sits in a resizable dock at the bottom, as stacked lanes on one shared time ruler. Snap runs from 1/4 to 1/64, with zoom and follow-playhead; a thumb strip along the bottom of the ruler is the horizontal scrollbar.
-  - Melodic lanes have a key strip and their own pitch scroll: chords on the FM synth and sampler, one note at a time on the bass synths with slides drawn as ties. Sampler rows are labelled with their slot and slice.
+  - Melodic lanes have a key strip and their own pitch scroll: chords on the FM synth, Mono and sampler, one note at a time on the acid synths with slides drawn as ties. Sampler rows are labelled with their slot and slice.
   - Drum lanes have eight labelled rows, and hits can sit at any snap.
   - **Key and scale:** in Pattern mode the dock header picks the project's root and scale (Chromatic, Minor, Melodic minor, Phrygian, Major, Hungarian minor). Melodic lanes shade off-scale rows and mark the root; drum lanes ignore the key.
   - **Snap to scale:** new, typed and dragged notes and Up/Down transposes land on scale degrees (Shift+Up/Down still moves an octave).
@@ -53,7 +55,7 @@ An acid groovebox built on a sound engine modelled on a classic 8-bit home-compu
   - An expression strip per lane: velocity, or accent and slide on the bass synths, or accent on the drums. The drum accent strip accents every hit on a step; double-click a hit to toggle its own accent. With the strip open, the lane header switches it between that view (Vel, Acc/Slide or Acc), Chance and Ratchet; the Chance and Ratchet strips draw a bar per note, edited by click or drag like velocity.
   - **Tools:** in Pattern mode the inspector row starts with a Tools menu that acts on the focused lane's selection, or every note in the pattern when nothing is selected (generators then fill the whole pattern). Each tool opens a small window with its settings and previews live; Apply makes one undo step, while Cancel (or closing the window, or Esc, even after a click in the window) puts the pattern back. Timing tools keep notes inside the pattern, so none slip past its end. Other edits on that lane are held while a tool is open. Tools aren't shown in Song mode.
     - **Quantize** (grid, strength %, ends), **Humanize** (timing ± ticks, velocity ±, seed), **Legato** (each note runs to the next note in the lane), **Reverse**, **Invert** (melodic only; snaps to the key when Snap to scale is on).
-    - **Strum** (ticks between notes, up or down) and **Arpeggiate** (up, down, up-down or random; rate and gate; turns chords into runs) need a lane that plays chords (not drums or the bass synths).
+    - **Strum** (ticks between notes, up or down) and **Arpeggiate** (up, down, up-down or random; rate and gate; turns chords into runs) need a lane that plays chords (not drums or the acid synths).
     - **Randomize in scale** (density, pitch range, length range, seed; on drums one step per hit) follows the project key; **Euclidean** (hits, steps, rotation, pitch or drum row) repeats its cycle across the selection's time span, or the whole pattern.
   - **Note inspector:** in Pattern mode, with notes selected in the focused lane, the dock header edits them all at once: Vel (not on the bass synths), Chance, Ratchet, Cond, and Accent (bass synths and drums) and Slide (bass synths). A field the notes differ in shows "–". Each change is one undo step and the notes stay selected. **Reroll**, next to Chance, gives every chance in the project new dice (one undo step).
   - Notes with a chance below 100 % or a condition get a dashed outline, and a badge when wide enough to show it: the condition ("1:4", "1st", "!1st", "F", "!F", "P", "!P"), the chance ("50%") and the ratchet ("×3").
@@ -71,7 +73,7 @@ An acid groovebox built on a sound engine modelled on a classic 8-bit home-compu
   - **Fill:** the transport's Fill button is on while held; Shift-click latches it on or off. It lights while on.
 - **Patterns:** 128 per machine, in banks A–H × 16. Each pattern is up to 64 steps, and a pattern switch queues to the next loop.
 - **Mixer and effects:**
-  - Six channels with per-channel distortion (2× oversampled) and compressor, level, pan, mute and solo.
+  - A channel per machine, with distortion (2× oversampled) and compressor, level, pan, mute and solo.
   - Delay sends (tempo-synced, ping-pong) and reverb sends.
   - Master compressor, an 8-bit lo-fi switch, and meters.
 - **Song mode:**
@@ -121,9 +123,9 @@ Pick the driver and device under **File → Audio Settings…**.
 
 | Key | Action |
 |---|---|
-| Space | Play / stop. Pressing Stop while stopped returns to the song start. |
-| Ctrl+Z / Ctrl+Y | Undo / redo |
-| Ctrl+C / Ctrl+V | Copy / paste a pattern |
+| Space | Play / stop. Pressing Stop while stopped returns to the loop start, or the song start without a loop. |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo |
+| Ctrl+C / Ctrl+V | Copy / paste a pattern (notes or blocks when the dock has the keyboard) |
 | Ctrl+S / Ctrl+O / Ctrl+N | Save / open / new |
 
 ## Layout
