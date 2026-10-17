@@ -27,17 +27,64 @@ impl SidAcidApp {
             let has_it = path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case(KIT_EXTENSION));
-            let path = if has_it {
-                path
-            } else {
-                let mut name = path.into_os_string();
-                name.push(".");
-                name.push(KIT_EXTENSION);
-                name.into()
-            };
-            if let Err(e) = std::fs::write(&path, file.to_ron()) {
-                self.view.message = Some(format!("Could not save the kit: {e}"));
+            if has_it {
+                self.write_kit(path, file.to_ron());
+                return;
             }
+            let mut name = path.into_os_string();
+            name.push(".");
+            name.push(KIT_EXTENSION);
+            let path = std::path::PathBuf::from(name);
+            if path.exists() {
+                // The OS dialog's overwrite prompt was about the name
+                // without the extension, so ask about this file.
+                self.view.kit_overwrite = Some((path, file.to_ron()));
+            } else {
+                self.write_kit(path, file.to_ron());
+            }
+        }
+    }
+
+    fn write_kit(&mut self, path: std::path::PathBuf, text: String) {
+        if let Err(e) = std::fs::write(&path, text) {
+            self.view.message = Some(format!("Could not save the kit: {e}"));
+        }
+    }
+
+    /// The "Replace file?" question for a kit saved under an appended name.
+    pub(crate) fn kit_overwrite_ui(&mut self, ctx: &eframe::egui::Context) {
+        let Some((path, _)) = &self.view.kit_overwrite else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut answer = None;
+        eframe::egui::Window::new("Replace file?")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("\"{name}\" already exists. Replace it?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Replace").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        if let Some(replace) = answer {
+            self.answer_kit_overwrite(replace);
+        }
+    }
+
+    pub(crate) fn answer_kit_overwrite(&mut self, replace: bool) {
+        if let Some((path, text)) = self.view.kit_overwrite.take()
+            && replace
+        {
+            self.write_kit(path, text);
         }
     }
 
@@ -80,6 +127,9 @@ impl SidAcidApp {
     /// Replaces every pad and the kit's and pads' param values with the
     /// file's (params it leaves out go back to their defaults).
     pub(crate) fn load_kit_now(&mut self, uid: MachineUid, kit: PadKitFile) {
+        if self.doc.project.padkit(uid).is_none() {
+            return;
+        }
         let values = MachineParam::all_for(MachineType::PadKit)
             .into_iter()
             .filter(|p| matches!(p, MachineParam::PadKit(_) | MachineParam::Pad(..)))
@@ -170,5 +220,25 @@ mod tests {
                 .unwrap()
                 .starts_with("Could not load the kit: ")
         );
+    }
+
+    #[test]
+    fn a_kit_saved_over_an_existing_file_asks_first() {
+        let (app, uid) = app_with_kit();
+        let mut app = app;
+        let dir = std::env::temp_dir().join(format!("padkit-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drums.padkit");
+        std::fs::write(&path, b"keep me").unwrap();
+        let text = kit_text(uid, &app);
+        app.view.kit_overwrite = Some((path.clone(), text));
+        app.answer_kit_overwrite(false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+        app.view.kit_overwrite = Some((path.clone(), kit_text(uid, &app)));
+        app.answer_kit_overwrite(true);
+        assert!(
+            PadKitFile::from_ron_within(&std::fs::read_to_string(&path).unwrap(), None).is_ok()
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

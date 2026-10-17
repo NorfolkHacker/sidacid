@@ -231,6 +231,8 @@ pub struct ViewState {
     /// Save waiting on "replace the existing file?" (the name had the
     /// extension appended after the OS dialog, so it never asked).
     pub overwrite: Option<files::OverwriteAsk>,
+    /// A kit file waiting on the same question: where, and its text.
+    pub kit_overwrite: Option<(std::path::PathBuf, String)>,
     /// The audio stream reported a failure that has not been handled yet.
     pub audio_lost: bool,
     /// One automatic restart was tried since audio last ran fine.
@@ -736,6 +738,7 @@ impl SidAcidApp {
         });
         self.dock_focus_after_draw(ctx);
         self.dialogs(ctx);
+        self.kit_overwrite_ui(ctx);
         self.memory_warning_ui(ctx);
         self.audio_settings_window(ctx);
         // A collapsed lane stops drawing its grid, so a key or drag held

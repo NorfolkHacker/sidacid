@@ -35,7 +35,7 @@ fn pad_problem(pad: &Pad) -> Option<String> {
     }
     for (j, l) in pad.layers.iter().enumerate() {
         if let Some(p) = l.problem() {
-            return Some(format!("layer {} {p}", j + 1));
+            return Some(format!("layer {}: {p}", j + 1));
         }
     }
     (!pad.is_well_formed()).then(|| "the velocity ranges are not valid".to_string())
@@ -65,7 +65,7 @@ impl PadKitFile {
 
     /// Parses with the project's decompression budget (`Some(bytes)` of
     /// 16-bit PCM; None = unbounded). A malformed pad refuses the whole
-    /// file: "pad 3: layer 2 the sample is empty".
+    /// file: "pad 3: layer 2: the sample is empty".
     pub fn from_ron_within(text: &str, budget: Option<u64>) -> Result<PadKitFile, String> {
         let f: PadKitFile = crate::sampler::slot::pcm_codec::with_budget(budget, || {
             ron::from_str(text).map_err(|e| e.to_string())
@@ -86,7 +86,17 @@ impl PadKitFile {
             .iter()
             .find(|(p, v)| !is_kit_param(*p) || !(0.0..=1.0).contains(v))
         {
-            return Err(format!("a bad setting ({p:?} = {v})"));
+            return Err(match p {
+                MachineParam::PadKit(k) => format!("{} is out of range ({v})", k.name()),
+                MachineParam::Pad(i, k) if (*i as usize) < PADS => {
+                    format!(
+                        "pad {}: {} is out of range ({v})",
+                        *i as usize + 1,
+                        k.name()
+                    )
+                }
+                _ => "a setting that isn't a Pad Kit's".to_string(),
+            });
         }
         Ok(f)
     }
@@ -156,10 +166,12 @@ mod tests {
             MachineParam::Channel(crate::params::ChannelParam::Level),
             0.5,
         ));
-        assert!(PadKitFile::from_ron_within(&g.to_ron(), None).is_err());
+        let err = PadKitFile::from_ron_within(&g.to_ron(), None).unwrap_err();
+        assert_eq!(err, "a setting that isn't a Pad Kit's");
         let mut h = PadKitFile::from_entry(&entry()).unwrap();
         h.params.push((MachineParam::Pad(0, PadParam::Tune), 1.5));
-        assert!(PadKitFile::from_ron_within(&h.to_ron(), None).is_err());
+        let err = PadKitFile::from_ron_within(&h.to_ron(), None).unwrap_err();
+        assert_eq!(err, "pad 1: Tune is out of range (1.5)");
         let mut k = PadKitFile::from_entry(&entry()).unwrap();
         k.params.push((MachineParam::Pad(16, PadParam::Tune), 0.5));
         assert!(PadKitFile::from_ron_within(&k.to_ron(), None).is_err());
