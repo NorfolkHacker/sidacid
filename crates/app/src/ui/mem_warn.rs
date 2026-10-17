@@ -27,6 +27,15 @@ pub(crate) enum MemAction {
         name: String,
         decoded: Box<Decoded>,
     },
+    /// Several decoded files for consecutive pads from `first`, held as one
+    /// action; `skipped` names the files that failed, of `total` dropped.
+    LoadPads {
+        uid: MachineUid,
+        first: usize,
+        files: Vec<(String, Box<Decoded>)>,
+        skipped: Vec<String>,
+        total: usize,
+    },
     /// A parsed project that passed `check_fits`, with where it came from.
     Open {
         project: Box<Project>,
@@ -120,6 +129,16 @@ impl SidAcidApp {
                 decoded,
             } => {
                 self.load_pad_decoded_now(uid, pad, &name, *decoded);
+                None
+            }
+            MemAction::LoadPads {
+                uid,
+                first,
+                files,
+                skipped,
+                total,
+            } => {
+                self.load_pads_now(uid, first, files, skipped, total);
                 None
             }
             MemAction::Open { project, path } => {
