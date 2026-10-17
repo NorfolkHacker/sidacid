@@ -3,7 +3,7 @@
 //! each machine's share of the audio time, shown on its panel header.
 
 use super::{SidAcidApp, theme};
-use acid_engine::host::{CPU_SMOOTHING, Status};
+use acid_engine::host::{CPU_SMOOTHING, PositionStatus, Status};
 use acid_engine::machine::MachineUid;
 use eframe::egui;
 use std::collections::HashMap;
@@ -50,15 +50,23 @@ fn smooth(old: Option<f32>, new: f32) -> f32 {
 }
 
 impl PerfMeter {
-    /// Takes a status. `uids` is the rack order the status's positions
-    /// refer to; `fresh` says they do (its `rack_gen` is the expected one):
-    /// a stale status leaves the machines' readings alone.
-    pub fn on_status(&mut self, status: &Status, now: f64, uids: &[MachineUid], fresh: bool) {
+    /// Takes a status and its per-position values, if it carried any.
+    /// `uids` is the rack order the positions refer to; `fresh` says they
+    /// do (its `rack_gen` is the expected one): a stale status, or one
+    /// without positions, leaves the machines' readings alone.
+    pub fn on_status(
+        &mut self,
+        status: &Status,
+        positions: Option<&PositionStatus>,
+        now: f64,
+        uids: &[MachineUid],
+        fresh: bool,
+    ) {
         if status.shared_cpu.is_finite() {
             self.shared_cpu = smooth(Some(self.shared_cpu), status.shared_cpu);
         }
-        if fresh {
-            for (&uid, &share) in uids.iter().zip(&status.slot_cpu) {
+        if let Some(p) = positions.filter(|_| fresh) {
+            for (&uid, &share) in uids.iter().zip(&p.slot_cpu) {
                 if share.is_finite() {
                     let old = self.machine_cpu.get(&uid).copied();
                     self.machine_cpu.insert(uid, smooth(old, share));
@@ -317,42 +325,42 @@ mod tests {
     #[test]
     fn a_peak_holds_for_a_second_unless_a_higher_one_arrives() {
         let mut p = PerfMeter::default();
-        p.on_status(&status(0.6, 0), 10.0, &[], true);
-        p.on_status(&status(0.2, 0), 10.5, &[], true);
+        p.on_status(&status(0.6, 0), None, 10.0, &[], true);
+        p.on_status(&status(0.2, 0), None, 10.5, &[], true);
         assert_eq!(p.peak(), 0.6);
-        p.on_status(&status(0.7, 0), 10.6, &[], true);
+        p.on_status(&status(0.7, 0), None, 10.6, &[], true);
         assert_eq!(p.peak(), 0.7);
-        p.on_status(&status(0.3, 0), 11.5, &[], true);
+        p.on_status(&status(0.3, 0), None, 11.5, &[], true);
         assert_eq!(p.peak(), 0.7);
-        p.on_status(&status(0.3, 0), 11.6, &[], true);
+        p.on_status(&status(0.3, 0), None, 11.6, &[], true);
         assert_eq!(p.peak(), 0.3);
     }
 
     #[test]
     fn overruns_count_from_the_last_clear_and_a_restart() {
         let mut p = PerfMeter::default();
-        p.on_status(&status(0.0, 3), 1.0, &[], true);
+        p.on_status(&status(0.0, 3), None, 1.0, &[], true);
         assert_eq!(p.overruns(), 3);
         assert_eq!(p.last_overrun_at, Some(1.0));
         p.clear_overruns();
         assert_eq!(p.overruns(), 0);
         assert_eq!(p.last_overrun_at, None);
-        p.on_status(&status(0.0, 5), 2.0, &[], true);
+        p.on_status(&status(0.0, 5), None, 2.0, &[], true);
         assert_eq!(p.overruns(), 2);
         // The host's counter wraps; the difference still holds.
-        p.on_status(&status(0.0, u32::MAX), 3.0, &[], true);
+        p.on_status(&status(0.0, u32::MAX), None, 3.0, &[], true);
         p.clear_overruns();
-        p.on_status(&status(0.0, 1), 4.0, &[], true);
+        p.on_status(&status(0.0, 1), None, 4.0, &[], true);
         assert_eq!(p.overruns(), 2);
         p.restart();
-        p.on_status(&status(0.0, 1), 5.0, &[], true);
+        p.on_status(&status(0.0, 1), None, 5.0, &[], true);
         assert_eq!(p.overruns(), 1);
     }
 
     #[test]
     fn xruns_add_to_the_warning_and_clear_with_it() {
         let mut p = PerfMeter::default();
-        p.on_status(&status(0.0, 2), 1.0, &[], true);
+        p.on_status(&status(0.0, 2), None, 1.0, &[], true);
         p.on_xruns(5, 1.5);
         assert_eq!((p.overruns(), p.xruns()), (2, 5));
         assert_eq!(p.dropouts(), 7);
@@ -413,23 +421,28 @@ mod tests {
     fn machine_cpu_ignores_stale_statuses_and_follows_uids() {
         let mut p = PerfMeter::default();
         let uids = [MachineUid(1), MachineUid(2)];
-        let mut s = Status::default();
-        s.slot_cpu[0] = 0.2;
-        s.slot_cpu[1] = 0.1;
-        p.on_status(&s, 1.0, &uids, false);
+        let s = Status::default();
+        let at = |slot_cpu: Vec<f32>| PositionStatus {
+            slot_cpu,
+            ..PositionStatus::default()
+        };
+        let pos = at(vec![0.2, 0.1]);
+        p.on_status(&s, Some(&pos), 1.0, &uids, false);
         assert!(
             p.machine_cpu(MachineUid(1)).is_none(),
             "stale status ignored"
         );
+        p.on_status(&s, None, 1.5, &uids, true);
+        assert!(
+            p.machine_cpu(MachineUid(1)).is_none(),
+            "a status without positions leaves them alone"
+        );
         for t in 0..200 {
-            p.on_status(&s, 2.0 + t as f64, &uids, true);
+            p.on_status(&s, Some(&pos), 2.0 + t as f64, &uids, true);
         }
         assert!((p.machine_cpu(MachineUid(1)).unwrap() - 0.2).abs() < 0.01);
         let swapped = [MachineUid(2), MachineUid(1)];
-        let mut s2 = Status::default();
-        s2.slot_cpu[0] = 0.1;
-        s2.slot_cpu[1] = 0.2;
-        p.on_status(&s2, 500.0, &swapped, true);
+        p.on_status(&s, Some(&at(vec![0.1, 0.2])), 500.0, &swapped, true);
         assert!(
             (p.machine_cpu(MachineUid(1)).unwrap() - 0.2).abs() < 0.01,
             "follows the uid, not the position"

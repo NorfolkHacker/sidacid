@@ -5,7 +5,7 @@
 //! freed on the UI thread, never on the audio thread.
 
 use crate::engine::Engine;
-use crate::machine::{MAX_MACHINES, MachineUid};
+use crate::machine::MachineUid;
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
 use crate::rack::{CompiledSong, RackSwap};
@@ -23,6 +23,8 @@ const STATUS_RATE_HZ: f32 = 60.0;
 const DISPOSAL_RESERVE: usize = 256;
 /// Weight of the newest CPU-load sample in the smoothed value.
 pub const CPU_SMOOTHING: f32 = 0.1;
+/// Spare buffers the host holds at once.
+pub const STATUS_BUFFERS: usize = 4;
 
 /// One pattern of any machine type, for `Command::Pattern`.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,20 +90,76 @@ pub enum Command {
     SetFill(bool),
     /// The project's chance seed changed.
     SetSeed(u32),
+    /// A spare buffer for a status's per-position values. Comes back in a
+    /// `Status`, or as `DisposePositions` if it does not fit the rack or
+    /// the host holds `STATUS_BUFFERS` already.
+    StatusBuffer(Box<PositionStatus>),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// By rack position, for one status. Allocated on the UI thread
+/// (`with_capacity`), filled on the audio thread without growing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PositionStatus {
+    pub playhead: Vec<usize>,
+    pub patterns: Vec<u8>,
+    pub queued: Vec<Option<u8>>,
+    /// Post-fader peaks since the previous status; muted machines read 0.
+    pub meters: Vec<f32>,
+    /// Share of the audio time spent on each machine.
+    pub slot_cpu: Vec<f32>,
+}
+
+impl PositionStatus {
+    pub fn with_capacity(n: usize) -> Box<Self> {
+        Box::new(Self {
+            playhead: Vec::with_capacity(n),
+            patterns: Vec::with_capacity(n),
+            queued: Vec::with_capacity(n),
+            meters: Vec::with_capacity(n),
+            slot_cpu: Vec::with_capacity(n),
+        })
+    }
+
+    /// Every Vec has room for `n` entries.
+    pub fn fits(&self, n: usize) -> bool {
+        [
+            self.playhead.capacity(),
+            self.patterns.capacity(),
+            self.queued.capacity(),
+            self.meters.capacity(),
+            self.slot_cpu.capacity(),
+        ]
+        .iter()
+        .all(|&c| c >= n)
+    }
+
+    pub fn clear(&mut self) {
+        self.playhead.clear();
+        self.patterns.clear();
+        self.queued.clear();
+        self.meters.clear();
+        self.slot_cpu.clear();
+    }
+
+    /// Rack positions filled.
+    pub fn len(&self) -> usize {
+        self.playhead.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.playhead.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub playing: bool,
-    /// By rack position.
-    pub playhead: [usize; MAX_MACHINES],
-    /// By rack position.
-    pub patterns: [u8; MAX_MACHINES],
-    /// By rack position.
-    pub queued: [Option<u8>; MAX_MACHINES],
-    /// Peaks since the previous status: rack positions 0..MAX_MACHINES,
-    /// then master. Muted (or soloed-out) machines read 0.
-    pub meters: [f32; MAX_MACHINES + 1],
+    /// The master peak since the previous status.
+    pub master_meter: f32,
+    /// The per-position values, when the host held a buffer that fits the
+    /// rack (see `Command::StatusBuffer`). Without one the slots keep their
+    /// meters and CPU time for the next status that has one.
+    pub positions: Option<Box<PositionStatus>>,
     /// Smoothed fraction of the callback's time budget spent rendering.
     pub cpu: f32,
     /// Worst single callback load since the previous status.
@@ -127,19 +185,14 @@ pub struct Status {
     pub stops: u32,
     /// Rack generation this status reports on: the host's count of racks
     /// taken, i.e. accepted `SetRack`s plus `ReplaceEngine`s (wrapping;
-    /// never reset). Per-position arrays describe that rack.
+    /// never reset). `positions` describes that rack.
     pub rack_gen: u32,
-    /// Share of the audio time since the previous status spent on each
-    /// rack position's machine (render and channel strip; 1.0 = all of
-    /// it). Empty positions read 0.
-    pub slot_cpu: [f32; MAX_MACHINES],
     /// Share spent on everything else: sequencing, sends and master.
     pub shared_cpu: f32,
 }
 
 // Events travel by value through a preallocated ring: boxing the Status
 // would allocate on the audio thread.
-#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Status(Status),
     DisposePattern(Box<PatternData>),
@@ -150,6 +203,8 @@ pub enum Event {
     /// After `SetRack`: the old slot `Vec` (in `into`) with the removed
     /// machines, unused fresh slots and the old song.
     DisposeRack(Box<RackSwap>),
+    /// A status buffer too small for the rack, handed back unfilled.
+    DisposePositions(Box<PositionStatus>),
 }
 
 pub struct EngineHost {
@@ -170,11 +225,13 @@ pub struct EngineHost {
     overruns: u32,
     stops: u32,
     /// Shared engine work (sequencing, sends, master) since the previous
-    /// status; each slot keeps its own until a status takes it.
+    /// status with positions; each slot keeps its own until one takes it.
     shared_ns: u64,
-    /// Frames rendered since the previous status (the audio time the
-    /// work above covers).
+    /// Frames rendered since the previous status with positions (the
+    /// audio time the work above covers).
     cpu_frames: usize,
+    /// Buffers from the UI for the next statuses' per-position values.
+    spare: [Option<Box<PositionStatus>>; STATUS_BUFFERS],
 }
 
 /// Wires an engine to a fresh pair of rings. Call on the UI thread; move
@@ -205,6 +262,7 @@ pub fn channel(engine: Engine) -> (EngineHost, Producer<Command>, Consumer<Event
         stops: 0,
         shared_ns: 0,
         cpu_frames: 0,
+        spare: Default::default(),
     };
     (host, command_tx, event_rx)
 }
@@ -315,6 +373,10 @@ impl EngineHost {
                 Command::NoteOff { uid, pitch } => self.engine.note_off(uid, pitch),
                 Command::SetFill(fill) => self.engine.set_fill(fill),
                 Command::SetSeed(seed) => self.engine.set_seed(seed),
+                Command::StatusBuffer(b) => match self.spare.iter_mut().find(|s| s.is_none()) {
+                    Some(s) => *s = Some(b),
+                    None => self.dispose(Event::DisposePositions(b)),
+                },
             }
         }
     }
@@ -329,7 +391,7 @@ impl EngineHost {
 
     fn send_status(&mut self) {
         // Statuses stop once only the disposal reserve is free; the slots
-        // keep their stats until one goes out.
+        // keep their stats until one with positions goes out.
         if self.events.slots() <= DISPOSAL_RESERVE {
             return;
         }
@@ -338,21 +400,15 @@ impl EngineHost {
             let s = ns as f32 / 1e9 / secs;
             if secs > 0.0 && s.is_finite() { s } else { 0.0 }
         };
-        let mut meters = [0.0; MAX_MACHINES + 1];
-        let mut slot_cpu = [0.0; MAX_MACHINES];
-        self.engine.take_slot_stats(|pos, m, ns| {
-            if pos < MAX_MACHINES {
-                meters[pos] = m;
-                slot_cpu[pos] = share(ns);
-            }
+        let positions = self.take_spare().map(|mut b| {
+            b.clear();
+            self.engine.fill_positions(&mut b, share);
+            b
         });
-        meters[MAX_MACHINES] = self.master_meter;
         let status = Status {
             playing: self.engine.is_playing(),
-            playhead: self.engine.playhead(),
-            patterns: self.engine.current_patterns(),
-            queued: self.engine.queued_patterns(),
-            meters,
+            master_meter: self.master_meter,
+            positions,
             cpu: self.cpu,
             cpu_peak: self.cpu_peak,
             overruns: self.overruns,
@@ -364,18 +420,38 @@ impl EngineHost {
             rack_rejected: self.rack_rejected,
             stops: self.stops,
             rack_gen: self.rack_gen,
-            slot_cpu,
             shared_cpu: share(self.shared_ns),
         };
+        // The slots' CPU time waits for a status with positions, so the
+        // shared time and the frames it covers wait with it.
+        let took_slots = status.positions.is_some();
         if self.events.push(Event::Status(status)).is_ok() {
             self.master_meter = 0.0;
             self.cpu_peak = 0.0;
             self.guard_fired = false;
             self.song_rejected = false;
             self.rack_rejected = false;
-            self.shared_ns = 0;
-            self.cpu_frames = 0;
+            if took_slots {
+                self.shared_ns = 0;
+                self.cpu_frames = 0;
+            }
         }
+    }
+
+    /// The first spare that fits the rack; spares that do not fit go back
+    /// to the UI on the way.
+    fn take_spare(&mut self) -> Option<Box<PositionStatus>> {
+        let n = self.engine.rack_len();
+        for i in 0..STATUS_BUFFERS {
+            let Some(b) = self.spare[i].take() else {
+                continue;
+            };
+            if b.fits(n) {
+                return Some(b);
+            }
+            self.dispose(Event::DisposePositions(b));
+        }
+        None
     }
 }
 
@@ -417,26 +493,42 @@ mod tests {
     fn statuses_carry_shares_that_fit_in_the_budget() {
         let (mut host, mut tx, mut rx) = host_with_demo();
         tx.push(Command::Play).unwrap();
+        tx.push(Command::StatusBuffer(PositionStatus::with_capacity(16)))
+            .ok()
+            .unwrap();
+        // Most statuses go without a buffer: the next one that has one
+        // covers all the time since the previous one.
         run(&mut host, 48000);
+        tx.push(Command::StatusBuffer(PositionStatus::with_capacity(16)))
+            .ok()
+            .unwrap();
+        run(&mut host, 2048);
         let s = std::iter::from_fn(|| rx.pop().ok())
             .filter_map(|e| match e {
                 Event::Status(s) => Some(s),
                 _ => None,
             })
+            .filter(|s| s.positions.is_some())
             .last()
             .unwrap();
-        let sum: f32 = s.slot_cpu.iter().sum::<f32>() + s.shared_cpu;
-        assert!(s.slot_cpu.iter().all(|c| c.is_finite() && *c >= 0.0));
+        let slot_cpu = &s.positions.as_ref().unwrap().slot_cpu;
+        assert_eq!(slot_cpu.len(), 6, "one per machine");
+        let sum: f32 = slot_cpu.iter().sum::<f32>() + s.shared_cpu;
+        assert!(slot_cpu.iter().all(|c| c.is_finite() && *c >= 0.0));
         assert!(s.shared_cpu.is_finite() && s.shared_cpu >= 0.0);
         assert!(sum > 0.0, "something was timed");
         assert!(
             sum < 1.0,
             "a test render on this machine is far below real time: {sum}"
         );
-        assert!(
-            s.slot_cpu[6..].iter().all(|c| *c == 0.0),
-            "empty positions read zero"
-        );
+    }
+
+    #[test]
+    fn statuses_without_positions_keep_the_cpu_window_open() {
+        let (mut host, _tx, _rx) = host_with_demo();
+        let every = host.status_every;
+        run(&mut host, 4 * every);
+        assert!(host.cpu_frames >= 3 * every);
     }
 
     #[test]
@@ -643,7 +735,7 @@ mod tests {
         assert!((58..=61).contains(&statuses.len()), "{}", statuses.len());
         let last = statuses.last().unwrap();
         assert!(last.playing);
-        assert!(last.meters[MAX_MACHINES] > 0.0);
+        assert!(last.master_meter > 0.0);
     }
 
     #[test]
@@ -730,10 +822,10 @@ mod tests {
         let events: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
         assert!(events.iter().any(|e| matches!(e, Event::DisposeSong(_))));
         let status = events
-            .iter()
+            .into_iter()
             .rev()
             .find_map(|e| match e {
-                Event::Status(s) => Some(*s),
+                Event::Status(s) => Some(s),
                 _ => None,
             })
             .unwrap();
@@ -772,7 +864,7 @@ mod tests {
             })
             .expect("a status");
         assert!(!first.guard_fired, "no stale fault for the new project");
-        assert!(first.meters.iter().all(|m| *m == 0.0), "{first:?}");
+        assert_eq!(first.master_meter, 0.0, "{first:?}");
     }
 
     /// Peak of `samples` of host output.
@@ -804,11 +896,15 @@ mod tests {
         tx.push(Command::Touch(level, true)).unwrap();
         tx.push(Command::SetParamLive(level, 0.3)).unwrap();
         run(&mut host, 512);
+        assert_eq!(
+            host.engine.positions().patterns[3],
+            7,
+            "SelectPattern while stopped"
+        );
         let e = host.engine();
         assert_eq!(e.knob(cutoff), Some(0.125), "SetParam moves the knob");
         assert_eq!(e.live_param(cutoff), 0.125);
         assert_eq!(e.swing(), 0.4, "SetSwing");
-        assert_eq!(e.current_patterns()[3], 7, "SelectPattern while stopped");
         assert!(e.is_touched(level), "Touch(true)");
         assert_eq!(e.live_param(level), 0.3, "SetParamLive plays the value");
         assert_ne!(e.knob(level), Some(0.3), "SetParamLive keeps the knob");
@@ -946,7 +1042,7 @@ mod tests {
         host.set_cpu_load(0.7);
         host.set_cpu_load(0.3);
         run(&mut host, 1024);
-        let first = *statuses(&mut rx).last().unwrap();
+        let first = statuses(&mut rx).pop().unwrap();
         assert_eq!(first.cpu_peak, 0.7);
         host.set_cpu_load(0.4);
         run(&mut host, 1024);
@@ -963,7 +1059,7 @@ mod tests {
         host.set_cpu_load(f32::INFINITY);
         host.set_cpu_load(2.0);
         run(&mut host, 1024);
-        let s = *statuses(&mut rx).last().unwrap();
+        let s = statuses(&mut rx).pop().unwrap();
         assert_eq!(s.overruns, 2);
         assert_eq!(s.cpu_peak, 2.0);
         // The count runs across engine swaps; the UI keeps its own baseline.
@@ -972,5 +1068,55 @@ mod tests {
         host.set_cpu_load(1.2);
         run(&mut host, 1024);
         assert_eq!(statuses(&mut rx).last().unwrap().overruns, 3);
+    }
+
+    #[test]
+    fn statuses_carry_positions_only_with_a_buffer() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        let statuses = |rx: &mut rtrb::Consumer<Event>| {
+            let mut v = Vec::new();
+            while let Ok(e) = rx.pop() {
+                if let Event::Status(s) = e {
+                    v.push(s);
+                }
+            }
+            v
+        };
+        for _ in 0..10 {
+            host.process(&mut l, &mut r);
+        }
+        assert!(statuses(&mut rx).iter().all(|s| s.positions.is_none()));
+        tx.push(Command::StatusBuffer(PositionStatus::with_capacity(16)))
+            .ok()
+            .unwrap();
+        for _ in 0..10 {
+            host.process(&mut l, &mut r);
+        }
+        let got = statuses(&mut rx);
+        let filled: Vec<_> = got.iter().filter_map(|s| s.positions.as_ref()).collect();
+        assert_eq!(filled.len(), 1, "one buffer, one filled status");
+        assert_eq!(filled[0].len(), host.engine().slot_uids().len());
+    }
+
+    #[test]
+    fn a_buffer_too_small_for_the_rack_comes_back_unfilled() {
+        let (mut host, mut tx, mut rx) = host_with_demo();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        tx.push(Command::StatusBuffer(PositionStatus::with_capacity(2)))
+            .ok()
+            .unwrap();
+        for _ in 0..10 {
+            host.process(&mut l, &mut r);
+        }
+        let mut disposed = 0;
+        while let Ok(e) = rx.pop() {
+            match e {
+                Event::DisposePositions(_) => disposed += 1,
+                Event::Status(s) => assert!(s.positions.is_none()),
+                _ => {}
+            }
+        }
+        assert_eq!(disposed, 1);
     }
 }

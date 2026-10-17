@@ -1827,7 +1827,7 @@ mod tests {
         let uid = app.focused().unwrap();
         app.doc.project.roll_mut(uid, 0).unwrap().length = 64;
         app.status.playing = true;
-        app.status.playhead[0] = 60;
+        app.shown.p.playhead = vec![60];
         let ctx = egui::Context::default();
         frame(&mut app, &ctx, 0.0, vec![]);
         let tw = tick_w(ZOOMS[app.view.dock.zoom]);

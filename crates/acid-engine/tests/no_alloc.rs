@@ -3,7 +3,7 @@
 //! thread while armed.
 
 use acid_engine::engine::Engine;
-use acid_engine::host::{self, Command, Event, PatternData};
+use acid_engine::host::{self, Command, Event, PatternData, PositionStatus};
 use acid_engine::machine::MachineUid;
 use acid_engine::params::{MachineParam, MasterParam, ParamId};
 use acid_engine::project::{
@@ -537,6 +537,24 @@ fn the_counter_sees_allocations() {
         drop(std::hint::black_box(Vec::<u8>::with_capacity(16)));
     });
     assert!(n >= 1, "positive control: {n}");
+}
+
+#[test]
+fn status_buffers_do_not_allocate() {
+    let (mut host, mut tx, mut rx) = host::channel(Engine::from_project(SR, &busy_project()));
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    for c in [16, 16, 2, 16] {
+        tx.push(Command::StatusBuffer(PositionStatus::with_capacity(c)))
+            .ok()
+            .unwrap();
+    }
+    let n = count_allocs(|| {
+        for _ in 0..2000 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    drop(rx.pop());
 }
 
 #[test]

@@ -14,7 +14,7 @@
 use super::SidAcidApp;
 use super::sampler_load::{pool_message, sample_memory};
 use acid_engine::host::{Command, Status};
-use acid_engine::machine::{MAX_MACHINES, MachineType, MachineUid};
+use acid_engine::machine::{MachineType, MachineUid};
 use acid_engine::params::ParamId;
 use acid_engine::project::BANK_SIZE;
 use acid_engine::rack::RackSwap;
@@ -116,6 +116,7 @@ impl SidAcidApp {
     pub(crate) fn rack_for_new_host(&mut self) {
         self.engine_rack = self.doc.project.rack_uids();
         self.rack_expected = 0;
+        self.pool.reset();
     }
 
     /// A `ReplaceEngine` built from the project goes to the current host.
@@ -125,7 +126,8 @@ impl SidAcidApp {
     }
 
     /// Clears `pending`, taking back the rack generations of the
-    /// `SetRack`s that never reached the host.
+    /// `SetRack`s that never reached the host. Status buffers stay: the
+    /// host keeps them across engines, and the pool counts them as sent.
     pub(crate) fn discard_pending(&mut self) {
         let swaps = self
             .pending
@@ -133,7 +135,8 @@ impl SidAcidApp {
             .filter(|c| matches!(c, Command::SetRack(_)))
             .count() as u32;
         self.rack_expected = self.rack_expected.wrapping_sub(swaps);
-        self.pending.clear();
+        self.pending
+            .retain(|c| matches!(c, Command::StatusBuffer(_)));
     }
 
     /// The host refused a `SetRack` (the UI's idea of the engine's rack is
@@ -154,39 +157,17 @@ impl SidAcidApp {
     }
 
     /// A status from a rack the engine has not caught up to (or has moved
-    /// past) reports positions of another rack: keep the per-position
-    /// arrays shown now and take the rest, master meter included.
+    /// past) reports positions of another rack: `on_status` keeps the
+    /// per-position values shown now and takes the rest, master meter
+    /// included.
     pub(crate) fn gate_status(&self, status: &mut Status) {
-        if status.rack_gen == self.rack_expected {
-            return;
-        }
-        let shown = &self.status;
-        status.playhead = shown.playhead;
-        status.patterns = shown.patterns;
-        status.queued = shown.queued;
-        let master = status.meters[MAX_MACHINES];
-        status.meters = shown.meters;
-        status.meters[MAX_MACHINES] = master;
         status.rack_gen = self.rack_expected;
     }
 
     /// Moves the shown per-position status from the engine's order to
     /// `rack`, so panels keep their playheads until the engine reports.
     fn follow_rack(&mut self, rack: &[MachineUid]) {
-        let old = self.status;
-        let s = &mut self.status;
-        s.playhead = [0; MAX_MACHINES];
-        s.patterns = [0; MAX_MACHINES];
-        s.queued = [None; MAX_MACHINES];
-        s.meters[..MAX_MACHINES].fill(0.0);
-        for (i, uid) in rack.iter().enumerate().take(MAX_MACHINES) {
-            if let Some(j) = self.engine_rack.iter().position(|u| u == uid) {
-                s.playhead[i] = old.playhead[j];
-                s.patterns[i] = old.patterns[j];
-                s.queued[i] = old.queued[j];
-                s.meters[i] = old.meters[j];
-            }
-        }
+        self.shown.follow(&self.engine_rack, rack);
     }
 
     /// Drops UI state kept for machines no longer in the rack.

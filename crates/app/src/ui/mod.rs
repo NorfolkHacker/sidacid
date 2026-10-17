@@ -25,6 +25,7 @@ mod pads;
 mod params_ui;
 mod perf;
 mod poly_edit;
+mod positions;
 mod rack_header;
 mod rack_sync;
 mod record;
@@ -45,9 +46,10 @@ mod transport;
 
 use crate::audio::AudioLink;
 use crate::document::Document;
-use acid_engine::host::{Command, Event, Status};
+use acid_engine::host::{Command, Event, PositionStatus, Status};
 use acid_engine::machine::{MachineType, MachineUid};
 use eframe::egui;
+use positions::{BufferPool, Shown};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -280,7 +282,13 @@ pub struct SidAcidApp {
     /// (None when headless or the environment gives no home for it).
     pub(crate) settings: crate::settings::Settings,
     pub(crate) settings_path: Option<std::path::PathBuf>,
+    /// The latest status's scalars (`positions` is always None here).
     pub(crate) status: Status,
+    /// The per-position values the panels show, in `engine_rack` order
+    /// until a rack edit moves them (see `rack_sync`).
+    pub(crate) shown: Shown,
+    /// The buffers statuses carry those values back in.
+    pool: BufferPool,
     pub(crate) pending: Vec<Command>,
     pub(crate) view: ViewState,
     /// The machine order the engine has, as far as the UI knows (see
@@ -419,6 +427,8 @@ impl SidAcidApp {
             settings: crate::settings::Settings::default(),
             settings_path: None,
             status: Status::default(),
+            shown: Shown::default(),
+            pool: BufferPool::new(acid_engine::machine::MAX_MACHINES),
             pending: Vec::new(),
             view: ViewState::default(),
             rack_expected: 0,
@@ -550,20 +560,33 @@ impl SidAcidApp {
             return;
         }
         while let Some(event) = self.audio.as_mut().and_then(AudioLink::poll) {
-            if let Event::Status(status) = event {
-                self.on_status(status, now);
+            let back = match event {
+                Event::Status(mut status) => {
+                    let positions = status.positions.take();
+                    self.on_status(status, positions.as_deref(), now);
+                    positions
+                }
+                Event::DisposePositions(b) => Some(b),
+                // Other dispose events drop here, on the UI thread.
+                _ => None,
+            };
+            if let Some(b) = back.and_then(|b| self.pool.returned(b)) {
+                self.pending.push(Command::StatusBuffer(b));
             }
-            // Dispose events drop here, on the UI thread.
         }
         let failed = self.audio.as_ref().is_some_and(AudioLink::has_failed);
+        let fresh = self.pool.top_up();
+        self.pending
+            .extend(fresh.into_iter().map(Command::StatusBuffer));
         self.flush_pending();
         if failed {
             self.on_audio_failed();
         }
     }
 
-    /// A status from the audio thread: audio is running fine.
-    fn on_status(&mut self, mut status: Status, now: f64) {
+    /// A status from the audio thread (its `positions` taken out): audio
+    /// is running fine.
+    fn on_status(&mut self, mut status: Status, positions: Option<&PositionStatus>, now: f64) {
         // Sent before the engine took our latest Stop: it is stopped by
         // now, so the optimistic stop stands (no flicker back to playing).
         if status.stops != self.view.stops_sent {
@@ -584,7 +607,10 @@ impl SidAcidApp {
         let fresh = status.rack_gen == self.rack_expected;
         self.view
             .perf
-            .on_status(&status, now, &self.engine_rack, fresh);
+            .on_status(&status, positions, now, &self.engine_rack, fresh);
+        if let Some(p) = positions.filter(|_| fresh) {
+            self.shown.take_from(p);
+        }
         self.gate_status(&mut status);
         self.status = status;
         self.view.auto_retried = false;
@@ -594,6 +620,7 @@ impl SidAcidApp {
     fn on_audio_failed(&mut self) {
         self.audio = None;
         self.status = Status::default();
+        self.shown = Shown::default();
         self.audio_error = Some("The audio device stopped.".into());
         self.view.audio_lost = true;
     }
@@ -757,11 +784,11 @@ impl SidAcidApp {
         panel.sel_slot = slot;
     }
 
-    /// `uid`'s playhead step while it plays pattern `slot`. `Status`
-    /// reports by rack position.
+    /// `uid`'s playhead step while it plays pattern `slot`. `shown` is by
+    /// rack position.
     pub(crate) fn playhead(&self, uid: MachineUid, slot: u8) -> Option<usize> {
         let i = self.doc.project.position(uid)?;
-        (self.status.playing && self.status.patterns[i] == slot).then_some(self.status.playhead[i])
+        (self.status.playing && self.shown.pattern(i) == slot).then_some(self.shown.playhead(i))
     }
 }
 
@@ -840,9 +867,8 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(p));
         app.status.playing = true;
         // Position 0 is now the sampler, position 5 Synth 1.
-        app.status.patterns[0] = 3;
-        app.status.playhead[0] = 7;
-        app.status.playhead[5] = 2;
+        app.shown.p.patterns = vec![3, 0, 0, 0, 0, 0];
+        app.shown.p.playhead = vec![7, 0, 0, 0, 0, 2];
         assert_eq!(app.playhead(SAMPLER, 3), Some(7));
         assert_eq!(app.playhead(SAMPLER, 0), None, "another pattern plays");
         assert_eq!(app.playhead(SYNTH1, 0), Some(2));
@@ -981,14 +1007,14 @@ mod tests {
             playing: true,
             ..Status::default()
         };
-        app.on_status(status, 10.0);
+        app.on_status(status.clone(), None, 10.0);
         assert_eq!(app.view.fault_until, 13.0);
         assert!(
             !app.view.auto_retried,
             "audio ran fine: a later failure may retry"
         );
         assert_eq!(app.status, status);
-        app.on_status(Status::default(), 11.0);
+        app.on_status(Status::default(), None, 11.0);
         assert_eq!(
             app.view.fault_until, 13.0,
             "a clean status leaves the fault shown"
@@ -1011,7 +1037,7 @@ mod tests {
         assert!(!app.take_audio_retry(), "nothing new to handle");
         app.on_audio_failed();
         assert!(!app.take_audio_retry(), "a second failure does not retry");
-        app.on_status(Status::default(), 0.0);
+        app.on_status(Status::default(), None, 0.0);
         app.on_audio_failed();
         assert!(app.take_audio_retry(), "audio ran in between: retry again");
     }
@@ -1224,6 +1250,7 @@ mod tests {
                 playing: true,
                 ..Status::default()
             },
+            None,
             0.0,
         );
         assert!(!app.status.playing, "a stale status");
@@ -1232,21 +1259,22 @@ mod tests {
             stops: 1,
             ..Status::default()
         };
-        app.on_status(caught_up(false), 0.0);
+        app.on_status(caught_up(false), None, 0.0);
         app.play();
-        app.on_status(caught_up(true), 0.0);
+        app.on_status(caught_up(true), None, 0.0);
         assert!(app.status.playing, "Play after the Stop is heard");
         app.set_mode(acid_engine::sequencer::Mode::Pattern);
-        app.on_status(caught_up(true), 0.0);
+        app.on_status(caught_up(true), None, 0.0);
         assert!(!app.status.playing, "a mode switch's Stop counts too");
         app.load_document(Document::new(Project::default()));
-        app.on_status(caught_up(true), 0.0);
+        app.on_status(caught_up(true), None, 0.0);
         assert!(!app.status.playing, "from the old engine");
         app.on_status(
             Status {
                 playing: true,
                 ..Status::default()
             },
+            None,
             0.0,
         );
         assert!(app.status.playing, "a fresh engine has taken no Stop");
@@ -2567,20 +2595,22 @@ mod tests {
     fn statuses_from_an_older_rack_do_not_move_panels() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.add_machine(MachineType::Sampler);
-        let mut old = Status {
+        let old = Status {
             rack_gen: app.rack_expected.wrapping_sub(1),
             ..Status::default()
         };
-        old.playhead[0] = 9;
-        app.on_status(old, 1.0);
-        assert_ne!(app.status.playhead[0], 9);
-        let mut new = Status {
+        let p = PositionStatus {
+            playhead: vec![9; 7],
+            ..PositionStatus::default()
+        };
+        app.on_status(old, Some(&p), 1.0);
+        assert_ne!(app.shown.playhead(0), 9);
+        let new = Status {
             rack_gen: app.rack_expected,
             ..Status::default()
         };
-        new.playhead[0] = 9;
-        app.on_status(new, 2.0);
-        assert_eq!(app.status.playhead[0], 9);
+        app.on_status(new, Some(&p), 2.0);
+        assert_eq!(app.shown.playhead(0), 9);
     }
 
     #[test]
@@ -2588,20 +2618,25 @@ mod tests {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.add_machine(MachineType::Sampler);
         let rack = app.engine_rack.clone();
-        let mut old = Status {
+        let old = Status {
             rack_gen: app.rack_expected.wrapping_sub(1),
             ..Status::default()
         };
-        old.slot_cpu[0] = 0.3;
-        app.on_status(old, 1.0);
+        let p = PositionStatus {
+            slot_cpu: vec![0.3],
+            ..PositionStatus::default()
+        };
+        app.on_status(old, Some(&p), 1.0);
         assert!(app.view.perf.machine_cpu(rack[0]).is_none());
-        let mut new = Status {
+        let new = Status {
             rack_gen: app.rack_expected,
             ..Status::default()
         };
-        new.slot_cpu[0] = 0.3;
-        new.slot_cpu[1] = 0.6;
-        app.on_status(new, 2.0);
+        let p = PositionStatus {
+            slot_cpu: vec![0.3, 0.6],
+            ..PositionStatus::default()
+        };
+        app.on_status(new, Some(&p), 2.0);
         assert_eq!(app.view.perf.machine_cpu(rack[0]), Some(0.3));
         assert_eq!(app.view.perf.machine_cpu(rack[1]), Some(0.6));
         run_frames(&mut app, 2); // headers draw their readings
@@ -2678,26 +2713,28 @@ mod tests {
     #[test]
     fn a_stale_status_keeps_the_rack_arrays_but_takes_the_transport() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
-        app.status.patterns[1] = 4;
-        app.status.meters[1] = 0.5;
+        app.shown.p.patterns = vec![0, 4, 0, 0, 0, 0];
+        app.shown.p.meters = vec![0.0, 0.5, 0.0, 0.0, 0.0, 0.0];
         app.add_machine(MachineType::Fm);
-        let mut old = Status {
+        let old = Status {
             rack_gen: app.rack_expected.wrapping_sub(1),
             playing: true,
             song_bar: 7,
+            master_meter: 0.25,
             ..Status::default()
         };
-        old.patterns[1] = 2;
-        old.meters[1] = 0.9;
-        old.meters[acid_engine::machine::MAX_MACHINES] = 0.25;
-        app.on_status(old, 1.0);
+        let p = PositionStatus {
+            patterns: vec![0, 2],
+            meters: vec![0.0, 0.9],
+            ..PositionStatus::default()
+        };
+        app.on_status(old, Some(&p), 1.0);
         assert!(app.status.playing);
         assert_eq!(app.status.song_bar, 7);
-        assert_eq!(app.status.patterns[1], 4, "per-machine arrays stay");
-        assert_eq!(app.status.meters[1], 0.5);
+        assert_eq!(app.shown.pattern(1), 4, "per-machine values stay");
+        assert_eq!(app.shown.meter(1), 0.5);
         assert_eq!(
-            app.status.meters[acid_engine::machine::MAX_MACHINES],
-            0.25,
+            app.status.master_meter, 0.25,
             "the master meter is not per machine"
         );
         assert_eq!(app.status.rack_gen, app.rack_expected);
@@ -2707,11 +2744,12 @@ mod tests {
     fn a_rack_edit_moves_the_shown_status_with_the_machines() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.status.playing = true;
-        app.status.playhead[5] = 3; // the sampler, last in the rack
-        app.status.patterns[5] = 2;
+        // The sampler, last in the rack.
+        app.shown.p.playhead = vec![0, 0, 0, 0, 0, 3];
+        app.shown.p.patterns = vec![0, 0, 0, 0, 0, 2];
         app.move_machine(SAMPLER, 0);
         assert_eq!(app.playhead(SAMPLER, 2), Some(3));
-        assert_eq!(app.status.playhead[0], 3);
+        assert_eq!(app.shown.playhead(0), 3);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! effects and master bus, and the sequencer, rendered sample-accurately.
 //! process() is real-time safe: no allocation, locking or I/O.
 
-use crate::host::PatternData;
+use crate::host::{PatternData, PositionStatus};
 use crate::machine::{MAX_MACHINES, MachineType, MachineUid};
 use crate::mixer::Mixer;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
@@ -181,6 +181,11 @@ impl Engine {
     /// The rack's uids in order.
     pub fn slot_uids(&self) -> Vec<MachineUid> {
         self.slots.iter().map(|s| s.uid).collect()
+    }
+
+    /// Machines in the rack.
+    pub fn rack_len(&self) -> usize {
+        self.slots.len()
     }
 
     /// Where each new position's slot comes from, and the new rack's
@@ -715,11 +720,6 @@ impl Engine {
         }
     }
 
-    /// By rack position.
-    pub fn queued_patterns(&self) -> [Option<u8>; MAX_MACHINES] {
-        std::array::from_fn(|m| self.seq.queued_pattern(m))
-    }
-
     /// See `Mixer::take_master_meter`.
     pub fn take_master_meter(&mut self) -> f32 {
         self.mixer.take_master_meter()
@@ -748,14 +748,21 @@ impl Engine {
         std::mem::take(&mut self.guard_fired)
     }
 
-    /// By rack position.
-    pub fn playhead(&self) -> [usize; MAX_MACHINES] {
-        std::array::from_fn(|m| self.seq.playhead(m))
-    }
-
-    /// By rack position.
-    pub fn current_patterns(&self) -> [u8; MAX_MACHINES] {
-        std::array::from_fn(|m| self.seq.current_pattern(m))
+    /// Appends one entry per rack position (within capacity: never grows);
+    /// takes the slots' meters and CPU time. `share` turns ns into a share.
+    pub fn fill_positions(&mut self, out: &mut PositionStatus, share: impl Fn(u64) -> f32) {
+        debug_assert!(out.fits(self.slots.len()));
+        for pos in 0..self.slots.len().min(out.playhead.capacity()) {
+            out.playhead.push(self.seq.playhead(pos));
+            out.patterns.push(self.seq.current_pattern(pos));
+            out.queued.push(self.seq.queued_pattern(pos));
+        }
+        self.take_slot_stats(|pos, m, ns| {
+            if pos < out.meters.capacity() {
+                out.meters.push(m);
+                out.slot_cpu.push(share(ns));
+            }
+        });
     }
 
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
@@ -997,17 +1004,18 @@ mod tests {
         q.machines.truncate(3);
         q.machines[2].selected = 2;
         eng.load_project(&q);
-        let mut want = [0; MAX_MACHINES];
+        let patterns = |eng: &Engine| -> Vec<u8> {
+            (0..MAX_MACHINES)
+                .map(|i| eng.seq.current_pattern(i))
+                .collect()
+        };
+        let mut want = vec![0; MAX_MACHINES];
         want[2] = 2;
-        assert_eq!(
-            eng.current_patterns(),
-            want,
-            "positions past the rack reset too"
-        );
+        assert_eq!(patterns(&eng), want, "positions past the rack reset too");
         eng.load_project(&p);
         want[2] = 0;
         want[1] = 4;
-        assert_eq!(eng.current_patterns(), want);
+        assert_eq!(patterns(&eng), want);
     }
 
     /// A full rack of `types` at its busiest: dense patterns on every slot
@@ -1139,7 +1147,7 @@ mod tests {
         // of the last tick run.
         let (mut l, mut r) = (vec![0.0; 8192], vec![0.0; 8192]);
         eng.process(&mut l, &mut r);
-        assert!(eng.playhead()[6] > 0, "slot 7 advanced");
+        assert!(eng.positions().playhead[6] > 0, "slot 7 advanced");
     }
 
     #[test]
@@ -1173,7 +1181,7 @@ mod tests {
         eng.play();
         let (mut l, mut r) = (vec![0.0; 2048], vec![0.0; 2048]);
         eng.process(&mut l, &mut r);
-        let head = eng.playhead()[0];
+        let head = eng.positions().playhead[0];
         // Remove the 909 (uid 4), move Synth 1 last, add an FM.
         let mut q = p.clone();
         q.machines.retain(|m| m.uid != MachineUid(4));
@@ -1190,7 +1198,7 @@ mod tests {
         let order: Vec<u16> = eng.slot_uids().iter().map(|u| u.0).collect();
         assert_eq!(order, [2, 3, 5, 6, 1, 7]);
         assert_eq!(
-            eng.playhead()[4],
+            eng.positions().playhead[4],
             head,
             "Synth 1 kept its sequencer position"
         );
@@ -1215,8 +1223,8 @@ mod tests {
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
         eng.set_rack(&mut swap);
         assert_eq!(
-            eng.playhead()[6],
-            eng.playhead()[0],
+            eng.positions().playhead[6],
+            eng.positions().playhead[0],
             "same pattern length, same step"
         );
     }
@@ -1238,11 +1246,11 @@ mod tests {
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
         eng.set_rack(&mut swap).unwrap();
         // Position 4 is the demo's FM, on the same default pattern.
-        assert_ne!(eng.playhead()[4], 0, "past step 0");
-        assert_eq!(eng.playhead()[6], eng.playhead()[4]);
+        assert_ne!(eng.positions().playhead[4], 0, "past step 0");
+        assert_eq!(eng.positions().playhead[6], eng.positions().playhead[4]);
         // And they stay together.
         eng.process(&mut l, &mut r);
-        assert_eq!(eng.playhead()[6], eng.playhead()[4]);
+        assert_eq!(eng.positions().playhead[6], eng.positions().playhead[4]);
     }
 
     #[test]
@@ -1270,11 +1278,11 @@ mod tests {
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), 48000.0);
         eng.set_rack(&mut swap).unwrap();
         assert_eq!(
-            eng.current_patterns()[6],
+            eng.positions().patterns[6],
             2,
             "the block's pattern, not the selection"
         );
-        assert_eq!(eng.playhead()[6], eng.playhead()[0]);
+        assert_eq!(eng.positions().playhead[6], eng.positions().playhead[0]);
         eng.take_all_meters();
         let (mut l, mut r) = (vec![0.0; 12000], vec![0.0; 12000]);
         eng.process(&mut l, &mut r);
@@ -1327,10 +1335,10 @@ mod tests {
         let mut swap = RackSwap::build(&q, &eng.slot_uids(), SR);
         assert!(swap.fresh[0].is_some() && swap.fresh[1..].iter().all(Option::is_none));
         assert!(eng.set_rack(&mut swap).is_some());
-        let pats = eng.current_patterns();
+        let pats = eng.positions().patterns;
         assert_eq!(&pats[..4], &[9, 5, 0, 3], "new slot switched, not queued");
-        assert_eq!(eng.queued_patterns()[0], None);
-        assert_eq!(eng.queued_patterns()[1], Some(6));
+        assert_eq!(eng.positions().queued[0], None);
+        assert_eq!(eng.positions().queued[1], Some(6));
         assert!(swap.into.is_empty());
     }
 
@@ -1509,6 +1517,14 @@ mod tests {
                 self.slots.iter().map(|s| s.cpu_ns).collect(),
                 self.shared_ns,
             )
+        }
+
+        /// A fresh buffer the size of the rack, filled; takes the slots'
+        /// meters and CPU time.
+        pub(crate) fn positions(&mut self) -> Box<PositionStatus> {
+            let mut b = PositionStatus::with_capacity(self.slots.len());
+            self.fill_positions(&mut b, |_| 0.0);
+            b
         }
 
         /// Slot peaks by rack position (unused positions 0), the master at
@@ -1907,7 +1923,7 @@ mod tests {
         e.set_param(MachineUid(5).param(KitParam::Volume), 0.5);
         let (l, _) = render(&mut e, 0.5);
         assert!(all_finite(&l));
-        assert_eq!(e.current_patterns(), [0; MAX_MACHINES]);
+        assert!(e.positions().patterns.iter().all(|&p| p == 0));
     }
 
     #[test]
@@ -1980,8 +1996,8 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         render(&mut e, 0.3);
-        assert!(e.playhead()[2] >= 2);
-        assert_eq!(e.current_patterns(), [0; MAX_MACHINES]);
+        assert!(e.positions().playhead[2] >= 2);
+        assert!(e.positions().patterns.iter().all(|&p| p == 0));
     }
 
     #[test]
@@ -2092,9 +2108,9 @@ mod tests {
         let mut e = demo_engine();
         e.play();
         e.select_pattern(pos_uid(3), 5);
-        let mut want = [None; MAX_MACHINES];
+        let mut want = vec![None; e.rack_len()];
         want[3] = Some(5);
-        assert_eq!(e.queued_patterns(), want);
+        assert_eq!(e.positions().queued, want);
     }
 
     #[test]
@@ -2276,7 +2292,7 @@ mod tests {
             e.process(&mut l, &mut r);
         }
         assert_eq!((e.song_bar(), e.song_step()), (1, 19));
-        assert_eq!(e.current_patterns()[0], 0);
+        assert_eq!(e.positions().patterns[0], 0);
         let mut song = two_bar_demo().song;
         song.lane_mut(MachineUid(1))[1].pattern = crate::project::PatternRef(7);
         assert!(e.swap_song(&mut compiled(&song)));
@@ -2288,8 +2304,8 @@ mod tests {
         }
         assert_eq!(e.song_step(), 21, "the position stays");
         assert_eq!(e.song_bar(), 1);
-        assert_eq!(e.current_patterns()[0], 7, "the new block's pattern");
-        assert_eq!(e.playhead()[0], 4, "at its step 4");
+        assert_eq!(e.positions().patterns[0], 7, "the new block's pattern");
+        assert_eq!(e.positions().playhead[0], 4, "at its step 4");
     }
 
     #[test]
@@ -2324,8 +2340,8 @@ mod tests {
         assert!(!e.swap_pattern(pos_uid(5), 0, &mut bad));
         e.play();
         e.select_pattern(pos_uid(5), 9);
-        assert_eq!(e.queued_patterns()[5], Some(9));
-        assert_eq!(e.current_patterns().len(), MAX_MACHINES);
+        assert_eq!(e.positions().queued[5], Some(9));
+        assert_eq!(e.positions().patterns.len(), e.rack_len());
     }
 
     #[test]

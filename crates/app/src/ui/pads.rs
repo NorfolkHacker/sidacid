@@ -12,12 +12,12 @@ pub fn bank_letter(bank: u8) -> String {
 impl SidAcidApp {
     pub(crate) fn pattern_pads(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let selected = self.selected(uid);
-        // `Status` reports by rack position.
+        // `shown` is by rack position.
         let pos = self.doc.project.position(uid);
         let playing = pos
             .filter(|_| self.status.playing)
-            .map(|i| self.status.patterns[i]);
-        let queued = pos.and_then(|i| self.status.queued[i]);
+            .map(|i| self.shown.pattern(i));
+        let queued = pos.and_then(|i| self.shown.queued(i));
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 for bank in 0..8u8 {
