@@ -17,6 +17,17 @@ const SLICE_MIN_SECONDS: f32 = 1.0;
 /// Keys a new chromatic zone covers.
 const CHROMATIC_SPAN: u8 = 24;
 
+/// Decodes a dropped or picked file; the error is the message to show.
+/// A codec can panic on a malformed file; that is a failed load rather
+/// than a crash of the UI.
+pub(crate) fn decode_file(bytes: &[u8], extension: Option<&str>) -> Result<Decoded, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode(bytes, extension))) {
+        Ok(Ok(d)) => Ok(d),
+        Ok(Err(e)) => Err(format!("Could not load the sample: {e}.")),
+        Err(_) => Err("Could not load the sample: the file is malformed.".into()),
+    }
+}
+
 impl SidAcidApp {
     pub(crate) fn load_sample_dialog(&mut self, uid: MachineUid, slot: usize) {
         if let Some(path) = rfd::FileDialog::new()
@@ -65,19 +76,10 @@ impl SidAcidApp {
         if slot >= SLOTS {
             return;
         }
-        // A codec can panic on a malformed file; treat that as a failed load
-        // rather than crashing the UI.
-        let decoded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            decode(bytes, extension)
-        })) {
-            Ok(Ok(d)) => d,
-            Ok(Err(e)) => {
-                self.view.message = Some(format!("Could not load the sample: {e}."));
-                return;
-            }
-            Err(_) => {
-                self.view.message =
-                    Some("Could not load the sample: the file is malformed.".into());
+        let decoded = match decode_file(bytes, extension) {
+            Ok(d) => d,
+            Err(msg) => {
+                self.view.message = Some(msg);
                 return;
             }
         };

@@ -107,7 +107,6 @@ pub enum Edit {
         values: Vec<(ParamId, f32)>,
     },
     /// Replacing one pad (layers, ranges, name), with knob values: one undo step.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     PadKitPad {
         uid: MachineUid,
         pad: usize,

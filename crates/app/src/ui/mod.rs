@@ -22,6 +22,7 @@ mod mono_patches;
 mod note_ops;
 mod note_panel;
 mod note_tools;
+mod padkit_load;
 mod padkit_panel;
 mod pads;
 mod params_ui;
@@ -91,6 +92,10 @@ pub struct PanelState {
     pub cursor: key_entry::Cursor,
     /// Selected sampler slot (0..16; samplers).
     pub sampler_slot: usize,
+    /// Selected pad (0..16; Pad Kits).
+    pub pad: usize,
+    /// Selected layer tab of that pad (0..4).
+    pub pad_layer: usize,
     /// Operator shown in the FM operator editor (0..6; FM).
     pub fm_op: usize,
     /// List the FM voice browser shows.

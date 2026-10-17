@@ -20,6 +20,13 @@ pub(crate) enum MemAction {
         name: String,
         decoded: Box<Decoded>,
     },
+    /// A decoded file for pad `pad` of Pad Kit `uid`.
+    LoadPad {
+        uid: MachineUid,
+        pad: usize,
+        name: String,
+        decoded: Box<Decoded>,
+    },
     /// A parsed project that passed `check_fits`, with where it came from.
     Open {
         project: Box<Project>,
@@ -104,6 +111,15 @@ impl SidAcidApp {
                 decoded,
             } => {
                 self.load_decoded_now(uid, slot, &name, *decoded);
+                None
+            }
+            MemAction::LoadPad {
+                uid,
+                pad,
+                name,
+                decoded,
+            } => {
+                self.load_pad_decoded_now(uid, pad, &name, *decoded);
                 None
             }
             MemAction::Open { project, path } => {
@@ -205,6 +221,19 @@ mod tests {
         assert!(!filled(&app));
         app.resolve_memory_warning(true);
         assert!(filled(&app));
+    }
+
+    #[test]
+    fn a_pad_load_waits_for_go_ahead() {
+        let mut app = short_app();
+        let uid = app.add_machine_now(MachineType::PadKit).unwrap();
+        let wav = super::super::tests::test_wav(0.5);
+        app.load_pad_bytes(uid, 3, "Hat", Some("wav"), &wav);
+        assert!(app.pending_warn.is_some(), "decoded, then held");
+        let n = |app: &SidAcidApp| app.doc.project.padkit(uid).unwrap().pads[3].layers.len();
+        assert_eq!(n(&app), 0);
+        app.resolve_memory_warning(true);
+        assert_eq!(n(&app), 1);
     }
 
     #[test]
