@@ -51,14 +51,15 @@ impl SidAcidApp {
             self.panel_title(uid).to_uppercase(),
             PatternRef(slot).label()
         );
-        let mut rects = [Rect::NOTHING; PADS];
         self.machine_panel(ui, uid, "padkit", title, |app, ui| {
             // Task 9 adds Save kit… and Load kit… to this row.
             ui.horizontal_wrapped(|ui| {
                 app.param_knob(ui, uid.param(PadKitParam::Volume), "Volume");
                 app.param_knob(ui, uid.param(PadKitParam::Accent), "Accent");
             });
-            rects = app.padkit_grid(ui, uid);
+            let rects = app.padkit_grid(ui, uid);
+            // Drops are resolved after the rack draws (`route_drop`).
+            app.view.pad_grids.push((uid, rects));
             app.padkit_pad_row(ui, uid);
             app.padkit_waveform(ui, uid);
             let p = app.view.panel(uid).pad.min(PADS - 1) as u8;
@@ -69,7 +70,6 @@ impl SidAcidApp {
             });
             app.note_pattern_row(ui, uid);
         });
-        self.padkit_drop(ui, uid, &rects);
         self.release_pad_note(ui);
     }
 
@@ -100,7 +100,7 @@ impl SidAcidApp {
         on
     }
 
-    /// The 4×4 grid; returns each pad's rect for file drops.
+    /// The 4×4 grid; returns each pad's visible rect for file drops.
     fn padkit_grid(&mut self, ui: &mut egui::Ui, uid: MachineUid) -> [Rect; PADS] {
         let mut rects = [Rect::NOTHING; PADS];
         let sounding = self.sounding_pads(uid);
@@ -119,7 +119,7 @@ impl SidAcidApp {
                             [76.0, 48.0],
                             egui::Button::new(text).selected(self.view.panel(uid).pad == i),
                         );
-                        rects[i] = r.rect;
+                        rects[i] = r.rect.intersect(ui.clip_rect());
                         if sounding[i] {
                             ui.painter().rect_stroke(
                                 r.rect,
@@ -164,17 +164,22 @@ impl SidAcidApp {
 
     fn padkit_pad_row(&mut self, ui: &mut egui::Ui, uid: MachineUid) {
         let p = self.view.panel(uid).pad.min(PADS - 1);
-        let Some(pad) = self.doc.project.padkit(uid).map(|k| k.pads[p].clone()) else {
+        let layer = self.view.panel(uid).pad_layer.min(MAX_LAYERS - 1);
+        // Only what the row shows: the pad's audio is not copied.
+        let Some((label, layers, range)) = self.doc.project.padkit(uid).map(|k| {
+            let pad = &k.pads[p];
+            let range = pad.layers.get(layer).map(|l| (l.vel_lo, l.vel_hi));
+            (pad.label(p), pad.layers.len(), range)
+        }) else {
             return;
         };
-        let layer = self.view.panel(uid).pad_layer.min(MAX_LAYERS - 1);
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(format!("Pad {}", p + 1)).strong());
-            self.pad_name_field(ui, uid, p, &pad);
+            self.pad_name_field(ui, uid, p, &label);
             if ui.button("Load…").clicked() {
                 self.load_pad_dialog(uid, p);
             }
-            let has = layer < pad.layers.len();
+            let has = layer < layers;
             if ui
                 .add_enabled(has, egui::Button::new("Clear"))
                 .on_hover_text("Clear the selected layer")
@@ -183,7 +188,7 @@ impl SidAcidApp {
                 self.clear_pad_layer(uid, p, layer);
             }
             if ui
-                .add_enabled(!pad.layers.is_empty(), egui::Button::new("Clear pad"))
+                .add_enabled(layers > 0, egui::Button::new("Clear pad"))
                 .clicked()
             {
                 self.clear_pad(uid, p);
@@ -191,18 +196,17 @@ impl SidAcidApp {
             ui.separator();
             for t in 0..MAX_LAYERS {
                 let r = ui.add_enabled(
-                    t < pad.layers.len(),
+                    t < layers,
                     egui::Button::new(format!("{}", t + 1)).selected(t == layer && has),
                 );
                 if r.clicked() {
                     self.view.panel(uid).pad_layer = t;
                 }
             }
-            let Some(l) = pad.layers.get(layer) else {
+            let Some((mut lo, mut hi)) = range else {
                 ui.weak("Empty — load or drop audio files (WAV, FLAC, MP3, OGG).");
                 return;
             };
-            let (mut lo, mut hi) = (l.vel_lo, l.vel_hi);
             let r1 = ui.add(egui::DragValue::new(&mut lo).range(1..=127).prefix("Vel "));
             let r2 = ui.add(egui::DragValue::new(&mut hi).range(1..=127).prefix("– "));
             // `set_layer_range` keeps lo ≤ hi by moving lo, so a low end
@@ -221,12 +225,11 @@ impl SidAcidApp {
 
     /// The pad's name, edited in place: Enter or clicking away renames,
     /// Escape cancels. A click on another pad still renames the one typed in.
-    fn pad_name_field(&mut self, ui: &mut egui::Ui, uid: MachineUid, p: usize, pad: &Pad) {
-        let label = pad.label(p);
+    fn pad_name_field(&mut self, ui: &mut egui::Ui, uid: MachineUid, p: usize, label: &str) {
         let typed = self.view.pad_name.clone().filter(|(u, ..)| *u == uid);
         let mut text = match &typed {
             Some((_, i, t)) if *i == p => t.clone(),
-            _ => label.clone(),
+            _ => label.to_string(),
         };
         let r = ui.add(
             egui::TextEdit::singleline(&mut text)
@@ -248,21 +251,6 @@ impl SidAcidApp {
         } else if r.has_focus() {
             self.view.pad_name = Some((uid, p, text));
         }
-    }
-
-    /// Files dropped on the window, when this kit is the drop target: onto
-    /// the pad under the pointer, else the selected pad, then the pads after.
-    fn padkit_drop(&mut self, ui: &egui::Ui, uid: MachineUid, rects: &[Rect; PADS]) {
-        if self.drop_target() != Some(uid) || ui.ctx().input(|i| i.raw.dropped_files.is_empty()) {
-            return;
-        }
-        let (files, pos) = ui
-            .ctx()
-            .input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos()));
-        let first = pos
-            .and_then(|p| rects.iter().position(|r| r.contains(p)))
-            .unwrap_or(self.view.panel(uid).pad.min(PADS - 1));
-        self.drop_pad_files(uid, first, &files);
     }
 }
 
@@ -343,6 +331,54 @@ mod tests {
             app.shown.p.playhead = vec![step; n];
             assert_eq!(lit(&app), want, "step {step}");
         }
+    }
+
+    fn wav_file(name: &str) -> egui::DroppedFile {
+        egui::DroppedFile {
+            name: name.into(),
+            bytes: Some(crate::ui::tests::test_wav(0.1).into()),
+            ..Default::default()
+        }
+    }
+
+    fn sampler_is_empty(app: &SidAcidApp) -> bool {
+        let s = app.doc.project.sampler(crate::test_rack::SAMPLER).unwrap();
+        s.slots.iter().all(Option::is_none)
+    }
+
+    #[test]
+    fn a_drop_over_the_pad_grid_lands_on_the_pad_under_the_pointer() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app.add_machine(MachineType::PadKit).unwrap();
+        app.view.focus = Some(crate::test_rack::SAMPLER);
+        let ctx = egui::Context::default();
+        crate::ui::run_frames_in(&ctx, &mut app, 2);
+        let (_, rects) = app.view.pad_grids.iter().find(|(u, _)| *u == uid).unwrap();
+        let at = rects[4].center();
+        let input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(at)],
+            dropped_files: vec![wav_file("tom.wav")],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+        assert_eq!(app.doc.project.padkit(uid).unwrap().pads[4].label(4), "tom");
+        assert!(sampler_is_empty(&app), "not the focused sampler");
+    }
+
+    #[test]
+    fn a_drop_with_no_position_and_nothing_focused_goes_to_the_first_sampler() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app.add_machine(MachineType::PadKit).unwrap();
+        app.move_machine(uid, 0);
+        app.view.focus = None;
+        let input = egui::RawInput {
+            dropped_files: vec![wav_file("hat.wav")],
+            ..Default::default()
+        };
+        let _ = egui::Context::default().run(input, |ctx| app.ui(ctx));
+        assert!(!sampler_is_empty(&app), "the sampler, as before");
+        let pads = &app.doc.project.padkit(uid).unwrap().pads;
+        assert!(pads.iter().all(|p| p.layers.is_empty()));
     }
 
     #[test]

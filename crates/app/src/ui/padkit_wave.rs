@@ -56,6 +56,18 @@ impl SidAcidApp {
         self.knob_gesture(id, out, recording, 0.0);
     }
 
+    /// The Start or End param a waveform marker drag holds, if one is open.
+    pub(crate) fn marker_drag_param(&self) -> Option<ParamId> {
+        let (uid, pad, marker) = self.view.wave_drag?;
+        self.doc.project.padkit(uid)?;
+        let which = match marker {
+            Marker::Start => PadParam::Start,
+            Marker::End => PadParam::End,
+            _ => return None,
+        };
+        Some(uid.param(MachineParam::Pad(pad as u8, which)))
+    }
+
     /// Ends a marker drag on kit `uid`, if one is open.
     fn end_pad_marker_drag(&mut self, uid: MachineUid) {
         let Some((u, pad, marker)) = self.view.wave_drag else {
@@ -100,6 +112,10 @@ impl SidAcidApp {
         };
         let width = ui.available_width().clamp(200.0, 900.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(width, WAVE_H), Sense::click_and_drag());
+        #[cfg(test)]
+        {
+            self.view.wave_rect = Some(rect);
+        }
         let columns = width as usize;
         let cache = (uid, p * MAX_LAYERS + l);
         let key = (layer.pcm.as_ptr() as usize, layer.pcm.len(), columns);
@@ -153,8 +169,10 @@ impl SidAcidApp {
             );
         }
         let pointer = resp.interact_pointer_pos();
+        // A drag starts once the pointer has moved a few pixels: grab the
+        // marker nearest where the button went down.
         if resp.drag_started()
-            && let Some(pos) = pointer
+            && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(pointer)
             && let Some(i) = nearest_marker(&xs, pos.x, MARKER_GRAB_PX)
         {
             // Markers on top of each other: take the one that can move
@@ -228,6 +246,66 @@ mod tests {
                 assert_eq!(names.len(), steps as usize, "{p:?}");
             }
         }
+    }
+
+    fn pointer(pos: egui::Pos2, pressed: Option<bool>) -> Vec<egui::Event> {
+        let mut v = vec![egui::Event::PointerMoved(pos)];
+        if let Some(pressed) = pressed {
+            v.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+        }
+        v
+    }
+
+    #[test]
+    fn a_marker_dragged_over_frames_with_its_knob_drawn_undoes_in_one_step() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app.add_machine(MachineType::PadKit).unwrap();
+        app.move_machine(uid, 0);
+        app.load_pad_bytes(
+            uid,
+            0,
+            "kick",
+            Some("wav"),
+            &crate::ui::tests::test_wav(0.1),
+        );
+        let start = uid.param(MachineParam::Pad(0, PadParam::Start));
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut frame = |app: &mut SidAcidApp, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(1280.0, 1600.0),
+                )),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.ui(ctx));
+            t += 1.0 / 60.0;
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let rect = app.view.wave_rect.expect("the waveform drew");
+        let y = rect.center().y;
+        let mut frame = |events| frame(&mut app, events);
+        frame(pointer(egui::pos2(rect.left() + 1.0, y), None));
+        frame(pointer(egui::pos2(rect.left() + 1.0, y), Some(true)));
+        for f in [0.1, 0.2, 0.3] {
+            frame(pointer(egui::pos2(rect.left() + f * rect.width(), y), None));
+        }
+        let end = egui::pos2(rect.left() + 0.3 * rect.width(), y);
+        frame(pointer(end, Some(false)));
+        frame(pointer(end, None));
+        assert!((app.doc.project.param(start) - 0.3).abs() < 0.01);
+        assert_eq!(app.view.wave_drag, None);
+        app.doc.undo();
+        assert_eq!(app.doc.project.param(start), 0.0, "one undo step");
     }
 
     #[test]

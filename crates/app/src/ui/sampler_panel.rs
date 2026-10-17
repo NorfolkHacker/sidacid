@@ -8,7 +8,8 @@ use super::sampler_ui::{
 };
 use super::{SidAcidApp, theme};
 use acid_engine::host::Command;
-use acid_engine::machine::MachineUid;
+use acid_engine::machine::{MachineType, MachineUid};
+use acid_engine::padkit::PADS;
 use acid_engine::params::{MachineParam, SamplerParam, SlotParam};
 use acid_engine::project::{PatternRef, SamplerMachine};
 use acid_engine::sampler::SLOTS;
@@ -66,7 +67,6 @@ impl SidAcidApp {
             });
             app.note_pattern_row(ui, uid);
         });
-        self.sampler_drop(ui, uid);
         self.release_pad_note(ui);
     }
 
@@ -332,20 +332,38 @@ impl SidAcidApp {
         }
     }
 
-    fn sampler_drop(&mut self, ui: &egui::Ui, uid: MachineUid) {
-        // OS file drags rarely report a pointer position, so any drop
-        // loads into one machine: `drop_target`.
-        if self.drop_target() != Some(uid) {
+    /// Files dropped on the window this frame, after the rack has drawn.
+    /// A drop over a Pad Kit's pad grid loads there, from the pad under
+    /// the pointer. OS file drags rarely report a pointer position, so
+    /// otherwise one machine takes it: `drop_target`.
+    pub(crate) fn route_drop(&mut self, ctx: &egui::Context) {
+        let (files, pos) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos()));
+        let Some(file) = files.first() else {
+            return;
+        };
+        let under = pos.and_then(|p| {
+            self.view.pad_grids.iter().find_map(|(uid, rects)| {
+                rects.iter().position(|r| r.contains(p)).map(|i| (*uid, i))
+            })
+        });
+        if let Some((uid, pad)) = under {
+            self.drop_pad_files(uid, pad, &files);
             return;
         }
-        let file = ui.ctx().input(|i| i.raw.dropped_files.first().cloned());
-        if let Some(file) = file {
-            self.load_dropped_file(uid, &file);
+        let Some(uid) = self.drop_target() else {
+            return;
+        };
+        if self.doc.project.padkit(uid).is_some() {
+            let pad = self.view.panel(uid).pad.min(PADS - 1);
+            self.drop_pad_files(uid, pad, &files);
+        } else {
+            self.load_dropped_file(uid, file);
         }
     }
 
-    /// The machine dropped files load into: the focused machine if it is a
-    /// sampler or Pad Kit, else the first of those in the rack.
+    /// The machine a drop not over a pad grid loads into: the focused
+    /// machine if it is a sampler or Pad Kit, else the first sampler in the
+    /// rack, else the first Pad Kit.
     pub(crate) fn drop_target(&self) -> Option<MachineUid> {
         let machines = &self.doc.project.machines;
         let takes = |uid: &MachineUid| {
@@ -354,10 +372,10 @@ impl SidAcidApp {
                 .machine(*uid)
                 .is_some_and(|m| takes_drops(m.machine_type()))
         };
+        let first = |ty| machines.iter().find(|m| m.machine_type() == ty);
         self.view.focus.filter(takes).or_else(|| {
-            machines
-                .iter()
-                .find(|m| takes_drops(m.machine_type()))
+            first(MachineType::Sampler)
+                .or_else(|| first(MachineType::PadKit))
                 .map(|m| m.uid)
         })
     }

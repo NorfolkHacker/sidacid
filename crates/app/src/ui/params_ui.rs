@@ -240,7 +240,9 @@ impl SidAcidApp {
                 self.engine_touch(id);
             }
             self.view.touched_knob = Some(id);
-        } else if self.view.touched_knob == Some(id) {
+        } else if self.view.touched_knob == Some(id) && self.marker_drag_param() != Some(id) {
+            // A Pad Kit marker drag holds its Start or End param while
+            // that param's knob draws untouched.
             self.release_knob(id);
         }
         if out.released {

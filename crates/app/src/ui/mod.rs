@@ -253,6 +253,9 @@ pub struct ViewState {
     /// Tests only: collapsing headers forced open or shut, by id salt.
     #[cfg(test)]
     pub force_open: Vec<(&'static str, bool)>,
+    /// Tests only: where the last Pad Kit waveform was drawn.
+    #[cfg(test)]
+    pub wave_rect: Option<egui::Rect>,
     /// Cached waveform peaks per (sampler, slot), or (Pad Kit, pad ×
     /// `MAX_LAYERS` + layer): (pcm pointer, pcm length, columns, peaks).
     pub wave_cache: HashMap<(MachineUid, usize), WaveCacheEntry>,
@@ -265,6 +268,8 @@ pub struct ViewState {
     pub pad_note: Option<(MachineUid, u8)>,
     /// A Pad Kit pad's name being typed: (kit, pad, text so far).
     pub pad_name: Option<(MachineUid, usize, String)>,
+    /// Each drawn Pad Kit's pad rects this frame, for file drops.
+    pub pad_grids: Vec<(MachineUid, [egui::Rect; acid_engine::padkit::PADS])>,
     pub perf: perf::PerfMeter,
     /// Machine whose name is being edited, and the text typed so far.
     pub renaming: Option<(MachineUid, String)>,
@@ -757,6 +762,7 @@ impl SidAcidApp {
     }
 
     fn rack(&mut self, ui: &mut egui::Ui) {
+        self.view.pad_grids.clear();
         for (uid, ty) in self.rack_panels() {
             match ty {
                 MachineType::Synth => self.synth_panel(ui, uid),
@@ -768,6 +774,7 @@ impl SidAcidApp {
             }
             ui.add_space(6.0);
         }
+        self.route_drop(ui.ctx());
         self.add_bar(ui);
         ui.add_space(6.0);
         self.mixer_panel(ui);
