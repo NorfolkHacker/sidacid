@@ -241,4 +241,34 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn the_replace_question_holds_the_keyboard_and_goes_with_its_document() {
+        let (mut app, uid) = app_with_kit();
+        app.view.kit_overwrite = Some(("drums.padkit".into(), kit_text(uid, &app)));
+        let ctx = eframe::egui::Context::default();
+        let key = |pressed| eframe::egui::Event::Key {
+            key: eframe::egui::Key::Space,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: eframe::egui::Modifiers::NONE,
+        };
+        for events in [vec![], vec![key(true), key(false)], vec![]] {
+            let input = eframe::egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.ui(ctx));
+        }
+        assert!(
+            !app.pending
+                .iter()
+                .chain(&app.flushed)
+                .any(|c| matches!(c, acid_engine::host::Command::Play))
+        );
+        assert!(app.view.kit_overwrite.is_some(), "still asking");
+        app.load_document(Document::new(Project::default()));
+        assert!(app.view.kit_overwrite.is_none());
+    }
 }

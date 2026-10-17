@@ -246,6 +246,7 @@ impl SidAcidApp {
             }
         }
         self.view.overwrite = None;
+        self.view.kit_overwrite = None;
         // An action held behind the low-memory warning was for the old
         // document (its machine uids mean other machines here).
         self.pending_warn = None;

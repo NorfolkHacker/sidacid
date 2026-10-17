@@ -66,10 +66,14 @@ fn typing(ctx: &egui::Context) -> bool {
 }
 
 impl SidAcidApp {
-    /// A confirm, message or low-memory dialog is open: its buttons have
-    /// the keys.
+    /// A confirm, message, replace-file or low-memory dialog is open: its
+    /// buttons have the keys.
     fn dialog_open(&self) -> bool {
-        self.view.confirm.is_some() || self.view.message.is_some() || self.pending_warn.is_some()
+        self.view.confirm.is_some()
+            || self.view.message.is_some()
+            || self.pending_warn.is_some()
+            || self.view.overwrite.is_some()
+            || self.view.kit_overwrite.is_some()
     }
 
     /// Feed the frame's key presses (repeats too) to the dock and take the
