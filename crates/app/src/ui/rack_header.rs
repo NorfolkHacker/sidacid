@@ -47,6 +47,22 @@ fn colour_popup_id(uid: MachineUid) -> egui::Id {
     egui::Id::new(("machine_colour_popup", uid))
 }
 
+/// The outline of a swatch in the colour popup: the current colour's is
+/// strong and wide, a hovered one's thin and light, so both read apart.
+fn swatch_stroke(visuals: &egui::Visuals, current: bool, hovered: bool) -> Option<egui::Stroke> {
+    if current {
+        Some(egui::Stroke::new(
+            2.0,
+            visuals.widgets.active.fg_stroke.color,
+        ))
+    } else if hovered {
+        let c = visuals.widgets.hovered.fg_stroke.color;
+        Some(egui::Stroke::new(1.0, c.gamma_multiply(0.6)))
+    } else {
+        None
+    }
+}
+
 /// Swatch `colour` in `uid`'s colour popup.
 pub(crate) fn colour_swatch_id(uid: MachineUid, colour: u8) -> egui::Id {
     egui::Id::new(("machine_colour_swatch", uid, colour))
@@ -121,13 +137,35 @@ impl SidAcidApp {
 
     /// A machine's colour popup is open: Esc is its, to close it.
     pub(crate) fn colour_popup_open(&self, ctx: &egui::Context) -> bool {
-        ctx.memory(|m| {
-            self.doc
-                .project
-                .machines
-                .iter()
-                .any(|e| m.is_popup_open(colour_popup_id(e.uid)))
-        })
+        self.view
+            .colour_popup
+            .is_some_and(|uid| ctx.memory(|m| m.is_popup_open(colour_popup_id(uid))))
+    }
+
+    /// Start of a frame: egui keeps a popup open until its widget closes
+    /// it, so a colour popup whose machine left the rack (an undo) or that
+    /// an earlier document opened (a load) is shut here, and could not
+    /// come back with a redo or on a machine of the same uid.
+    pub(crate) fn close_stale_colour_popup(&mut self, ctx: &egui::Context) {
+        let open = |ctx: &egui::Context, uid| ctx.memory(|m| m.is_popup_open(colour_popup_id(uid)));
+        let ours = self
+            .view
+            .colour_popup
+            .filter(|&uid| open(ctx, uid) && self.doc.project.machine(uid).is_some());
+        let stale = self
+            .doc
+            .project
+            .machines
+            .iter()
+            .any(|m| Some(m.uid) != ours && open(ctx, m.uid))
+            || self
+                .view
+                .colour_popup
+                .is_some_and(|uid| ours.is_none() && open(ctx, uid));
+        if stale {
+            ctx.memory_mut(|m| m.close_popup());
+        }
+        self.view.colour_popup = ours;
     }
 
     /// Ends the rename, keeping the name.
@@ -287,6 +325,7 @@ impl SidAcidApp {
         let popup = colour_popup_id(uid);
         if square.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup));
+            self.view.colour_popup = Some(uid);
         }
         let close = egui::PopupCloseBehavior::CloseOnClickOutside;
         let picked = egui::popup_below_widget(ui, popup, &square, close, |ui| {
@@ -298,8 +337,9 @@ impl SidAcidApp {
                         ui.allocate_exact_size(egui::vec2(SWATCH, SWATCH), egui::Sense::hover());
                     let r = ui.interact(rect, colour_swatch_id(uid, i), egui::Sense::click());
                     ui.painter().rect_filled(rect.shrink(2.0), 2.0, c);
-                    if current == Some(i) || r.hovered() {
-                        let stroke = ui.visuals().widgets.active.fg_stroke;
+                    if let Some(stroke) =
+                        swatch_stroke(ui.visuals(), current == Some(i), r.hovered())
+                    {
                         ui.painter()
                             .rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
                     }
@@ -419,13 +459,74 @@ mod tests {
             .center()
     }
 
+    fn press(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn any_popup(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.any_popup_open())
+    }
+
+    #[test]
+    fn the_current_swatch_and_a_hovered_one_are_outlined_apart() {
+        let v = egui::Visuals::dark();
+        let current = swatch_stroke(&v, true, false).unwrap();
+        let hovered = swatch_stroke(&v, false, true).unwrap();
+        assert_ne!(current, hovered);
+        assert!(current.width > hovered.width, "the current one stands out");
+        assert_eq!(swatch_stroke(&v, true, true), Some(current));
+        assert_eq!(swatch_stroke(&v, false, false), None);
+    }
+
+    #[test]
+    fn a_colour_popup_closes_when_its_machine_goes_or_a_document_loads() {
+        let ctx = egui::Context::default();
+        let mut app = demo();
+        let added = app.add_machine(MachineType::Fm).unwrap();
+        crate::ui::run_frames_in(&ctx, &mut app, 2);
+        click(&mut app, &ctx, centre(&ctx, colour_square_id(added)), 1.0);
+        assert!(app.colour_popup_open(&ctx));
+        app.undo();
+        frame(&mut app, &ctx, 2.0, vec![]);
+        assert!(!any_popup(&ctx), "shut with its machine");
+        app.redo();
+        crate::ui::run_frames_in(&ctx, &mut app, 2);
+        assert!(!any_popup(&ctx), "and not back with a redo");
+        click(&mut app, &ctx, centre(&ctx, colour_square_id(SYNTH1)), 3.0);
+        assert!(app.colour_popup_open(&ctx));
+        app.load_document(Document::new(Project::default()));
+        frame(&mut app, &ctx, 4.0, vec![]);
+        assert!(!any_popup(&ctx), "not on the new document's Synth 1");
+    }
+
     #[test]
     fn the_colour_square_opens_the_swatches_and_a_pick_is_one_undo_step() {
         let ctx = egui::Context::default();
         let mut app = demo();
         crate::ui::run_frames_in(&ctx, &mut app, 2);
+        app.view.dock.keyboard = true;
         click(&mut app, &ctx, centre(&ctx, colour_square_id(KIT808)), 1.0);
         assert!(app.colour_popup_open(&ctx), "the square opens the popup");
+        assert!(!app.view.dock.keyboard, "the dock gave up the keys");
+        // Note keys while it is open reach no lane.
+        let before = app.doc.project.clone();
+        for key in [
+            egui::Key::A,
+            egui::Key::Z,
+            egui::Key::Num1,
+            egui::Key::Delete,
+        ] {
+            frame(&mut app, &ctx, 1.5, vec![press(key)]);
+        }
+        assert_eq!(app.doc.project, before);
+        assert!(!app.doc.can_undo());
+        assert!(app.colour_popup_open(&ctx), "and leave it open");
         click(
             &mut app,
             &ctx,

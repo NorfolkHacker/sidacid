@@ -278,6 +278,9 @@ pub struct ViewState {
     pub renaming: Option<(MachineUid, String)>,
     /// Rack control clicked while the rack was drawn; applied after it.
     pub rack_action: Option<rack_header::RackAction>,
+    /// The machine whose colour popup this document opened (see
+    /// `SidAcidApp::close_stale_colour_popup`).
+    pub(crate) colour_popup: Option<MachineUid>,
     /// The Fill button: held down now, and latched by a Shift-click.
     pub fill_held: bool,
     pub fill_latched: bool,
@@ -695,6 +698,7 @@ impl SidAcidApp {
             self.start_audio();
         }
         self.close_stale_tool_popup(ctx);
+        self.close_stale_colour_popup(ctx);
         self.hold_dock_focus(ctx);
         self.handle_step_write(ctx);
         self.handle_shortcuts(ctx);

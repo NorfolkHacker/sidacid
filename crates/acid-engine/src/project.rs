@@ -660,7 +660,9 @@ impl MachineEntry {
     }
 
     /// A machine read from a file without a colour, until loading gives
-    /// it one.
+    /// it one: 255 means "not in the file" and is resolved on load
+    /// (`Project::colour_uncoloured`), so a file that says 255 loads with
+    /// its rack position's colour rather than being refused.
     pub(crate) const NO_COLOUR: u8 = u8::MAX;
 
     fn no_colour() -> u8 {
@@ -1086,7 +1088,8 @@ impl Project {
     }
 
     /// A machine read without a colour (saved before machines kept one)
-    /// takes the one its rack position gave it then.
+    /// takes the one its rack position gave it then. `NO_COLOUR` (255)
+    /// marks it: a literal 255 in a file is treated the same way.
     pub(crate) fn colour_uncoloured(&mut self) {
         for (i, m) in self.machines.iter_mut().enumerate() {
             if m.colour == MachineEntry::NO_COLOUR {

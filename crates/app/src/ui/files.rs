@@ -269,6 +269,8 @@ impl SidAcidApp {
         self.view.knob_scroll = None;
         self.view.renaming = None;
         self.view.rack_action = None;
+        // Its popup was the old document's; the next frame shuts it.
+        self.view.colour_popup = None;
         self.view.audition = None;
         self.view.wave_cache.clear();
         self.view.wave_drag = None;
