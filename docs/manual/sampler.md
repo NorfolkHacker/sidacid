@@ -62,9 +62,8 @@ Loading into a slot that already holds a sample replaces it. **Clear** empties t
 | Sample rate | 8 kHz to 192 kHz. Other rates are refused. |
 | Length | 30 seconds at most. A longer file is refused. |
 | Channels | Mono or stereo. A file with more than two channels keeps its first two. |
-| Sample memory | 256 MB of decoded audio, shared by every Sampler in the rack. |
 
-The memory limit counts each sample value at 4 bytes, so a 30-second stereo sample at 48 kHz takes about 11 MB. A file that does not fit is refused with a message such as "Not enough sample memory: 12 MB needed, 5 MB free of 256 MB". The **Smp** readout in the transport bar shows how much is in use (see [Mixer and effects](mixer-and-effects.md#the-performance-readout)).
+There is no fixed sample memory. Samples share the computer's memory with everything else, and they count toward the **MEM** readout in the transport bar (see [Mixer and effects](mixer-and-effects.md#the-performance-readout)). If loading a sample would leave the system short of free memory, SidAcid shows a "Low memory" window first, and you choose **Go ahead** or **Cancel**.
 
 If a file ends before all the audio its header promises, SidAcid keeps what it could read and tells you so.
 

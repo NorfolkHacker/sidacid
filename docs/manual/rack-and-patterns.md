@@ -19,9 +19,11 @@ These are the machine types, as the **+ Add machine** menu names them:
 
 A new project (**File → New**) starts with six machines: Synth 1, Synth 2, Kit A, Kit B, FM and Sampler.
 
-### The 16-machine limit
+### How many machines
 
-The rack has no machine limit. The count is shown next to **+ Add machine** as "n machines". Only after every machine id has been used (over 65,000 machines added in one project) are **+ Add machine** and every panel's Duplicate button greyed out, and pointing at them shows "the rack has no free machine ids".
+The rack has no machine limit. The count is shown next to **+ Add machine** as "1 machine" or "n machines". Only after every machine id has been used (over 65,000 machines added in one project) are **+ Add machine** and every panel's Duplicate button greyed out, and pointing at them shows "the rack has no free machine ids".
+
+The limit in practice is memory. The **MEM** readout in the transport bar shows how much is left, and adding or duplicating a machine that would leave the system short of memory asks first (see [the performance readout](mixer-and-effects.md#the-performance-readout)).
 
 ## Changing the rack
 
@@ -35,7 +37,7 @@ Click **+ Add machine ⏷** below the last panel and pick a type. The new machin
 
 Click the duplicate button (🗐) in a panel's header. The copy goes directly below the original and is named after it with " copy" added, for example "Synth 1 copy". It gets everything the original has: every pattern, every knob, its mixer channel settings and, for a sampler, its loaded samples. It doesn't get the original's blocks in the song: its song lane starts empty. The copy becomes the focused machine.
 
-Duplicating a sampler fails, with a message, if its samples won't fit in the project's free sample memory (256 MB of decoded audio, shared by every sampler).
+Duplicating a sampler copies its samples too, so it can use a lot of memory. If that would leave the system short of free memory, SidAcid asks first (see [the low-memory warning](mixer-and-effects.md#the-low-memory-warning)).
 
 ### Removing a machine
 

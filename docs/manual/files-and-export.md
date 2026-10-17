@@ -46,7 +46,7 @@ A `.sidacid` file is a text file that holds the whole project:
 - The send effects and master settings.
 - The song: its blocks, length, loop range and automation lanes.
 
-Because the sample audio is inside the file, a project with samples opens on another computer without the original sample files. The audio is kept as 16-bit samples at the sample's own rate, mono or stereo, compressed. Samples loaded from 24-bit or 32-bit files are saved at 16 bits. A project's samples can hold up to 256 MB of decoded audio in all. See [Sampler](sampler.md).
+Because the sample audio is inside the file, a project with samples opens on another computer without the original sample files. The audio is kept as 16-bit samples at the sample's own rate, mono or stereo, compressed. Samples loaded from 24-bit or 32-bit files are saved at 16 bits. Opening a project whose decoded audio is larger than the computer's free memory is refused. See [Sampler](sampler.md).
 
 Some things aren't saved in the project:
 

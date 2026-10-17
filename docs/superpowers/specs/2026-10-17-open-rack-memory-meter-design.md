@@ -191,3 +191,16 @@ outright, except the per-sample guards and the project-load guard above.
    `memory_estimate`.
 5. Warnings and the project-load guard.
 6. Docs, then screenshots in the running app with 20+ machines.
+
+## Implementation notes
+
+Where the build differs from the plan above:
+
+- Per-slot meters and CPU time live in each `Slot`, so they follow rack
+  edits for free. Only the sequencer's buffers and the event buffer travel
+  in a `Growth` inside `RackSwap`.
+- The project-load parse is bounded by a budget of half the system's free
+  memory (decoded 16-bit PCM), so a small file cannot inflate unchecked
+  before the memory check runs.
+- Status per-position data travels in pooled buffers allocated by the UI
+  (`STATUS_BUFFERS` = 4, held by the host).

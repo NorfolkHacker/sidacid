@@ -10,7 +10,7 @@ The Mono machine is not in the default rack. To add one:
 2. Click **+ Add machine ⏷**.
 3. Choose **Mono**.
 
-The new machine appears at the end of the rack, named `Mono` (or `Mono 2`, `Mono 3` and so on if that name is taken), with the patch `Init`: every control at its default. The rack holds up to 16 machines; the count next to the Add button shows how many you have, for example `7 / 16`. See [Rack and patterns](rack-and-patterns.md) for moving, duplicating and removing machines.
+The new machine appears at the end of the rack, named `Mono` (or `Mono 2`, `Mono 3` and so on if that name is taken), with the patch `Init`: every control at its default. The rack has no machine limit; the count next to the Add button shows how many you have, for example `7 machines`. See [Rack and patterns](rack-and-patterns.md) for moving, duplicating and removing machines.
 
 You write the Mono machine's notes in its lane in the editor dock. See [Editor dock](editor-dock.md).
 

@@ -1,5 +1,7 @@
 # SidAcid: FM Synth + Sampler — Design
 
+> The 16-machine cap and the 256 MB sample pool were lifted by 2026-10-17-open-rack-memory-meter-design.md.
+
 Date: 2026-10-12
 Status: approved in brainstorming, pending spec review
 

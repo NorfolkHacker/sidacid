@@ -1,5 +1,7 @@
 # Modular rack — design
 
+> The 16-machine cap and the 256 MB sample pool were lifted by 2026-10-17-open-rack-memory-meter-design.md.
+
 Date: 2026-10-14. Step 3 of 3 in the "modular SidAcid" series (1: performance
 meter, merged; 2: audio driver/device settings, merged 9cc7f9a).
 

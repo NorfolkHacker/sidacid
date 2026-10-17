@@ -67,8 +67,7 @@ The top row holds the **File** and **Edit** menus, the transport controls (see [
 |---|---|
 | CPU n% | The share of each audio callback's time spent making sound. It turns amber above 80 % and red at 100 %. Point at it to see the open driver, device, rate and buffer, plus the busiest machines. Click it to open Audio Settings. |
 | pk n% | The worst callback in the last second, with the same colours. |
-| MEM | The memory the app is using. |
-| Smp | The decoded sampler audio in the project, against its 256 MB limit. |
+| MEM | The memory the app is using, against the computer's total. It turns amber, then red, as the system's free memory runs short. |
 | ⚠ n | Shown only after audible dropouts. Point at it for details and click it to clear the count. |
 
 Short notices, such as "Saving…", export progress and audio fallbacks, appear at the right end of this row. When the window is narrow, the row wraps onto a second line.

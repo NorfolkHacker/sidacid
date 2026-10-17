@@ -145,11 +145,18 @@ The transport bar shows how hard the computer is working, after the **Master** k
 |---|---|
 | **CPU n%** | How much of each audio callback's time is spent making sound, smoothed. It turns amber above 80% and red at 100%. Click it to open Audio Settings. |
 | **pk n%** | The worst callback in the last second. |
-| **MEM n MB** | Memory the app is using, read once a second. |
-| **Smp n/256 MB** | Decoded sampler audio in use, against the [sample memory limit](sampler.md#limits). It turns amber above 80%. |
+| **MEM n MB / n GB** | Memory the app is using, against the computer's total memory (for example "MEM 412 MB / 16 GB"), read once a second. It turns amber when the system's free memory falls below 25% of the total or 2 GB, whichever is larger, and red below 10% of the total or 512 MB, whichever is larger. |
 | **⚠ n** | Appears after an audible dropout: the count of renders that ran out of time plus dropouts the audio driver reports (JACK only). Hover to see the split and how long ago the last one was; click to clear it. |
 
 Hover over **CPU** or **pk** to see the audio driver, device, sample rate and buffer size, and a "Top:" line naming the three busiest machines and the share spent on the effects and master bus ("FX/master").
+
+Hover over **MEM** to see "App: … · System free: … of …" and a second line, "Samples … · Machines ~… · Other …", which splits the app's memory into sample audio, an estimate for the machines, and the rest.
+
+### The low-memory warning
+
+Before you add or duplicate a machine, load a sample, or open a project, SidAcid checks whether the action would push the system's free memory into the red range. If so, a "Low memory" window says "Adding this leaves about n of free memory. The system may slow down or the app may be stopped." Choose **Go ahead** to continue or **Cancel** to stop. **Cancel** is selected at first, and Esc cancels.
+
+Opening a project whose decoded audio is larger than the free memory is refused: "Not enough memory to open this project: n of audio, n free".
 
 Each machine's panel header also shows its own share as **CPU n%**. It turns amber above 25% and red above 50%.
 

@@ -112,6 +112,12 @@ Click a cell in the step grid's Note row to start. See [Step-writing](acid-synth
 | `[` / `]` | Writer's octave down / up. |
 | Esc | Stop step-writing. |
 
+## Low-memory warning
+
+| Key | What it does |
+|---|---|
+| Esc | Cancel the action the warning asked about. |
+
 ## Machine names
 
 | Key | What it does |
