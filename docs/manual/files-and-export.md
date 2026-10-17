@@ -43,6 +43,7 @@ A `.sidacid` file is a text file that holds the whole project:
 - Each FM machine's last loaded voice name and its imported voice bank.
 - Each Mono machine's last loaded patch name.
 - Each sampler's slots, *including the sample audio itself*.
+- Each Pad Kit's pads: their names, their layers *with the audio itself*, and the layers' velocity ranges.
 - The send effects and master settings.
 - The song: its blocks, length, loop range and automation lanes.
 

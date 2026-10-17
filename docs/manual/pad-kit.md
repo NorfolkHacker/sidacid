@@ -33,7 +33,7 @@ Pad 1 is at the bottom left of the grid and pad 13 at the top left, so the grid 
 - **Click a layer tab** (1 to 4) to select a layer. Tabs for layers the pad doesn't have are greyed out.
 - Pads that are sounding, from the audition or from notes under the playhead, get a bright outline.
 
-The name field in the pad row shows the pad's name. Until you type one, a pad is named after its first layer's file, or "P1" to "P16" when it is empty. Press Enter or click away to rename, and Esc to cancel. Naming a pad with an empty name goes back to the automatic one. **Clear** empties the selected layer, and **Clear pad** empties the whole pad, name included.
+The name field in the pad row shows the pad's name. Until you type one, a pad is named after its first layer's file, or "P1" to "P16" when it is empty. Press Enter or click away to rename, and Esc to cancel. Naming a pad with an empty name goes back to the automatic one. **Clear** removes the selected layer, and the ranges of the layers that are left are split evenly again (see [Velocity layers](#velocity-layers)). **Clear pad** empties the whole pad, name included.
 
 ### Velocity layers
 
@@ -52,7 +52,7 @@ You can then change any range by hand. The ranges don't have to fit together. A 
 
 ## Pad knobs
 
-These knobs and switches belong to the selected pad. Click another pad to see and change that pad's settings. Hover over a knob to see its value; see [Getting started](getting-started.md) for how to use knobs and switches.
+These knobs and switches belong to the selected pad. Click another pad to see and change that pad's settings. Hover over a knob to see its name and its value as a percentage of the knob's travel; the table below gives what that travel means. See [Getting started](getting-started.md) for how to use knobs and switches.
 
 | Control | What it does | Range or positions | Default |
 |---|---|---|---|
@@ -121,7 +121,7 @@ Loading, clearing, renaming and changing a range are undo steps (see [Files and 
 
 A kit file holds a whole Pad Kit: all 16 pads with their layers and velocity ranges, and the values of the kit's and the pads' knobs. It has the extension `.padkit`. Patterns, the mixer channel and the machine's name aren't part of it, so you can load a kit into a machine without disturbing its patterns.
 
-- **Save kit…** asks for a file name. If the file already exists, SidAcid asks "Replace file?" before writing over it.
+- **Save kit…** asks for a file name. If the file already exists, the system's save dialog asks before writing over it. If you type a name without `.padkit`, SidAcid adds the extension, and if a file with that full name already exists, SidAcid asks "Replace file?" itself.
 - **Load kit…** asks for a `.padkit` file and replaces all 16 pads and every kit and pad knob. It is one undo step. Knobs that the file doesn't mention go back to their defaults. The patterns stay as they are. The memory check applies here too.
 
 A broken kit is refused whole and nothing changes. The message names the pad at fault, for example "Could not load the kit: pad 3: layer 2: …". A kit file of a newer version, or with a wrong number of pads, is refused as well.
@@ -138,8 +138,10 @@ The Pad Kit's pattern is a lane in the [editor dock](editor-dock.md). It has 16 
 
 A new note starts at velocity 100.
 
+A new Pad Kit's lane is taller than the other lanes, so every row has room for its name. If you make the lane so short that the names would overlap, they are hidden.
+
 ## Voices
 
-All 16 pads share 16 voices, so up to 16 sounds play at once. When all voices are busy, a new hit takes the oldest voice.
+All 16 pads share 16 voices, so up to 16 sounds play at once. A new hit takes a free voice if there is one. Otherwise it takes a voice that is only playing out the short fade of a sound that was cut off, and failing that the oldest voice.
 
 See also: [Sampler](sampler.md) · [Drum kits](drum-kits.md) · [Editor dock](editor-dock.md) · [The rack and patterns](rack-and-patterns.md) · [Mixer and effects](mixer-and-effects.md) · [Files and export](files-and-export.md)

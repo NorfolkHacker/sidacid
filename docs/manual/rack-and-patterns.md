@@ -121,7 +121,7 @@ A pattern only pastes onto a matching kind of machine:
 |---|---|
 | Acid synth | Any acid synth, including Trans |
 | Kit A or Kit B | Any drum kit, either kind |
-| FM, Mono, Sampler or Pad Kit | Any FM, Mono, Sampler or Pad Kit. Onto a Pad Kit, notes above pitch 15 (pad 16) are left out. |
+| FM, Mono, Sampler or Pad Kit | Any FM, Mono, Sampler or Pad Kit. Onto a Pad Kit, notes above pitch 15 (pad 16) are left out, and a message says how many. |
 
 Pasting onto another kind shows "The clipboard holds a different kind of pattern." The copied pattern stays available after **File → New** or **File → Open**, so you can paste it into another project.
 

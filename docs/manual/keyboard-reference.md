@@ -112,6 +112,15 @@ Click a cell in the step grid's Note row to start. See [Step-writing](acid-synth
 | `[` / `]` | Writer's octave down / up. |
 | Esc | Stop step-writing. |
 
+## Pad Kit
+
+| Action | What it does |
+|---|---|
+| Click a pad | Select it. |
+| Shift+click and hold a pad | Hear it at velocity 100 until you let go. |
+
+See [Pad Kit](pad-kit.md#pads-and-layers).
+
 ## Low-memory warning
 
 | Key | What it does |
