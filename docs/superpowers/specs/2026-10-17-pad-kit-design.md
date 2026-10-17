@@ -42,7 +42,7 @@ from the pads.
 ```rust
 pub struct PadKitMachine {            // in project.rs MachineBody::PadKit
     pub pads: [Pad; PADS],            // PADS = 16
-    pub patterns: Vec<DrumPattern>,   // as DrumMachine
+    pub patterns: Vec<NotePattern>,   // pitch 0..16 = pad; played through the note path
 }
 pub struct Pad {
     pub name: String,                 // defaults to the first layer's file stem
@@ -124,10 +124,12 @@ PadParam::ALL.len()`.
 
 - `MachineType::PadKit`. It is added to `ALL`, `label` ("Pad Kit") and
   `stem` ("Pads"), and does not transpose.
-- `Slot::PadKit` sits next to the kits in `engine.rs`. The sequencer
-  treats it as a drum machine with 16 rows: the `DRUM_INSTRUMENTS` checks
-  (`sequencer.rs:1363`, `lane.rs:748`) become `drum_rows(ty)`, which is
-  8 for the kits and 16 for the Pad Kit.
+- `MachineDsp::PadKit` sits next to the Sampler in `rack.rs`. Its patterns
+  are note patterns (`Bank::Notes`), so the sequencer plays them through the
+  note path, which already carries velocity, note length (for Gate) and
+  note-offs. `SeqEvent::PolyOn` gains an `accent` flag; other note machines
+  ignore it. Notes with a pitch of 16 or more are invalid in a Pad Kit
+  pattern.
 - `memory_estimate` (from the open-rack spec) counts the decoded layers.
 - The acid synths' Dice pairing with kits ignores Pad Kits, because their
   rows are not BD/SD/hats.
@@ -178,10 +180,14 @@ dialog only opens on a click, never on hover. Every load, clear, rename,
 range edit and kit load is one undo step, with the sample data counted in
 the undo byte budget (`document.rs`).
 
-**Dock:** the drum lane draws `drum_rows(ty)` rows. The Pad Kit labels
-them with the pads' names (or "P1"–"P16" when a pad is empty), and pad 1
-is at the bottom. Hit editing, the accent strip, velocity, chance, ratchet
-and conditions are unchanged.
+**Dock (decided 2026-10-17):** a new **pad lane** (`LaneKind::Pads`). Like
+a drum lane, it has one row per pad (16), labelled with the pads' names
+(or "P1"–"P16" when a pad is empty), pad 1 at the bottom, and
+double-clicking a note toggles its accent. Unlike a drum lane, notes can be
+resized (Gate holds for the note's length) and the strip edits
+**velocity**, which picks the layer. Chance, ratchet and conditions are
+unchanged. Note tools treat a pad lane like a drum lane for pitch (it stays
+within 0–15; Invert is unavailable) and like a melodic lane for length.
 
 ## 4. Tests
 
@@ -221,9 +227,9 @@ and conditions are unchanged.
    Add `MachineType::PadKit`, the project data, params and validation.
 2. The engine voice and machine: layers, tune, trim and reverse, filter,
    decay, Gate and One-shot, mute groups. Then `Slot` integration,
-   `drum_rows` and `no_alloc`.
+   the accent flag on `PolyOn`, and `no_alloc`.
 3. The panel: grid, selected-pad row, knobs, waveform; loading and drag
    and drop; undo.
-4. Dock rows and labels.
+4. The pad lane in the dock.
 5. `.padkit` save and load.
 6. Docs and screenshots.
