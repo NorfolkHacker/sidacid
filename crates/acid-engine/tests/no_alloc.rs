@@ -59,9 +59,26 @@ fn count_allocs(f: impl FnOnce()) -> usize {
 const SR: f32 = 48_000.0;
 const FM: MachineUid = MachineUid(5);
 const SAMPLER: MachineUid = MachineUid(6);
+const PADKIT: MachineUid = MachineUid(7);
 
-/// The demo groove plus chords on the FM and a riff on the sampler, a
-/// 4-bar looped song using every machine, and master-level automation.
+/// Two pads of two layers each, the pads in mute group 1.
+fn pad_kit(p: &mut Project) {
+    use acid_engine::padkit::pad::Layer;
+    use acid_engine::params::PadParam;
+    let tone: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.05).sin() * 0.6).collect();
+    let kit = p.padkit_mut(PADKIT).unwrap();
+    for pad in 0..2 {
+        kit.pads[pad].layers = vec![Layer::new("x", 44_100, 1, &tone); 2];
+        kit.pads[pad].split_evenly();
+    }
+    for pad in 0..2 {
+        p.set_param(PADKIT.param(MachineParam::Pad(pad, PadParam::Group)), 0.25);
+    }
+}
+
+/// The demo groove plus chords on the FM, a riff on the sampler and a
+/// Pad Kit beat, a 4-bar looped song using every machine, and
+/// master-level automation.
 fn busy_project() -> Project {
     let mut p = acid_engine::demo::demo_project();
     // Every drum instrument, on and off the 1/16 grid, on both kits (the
@@ -107,6 +124,21 @@ fn busy_project() -> Project {
         MachineUid(6).param(acid_engine::params::SamplerParam::Grit),
         1.0,
     );
+    // Accented, velocity-varied, ratcheted hits over both pads, choking
+    // each other through their mute group.
+    let m = p
+        .new_machine(acid_engine::machine::MachineType::PadKit)
+        .unwrap();
+    assert_eq!(m.uid, PADKIT);
+    p.insert_machine(p.machines.len(), m).unwrap();
+    pad_kit(&mut p);
+    for k in 0..32u16 {
+        p.padkit_mut(PADKIT).unwrap().patterns[0].notes.push(Note {
+            accent: k % 3 == 0,
+            ratchet: [1, 1, 2, 4][k as usize % 4],
+            ..Note::new(k * 2, 2, (k % 2) as u8, 20 + (k * 13 % 107) as u8)
+        });
+    }
     // Four 16-step bars: a block per machine and bar.
     p.song.lanes = p
         .machines
@@ -151,7 +183,7 @@ fn a_forty_slot_rack_does_not_allocate() {
     let mut p = busy_project();
     p.machines.swap(0, 3);
     let types = MachineType::ALL.iter().cycle();
-    for (u, &ty) in (7..=40u16).zip(types) {
+    for (u, &ty) in (8..=40u16).zip(types) {
         p.machines
             .push(MachineEntry::new(MachineUid(u), ty, format!("M{u}")));
     }
@@ -177,9 +209,9 @@ fn busy_forty_slot_project() -> Project {
     use acid_engine::project::{MachineBody, MachineEntry};
     let mut p = busy_project();
     p.machines.swap(0, 3);
-    for u in 7..=40u16 {
+    for u in 8..=40u16 {
         // Clone a busy machine of the cycling type under a new uid.
-        let from = p.machines[(u as usize - 7) % 6].clone();
+        let from = p.machines[(u as usize - 8) % 7].clone();
         p.machines.push(MachineEntry {
             uid: MachineUid(u),
             name: format!("M{u}"),
@@ -187,11 +219,12 @@ fn busy_forty_slot_project() -> Project {
         });
     }
     p.next_uid = 41;
-    assert!(
-        p.machines
-            .iter()
-            .any(|m| m.uid.0 > 6 && matches!(m.body, MachineBody::Sampler(_)))
-    );
+    for busy in [
+        |b: &MachineBody| matches!(b, MachineBody::Sampler(_)),
+        |b: &MachineBody| matches!(b, MachineBody::PadKit(_)),
+    ] {
+        assert!(p.machines.iter().any(|m| m.uid.0 > 7 && busy(&m.body)));
+    }
     p.song.lanes = p
         .machines
         .iter()
@@ -232,7 +265,7 @@ fn a_forty_slot_song_with_automation_does_not_allocate() {
 }
 
 /// The busy project with chance, ratchets and every kind of condition
-/// on the acid lines, both kits and the poly machines.
+/// on the acid lines, both kits, the poly machines and the Pad Kit.
 fn chance_project() -> Project {
     use acid_engine::project::Cond;
     let mut p = busy_project();
@@ -248,7 +281,7 @@ fn chance_project() -> Project {
         Cond::Pre,
         Cond::NotPre,
     ];
-    for uid in 1..=6 {
+    for uid in 1..=7 {
         let roll = p.roll_mut(MachineUid(uid), 0).unwrap();
         for (i, n) in roll.notes.iter_mut().enumerate() {
             n.chance = [100, 50, 75, 25][i % 4];
@@ -421,6 +454,79 @@ fn sampler_steals_and_marker_edits_do_not_allocate() {
         render_seconds(&mut e, &mut l, &mut r, 0.1);
     });
     assert_eq!(n, 0);
+}
+
+#[test]
+fn pad_kit_sample_and_play_swaps_do_not_allocate() {
+    use acid_engine::padkit::pad::{Layer, Pad};
+    use acid_engine::padkit::play::PadPlay;
+    use acid_engine::padkit::{MAX_LAYERS, PADS};
+    use std::sync::Arc;
+    let p = busy_project();
+    let (mut host, mut tx, mut rx) = host::channel(Engine::from_project(SR, &p));
+    let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+    let tone: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.02).sin() * 0.5).collect();
+    let mut pads = vec![Pad::default(); PADS];
+    pads[0].layers = vec![Layer::new("y", 48_000, 1, &tone); 3];
+    pads[0].split_evenly();
+    tx.push(Command::Play).ok().unwrap();
+    for _ in 0..40 {
+        host.process(&mut l, &mut r);
+    }
+    // New layers on a sounding pad, a pad's last layer cleared, the
+    // ranges for them, and a stray uid.
+    for layer in 0..3u8 {
+        let sample = Some(Arc::new(pads[0].layers[layer as usize].to_sample()));
+        tx.push(Command::PadSample {
+            uid: PADKIT,
+            pad: 0,
+            layer,
+            sample,
+        })
+        .ok()
+        .unwrap();
+    }
+    tx.push(Command::PadSample {
+        uid: PADKIT,
+        pad: 1,
+        layer: 1,
+        sample: None,
+    })
+    .ok()
+    .unwrap();
+    pads[1] = p.padkit(PADKIT).unwrap().pads[1].clone();
+    pads[1].layers.truncate(1);
+    pads[1].split_evenly();
+    tx.push(Command::PadPlay {
+        uid: PADKIT,
+        play: Box::new(PadPlay::from_pads(&pads)),
+    })
+    .ok()
+    .unwrap();
+    tx.push(Command::PadSample {
+        uid: MachineUid(999),
+        pad: 0,
+        layer: (MAX_LAYERS - 1) as u8,
+        sample: Some(Arc::new(pads[0].layers[0].to_sample())),
+    })
+    .ok()
+    .unwrap();
+    let n = count_allocs(|| {
+        for _ in 0..400 {
+            host.process(&mut l, &mut r);
+        }
+    });
+    assert_eq!(n, 0);
+    let (mut samples, mut plays) = (0, 0);
+    while let Ok(e) = rx.pop() {
+        match e {
+            Event::DisposeSample(_) => samples += 1,
+            Event::DisposePadPlay(_) => plays += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((samples, plays), (5, 1), "every swapped-out box comes back");
+    assert!(l.iter().any(|v| *v != 0.0) || r.iter().any(|v| *v != 0.0));
 }
 
 #[test]
@@ -712,11 +818,11 @@ fn a_rack_swap_through_the_host_does_not_allocate() {
     let fm = q.machines.remove(3);
     q.machines.insert(0, fm);
     q.machines.push(MachineEntry::new(
-        MachineUid(7),
+        MachineUid(8),
         MachineType::Sampler,
         "S2".into(),
     ));
-    q.next_uid = 8;
+    q.next_uid = 9;
     q.song.lanes.retain(|(u, _)| *u != MachineUid(3));
     q.validate().unwrap();
     let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
@@ -741,7 +847,7 @@ fn a_rack_swap_through_the_host_does_not_allocate() {
     assert_eq!(n, 0);
     assert_eq!(
         host.engine().slot_uids(),
-        [5, 1, 2, 4, 6, 7].map(MachineUid).to_vec()
+        [5, 1, 2, 4, 6, 7, 8].map(MachineUid).to_vec()
     );
     let mut racks = 0;
     while let Ok(e) = rx.pop() {
@@ -764,14 +870,15 @@ fn machines_joining_mid_pattern_do_not_allocate() {
     let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
     let mut q = p.clone();
     for (uid, ty) in [
-        (7, MachineType::Synth),
-        (8, MachineType::Fm),
-        (9, MachineType::Mono),
+        (8, MachineType::Synth),
+        (9, MachineType::Fm),
+        (10, MachineType::Mono),
+        (11, MachineType::PadKit),
     ] {
         q.machines
             .push(MachineEntry::new(MachineUid(uid), ty, format!("M{uid}")));
     }
-    q.next_uid = 10;
+    q.next_uid = 12;
     q.validate().unwrap();
     let swap = RackSwap::build(&q, &host.engine().slot_uids(), SR, host.engine().capacity());
     tx.push(Command::Play).ok().unwrap();

@@ -6,6 +6,8 @@
 use crate::host::{PatternData, PositionStatus};
 use crate::machine::{MachineType, MachineUid, rack_capacity};
 use crate::mixer::Mixer;
+use crate::padkit::PadKit;
+use crate::padkit::play::PadPlay;
 use crate::params::{DRUM_INSTRUMENTS, GlobalParam, MachineParam, ParamId};
 use crate::project::{MAX_NOTES, PATTERNS, Project};
 use crate::rack::{CompiledSong, MachineDsp, RackSwap, Slot, SlotPatterns};
@@ -447,6 +449,15 @@ impl Engine {
         }
     }
 
+    /// The Pad Kit machine `uid`; `None` for an unknown uid or another type.
+    fn padkit_with(&mut self, uid: MachineUid) -> Option<&mut PadKit> {
+        let pos = self.position(uid)?;
+        match &mut self.slots[pos].dsp {
+            MachineDsp::PadKit(x) => Some(&mut **x),
+            _ => None,
+        }
+    }
+
     pub fn set_bpm(&mut self, bpm: f32) {
         self.seq.set_bpm(bpm);
         let bpm = self.seq.bpm();
@@ -481,6 +492,26 @@ impl Engine {
             .is_some_and(|s| s.swap_play(slot, play))
     }
 
+    /// Exchanges layer `layer` of pad `pad` on Pad Kit machine `uid`
+    /// (real-time safe; the old sample comes back for disposal off the
+    /// audio thread). An unknown uid, another machine type or a bad pad
+    /// or layer leaves `s` unchanged and returns false.
+    pub fn swap_padkit_sample(
+        &mut self,
+        uid: MachineUid,
+        pad: usize,
+        layer: usize,
+        s: &mut Option<Arc<SampleData>>,
+    ) -> bool {
+        self.padkit_with(uid)
+            .is_some_and(|k| k.swap_sample(pad, layer, s))
+    }
+
+    /// Like `swap_padkit_sample`, for the kit's layer ranges.
+    pub fn swap_padkit_play(&mut self, uid: MachineUid, play: &mut PadPlay) -> bool {
+        self.padkit_with(uid).map(|k| k.swap_play(play)).is_some()
+    }
+
     pub fn set_swing(&mut self, swing: f32) {
         self.seq.set_swing(swing);
     }
@@ -511,6 +542,7 @@ impl Engine {
                 MachineDsp::Fm(f) => f.pattern_off(),
                 MachineDsp::Sampler(x) => x.pattern_off(),
                 MachineDsp::Mono(m) => m.pattern_off(),
+                MachineDsp::PadKit(k) => k.pattern_off(),
                 _ => {}
             }
         }
@@ -525,12 +557,12 @@ impl Engine {
         self.note_machines_pattern_off();
     }
 
-    /// Audition: starts a note on FM or Sampler machine `uid` right away,
+    /// Audition: starts a note on a note machine `uid` right away,
     /// playing or not. Unknown uids, other machines, pitches above 127 and
     /// velocity 0 are ignored.
     pub fn note_on(&mut self, uid: MachineUid, pitch: u8, vel: u8) {
         if let Some(pos) = self.position(uid) {
-            self.poly_on(pos, pitch, vel, true);
+            self.poly_on(pos, pitch, vel, false, true);
         }
     }
 
@@ -541,7 +573,8 @@ impl Engine {
         }
     }
 
-    fn poly_on(&mut self, machine: usize, pitch: u8, vel: u8, live: bool) {
+    /// Only the Pad Kit plays `accent`.
+    fn poly_on(&mut self, machine: usize, pitch: u8, vel: u8, accent: bool, live: bool) {
         if pitch > 127 || vel == 0 {
             return;
         }
@@ -549,6 +582,7 @@ impl Engine {
             Some(MachineDsp::Fm(f)) => f.note_on(pitch, vel.min(127), live),
             Some(MachineDsp::Sampler(s)) => s.note_on(pitch, vel.min(127), live),
             Some(MachineDsp::Mono(m)) => m.note_on(pitch, vel.min(127), live),
+            Some(MachineDsp::PadKit(k)) => k.note_on(pitch, vel.min(127), accent, live),
             _ => {}
         }
     }
@@ -558,6 +592,7 @@ impl Engine {
             Some(MachineDsp::Fm(f)) => f.note_off(pitch, live),
             Some(MachineDsp::Sampler(s)) => s.note_off(pitch, live),
             Some(MachineDsp::Mono(m)) => m.note_off(pitch, live),
+            Some(MachineDsp::PadKit(k)) => k.note_off(pitch, live),
             _ => {}
         }
     }
@@ -574,7 +609,10 @@ impl Engine {
             for s in &mut self.slots {
                 if matches!(
                     s.dsp,
-                    MachineDsp::Fm(_) | MachineDsp::Sampler(_) | MachineDsp::Mono(_)
+                    MachineDsp::Fm(_)
+                        | MachineDsp::Sampler(_)
+                        | MachineDsp::Mono(_)
+                        | MachineDsp::PadKit(_)
                 ) {
                     s.reset();
                 }
@@ -852,7 +890,12 @@ impl Engine {
             SeqEvent::ParamRestore { id } => self.restore_param(id),
             SeqEvent::Automation { id, value } => self.apply_automation(id, value),
             SeqEvent::AutomationReset { id } => self.reset_automation(id),
-            SeqEvent::PolyOn { slot, pitch, vel } => self.poly_on(slot, pitch, vel, false),
+            SeqEvent::PolyOn {
+                slot,
+                pitch,
+                vel,
+                accent,
+            } => self.poly_on(slot, pitch, vel, accent, false),
             SeqEvent::PolyOff { slot, pitch } => self.poly_off(slot, pitch, false),
         }
     }
@@ -2601,7 +2644,7 @@ mod tests {
         let mut e = Engine::from_project(SR, &tone_slot_project());
         for machine in [4, 5] {
             e.note_on(pos_uid(machine), 72, 100);
-            e.poly_on(machine, 60, 100, false);
+            e.poly_on(machine, 60, 100, false, false);
         }
         e.play();
         assert_eq!(
@@ -2610,8 +2653,8 @@ mod tests {
             "play released the pattern note"
         );
         assert_eq!(e.sampler().held_keys(), vec![72], "on the sampler too");
-        e.poly_on(4, 60, 100, false);
-        e.poly_on(5, 60, 100, false);
+        e.poly_on(4, 60, 100, false, false);
+        e.poly_on(5, 60, 100, false, false);
         e.stop();
         assert_eq!(
             e.fm().sounding(),
@@ -2626,7 +2669,7 @@ mod tests {
         let mut p = tone_slot_project();
         p.set_param(MachineUid(5).param(crate::params::FmParam::Mono), 1.0);
         let mut e = Engine::from_project(SR, &p);
-        e.poly_on(4, 48, 100, false);
+        e.poly_on(4, 48, 100, false, false);
         e.note_on(pos_uid(4), 72, 100);
         e.play();
         assert_eq!(e.fm().sounding(), vec![72], "the audition keeps sounding");
@@ -2684,7 +2727,7 @@ mod tests {
     fn audition_release_leaves_the_pattern_note_of_that_pitch() {
         let mut e = Engine::from_project(SR, &tone_slot_project());
         for machine in [4, 5] {
-            e.poly_on(machine, 60, 100, false);
+            e.poly_on(machine, 60, 100, false, false);
             e.note_on(pos_uid(machine), 60, 100);
             e.note_off(pos_uid(machine), 60);
         }
@@ -2699,8 +2742,8 @@ mod tests {
     fn double_note_on_of_a_pitch_releases_both_on_one_off() {
         let mut e = Engine::from_project(SR, &tone_slot_project());
         for machine in [4, 5] {
-            e.poly_on(machine, 60, 100, false);
-            e.poly_on(machine, 60, 100, false);
+            e.poly_on(machine, 60, 100, false, false);
+            e.poly_on(machine, 60, 100, false, false);
         }
         assert_eq!(e.fm().sounding(), vec![60, 60]);
         assert_eq!(e.sampler().held_keys(), vec![60, 60]);
@@ -2913,5 +2956,95 @@ mod tests {
         assert_ne!(a, go(&plain), "chance 50 drops notes");
         p.seed = 7;
         assert_ne!(a, go(&p), "the seed picks which");
+    }
+
+    /// A project with a Pad Kit last; pad 5 holds `layers` (DC levels,
+    /// split evenly) and pattern 0 plays `notes`.
+    fn pad_kit_project(layers: &[f32], notes: &[crate::project::Note]) -> (Project, MachineUid) {
+        use crate::padkit::pad::Layer;
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let kit = p.padkit_mut(uid).unwrap();
+        for &v in layers {
+            kit.pads[5]
+                .layers
+                .push(Layer::new("dc", 48_000, 1, &vec![v; 48_000]));
+        }
+        kit.pads[5].split_evenly();
+        kit.patterns[0].notes.extend_from_slice(notes);
+        (p, uid)
+    }
+
+    #[test]
+    fn a_pad_kit_plays_its_pattern_with_velocity_and_accent() {
+        use crate::padkit::pad::Layer;
+        use crate::project::Note;
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let kit = p.padkit_mut(uid).unwrap();
+        kit.pads[5]
+            .layers
+            .push(Layer::new("dc", 48_000, 1, &vec![0.5; 48_000]));
+        kit.pads[5].split_evenly();
+        let mut n = Note::new(0, 4, 5, 100);
+        n.accent = true;
+        kit.patterns[0].notes.push(n);
+        let mut eng = Engine::from_project(SR, &p);
+        eng.play();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        let mut peak = 0.0f32;
+        for _ in 0..20 {
+            eng.process(&mut l, &mut r);
+            peak = l.iter().fold(peak, |m, v| m.max(v.abs()));
+        }
+        assert!(peak > 0.01, "the pad sounded: {peak}");
+    }
+
+    #[test]
+    fn a_pad_kits_accent_lifts_a_hit_into_the_loud_layer() {
+        use crate::project::Note;
+        let level = |accent: bool| {
+            let mut n = Note::new(0, 4, 5, 30);
+            n.accent = accent;
+            let (p, _) = pad_kit_project(&[0.05, 0.9], &[n]);
+            let mut e = Engine::from_project(SR, &p);
+            e.play();
+            peak(&render(&mut e, 0.1).0)
+        };
+        let (plain, accented) = (level(false), level(true));
+        assert!(plain > 0.0, "the quiet layer plays");
+        assert!(accented > plain * 3.0, "{accented} vs {plain}");
+    }
+
+    #[test]
+    fn pad_kit_swaps_reach_the_kit_and_refuse_other_machines() {
+        use crate::padkit::play::PadPlay;
+        let (p, uid) = pad_kit_project(&[0.5], &[]);
+        let mut e = Engine::from_project(SR, &p);
+        let mut s = Some(Arc::new(SampleData {
+            sample_rate: 44_100,
+            left: vec![0.5; 64].into(),
+            right: None,
+        }));
+        assert!(e.swap_padkit_sample(uid, 5, 0, &mut s));
+        assert!(s.is_some(), "the project's layer came back");
+        let mut play = PadPlay::EMPTY;
+        assert!(e.swap_padkit_play(uid, &mut play));
+        assert_eq!(play.counts[5], 1, "the old play came back");
+        e.note_on(uid, 5, 100);
+        assert_eq!(peak(&render(&mut e, 0.05).0), 0.0, "no layer covers it now");
+        let other = p.machines[0].uid;
+        let mut s2 = None;
+        assert!(!e.swap_padkit_sample(other, 0, 0, &mut s2));
+        assert!(!e.swap_padkit_sample(uid, 16, 0, &mut s2));
+        assert!(!e.swap_padkit_sample(MachineUid(999), 0, 0, &mut s2));
+        let mut play = PadPlay::EMPTY;
+        play.counts[0] = 3;
+        assert!(!e.swap_padkit_play(other, &mut play));
+        assert_eq!(play.counts[0], 3, "refused: unchanged");
     }
 }

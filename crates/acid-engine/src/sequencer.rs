@@ -65,11 +65,13 @@ pub enum SeqEvent {
     AutomationReset {
         id: ParamId,
     },
-    /// A note machine (FM or Sampler) starts a note.
+    /// A note machine (FM, Sampler, Mono or Pad Kit) starts a note.
+    /// Only the Pad Kit plays `accent`.
     PolyOn {
         slot: usize,
         pitch: u8,
         vel: u8,
+        accent: bool,
     },
     PolyOff {
         slot: usize,
@@ -1576,6 +1578,7 @@ impl Sequencer {
                     slot: m,
                     pitch,
                     vel: n.vel,
+                    accent: n.accent,
                 };
                 let take = if all { usize::MAX } else { 1 };
                 for (at, _) in hits_in(n, from, p, ticks).take(take) {
@@ -2900,12 +2903,32 @@ mod tests {
                     SeqEvent::PolyOn {
                         slot: 4,
                         pitch: 60,
-                        vel: 100
+                        vel: 100,
+                        accent: false,
                     }
                 ),
                 (6891, SeqEvent::PolyOff { slot: 4, pitch: 60 }),
             ]
         );
+    }
+
+    #[test]
+    fn a_note_machines_accent_rides_on_its_note_on() {
+        let mut f = Fixture::new();
+        let mut accented = note(0, 2, 60);
+        accented.accent = true;
+        f.notes[0][0].notes.push(accented);
+        f.notes[0][0].notes.push(note(0, 2, 62));
+        let mut s = new_seq();
+        s.play();
+        let ons: Vec<_> = poly(&f.run(&mut s, 100))
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                SeqEvent::PolyOn { pitch, accent, .. } => Some((pitch, accent)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ons, vec![(60, true), (62, false)]);
     }
 
     #[test]
@@ -2960,7 +2983,8 @@ mod tests {
                 SeqEvent::PolyOn {
                     slot: 4,
                     pitch: 63,
-                    vel: 100
+                    vel: 100,
+                    accent: false,
                 }
             )]
         );
@@ -3043,6 +3067,7 @@ mod tests {
             slot: 4,
             pitch: 60,
             vel: 100,
+            accent: false,
         };
         assert_eq!(ev, vec![on, OFF_60, on]);
     }
@@ -3066,7 +3091,8 @@ mod tests {
                     SeqEvent::PolyOn {
                         slot: 4,
                         pitch: 60,
-                        vel: 100
+                        vel: 100,
+                        accent: false,
                     }
                 ),
                 (5513, SeqEvent::PolyOff { slot: 4, pitch: 60 }),
@@ -3075,7 +3101,8 @@ mod tests {
                     SeqEvent::PolyOn {
                         slot: 4,
                         pitch: 62,
-                        vel: 100
+                        vel: 100,
+                        accent: false,
                     }
                 ),
             ]
@@ -3115,6 +3142,7 @@ mod tests {
             slot: 4,
             pitch: 60,
             vel: 100,
+            accent: false,
         };
         assert_eq!(ev, vec![OFF_60, on], "wraps to tick 0 and retriggers");
     }
@@ -3168,12 +3196,14 @@ mod tests {
                 SeqEvent::PolyOn {
                     slot: 1,
                     pitch: 60,
-                    vel: 100
+                    vel: 100,
+                    accent: false,
                 },
                 SeqEvent::PolyOn {
                     slot: 2,
                     pitch: 65,
-                    vel: 100
+                    vel: 100,
+                    accent: false,
                 },
             ],
             "the Sampler ignores the transpose; the FM takes it"

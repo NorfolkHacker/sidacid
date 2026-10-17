@@ -435,8 +435,29 @@ mod tests {
         let labels: Vec<&str> = MachineType::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels,
-            ["Acid Synth", "Kit A", "Kit B", "FM", "Sampler", "Mono"]
+            [
+                "Acid Synth",
+                "Kit A",
+                "Kit B",
+                "FM",
+                "Sampler",
+                "Mono",
+                "Pad Kit"
+            ]
         );
+    }
+
+    #[test]
+    fn adding_a_pad_kit_from_the_menu_draws_the_rack() {
+        let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
+        app.view.rack_action = Some(RackAction::Add(MachineType::PadKit));
+        run_frames(&mut app, 2);
+        let added = *app.doc.project.rack_uids().last().unwrap();
+        assert_eq!(
+            app.doc.project.machine(added).unwrap().machine_type(),
+            MachineType::PadKit
+        );
+        run_frames(&mut app, 1);
     }
 
     /// The panel's open state lives where its `CollapsingHeader` kept it.

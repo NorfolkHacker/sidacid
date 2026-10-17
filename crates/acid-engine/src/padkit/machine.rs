@@ -172,14 +172,18 @@ impl PadKit {
         }
     }
 
+    /// Fades every voice out, auditions and One-shot hits included.
     pub fn all_off(&mut self) {
         for v in &mut self.voices {
-            v.kill();
+            v.fade(FADE_S);
         }
     }
 
+    /// Silences every voice at once.
     pub fn reset(&mut self) {
-        self.all_off();
+        for v in &mut self.voices {
+            v.kill();
+        }
     }
 
     pub fn active_voices(&self) -> usize {
@@ -368,6 +372,27 @@ mod tests {
         assert!(
             sounding[sounding.len() / 10] > sounding[sounding.len() * 9 / 10],
             "reverse falls"
+        );
+    }
+
+    #[test]
+    fn all_off_fades_and_reset_silences() {
+        let mut k = kit();
+        k.note_on(1, 100, false, false);
+        k.note_on(2, 100, false, true);
+        render(&mut k, 100);
+        k.all_off();
+        assert_eq!(k.active_voices(), 2, "fading, not cut");
+        render(&mut k, (0.02 * SR) as usize);
+        assert_eq!(k.active_voices(), 0);
+        k.note_on(1, 100, false, false);
+        k.reset();
+        assert_eq!(k.active_voices(), 0);
+        assert_eq!(
+            render(&mut k, 100)
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs())),
+            0.0
         );
     }
 

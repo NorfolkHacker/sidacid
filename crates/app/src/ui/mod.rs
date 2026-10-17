@@ -1044,6 +1044,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dice_skip_pad_kits_when_pairing_a_synth_with_a_kit() {
+        use acid_engine::machine::MachineType;
+        use acid_engine::random::Dice;
+        let mut p = acid_engine::demo::demo_project();
+        let pads = p.new_machine(MachineType::PadKit).unwrap();
+        p.insert_machine(0, pads).unwrap();
+        let mut app = SidAcidApp::headless(Document::new(p));
+        let p = app.doc.project.clone();
+        let rest = Dice {
+            rest: true,
+            ..Dice::default()
+        };
+        let slot = p.machine(SYNTH1).unwrap().selected as usize;
+        let groove = |kit| &p.kit(kit).unwrap().patterns[p.machine(kit).unwrap().selected as usize];
+        let expected = acid_engine::random::randomise_synth(
+            &p.synth(SYNTH1).unwrap().patterns[slot],
+            rest,
+            groove(KIT808),
+            42,
+        );
+        let other_groove = acid_engine::random::randomise_synth(
+            &p.synth(SYNTH1).unwrap().patterns[slot],
+            rest,
+            groove(KIT909),
+            42,
+        );
+        assert_ne!(expected, other_groove, "the groove matters for this seed");
+        app.randomise_synth_seeded(SYNTH1, rest, 42);
+        assert_eq!(
+            app.doc.project.synth(SYNTH1).unwrap().patterns[slot],
+            expected,
+            "Synth 1 still grooves with the first kit"
+        );
+    }
+
+    #[test]
     fn guard_status_shows_the_fault_for_three_seconds() {
         let mut app = SidAcidApp::headless(Document::new(acid_engine::demo::demo_project()));
         app.view.auto_retried = true;

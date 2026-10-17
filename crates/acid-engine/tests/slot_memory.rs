@@ -28,6 +28,7 @@ fn estimates_are_within_two_times_of_real_allocations() {
         let slot = Slot::from_entry(&entry, 48_000.0);
         let used = BYTES.load(Ordering::Relaxed) - before + std::mem::size_of::<Slot>();
         let est = ty.memory_estimate();
+        println!("{ty:?}: estimate {est}, measured {used}");
         assert!(
             est * 2 >= used && est <= used * 2,
             "{ty:?}: estimate {est}, measured {used}"

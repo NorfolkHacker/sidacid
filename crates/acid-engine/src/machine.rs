@@ -31,13 +31,14 @@ pub enum MachineType {
 
 impl MachineType {
     /// Every type a rack can hold.
-    pub const ALL: [MachineType; 6] = [
+    pub const ALL: [MachineType; 7] = [
         MachineType::Synth,
         MachineType::Kit808,
         MachineType::Kit909,
         MachineType::Fm,
         MachineType::Sampler,
         MachineType::Mono,
+        MachineType::PadKit,
     ];
 
     /// Menu label.
@@ -87,8 +88,8 @@ impl MachineType {
             MachineType::Fm => 44 << 10,
             MachineType::Sampler => 24 << 10,
             MachineType::Mono => 16 << 10,
-            // Temporary; measured in Task 4, once the Pad Kit has its DSP.
-            MachineType::PadKit => 16 << 10,
+            // Measured 18 152 bytes on 2026-10-17, empty pads.
+            MachineType::PadKit => 20 << 10,
         }
     }
 
@@ -224,6 +225,6 @@ mod tests {
     #[test]
     fn only_synths_fm_and_mono_transpose() {
         let t: Vec<_> = MachineType::ALL.iter().map(|t| t.transposes()).collect();
-        assert_eq!(t, [true, false, false, true, false, true]);
+        assert_eq!(t, [true, false, false, true, false, true, false]);
     }
 }

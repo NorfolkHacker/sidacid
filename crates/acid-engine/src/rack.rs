@@ -6,6 +6,8 @@ use crate::engine::{Engine, event_reserve};
 use crate::fm::FmSynth;
 use crate::machine::{MachineType, MachineUid, rack_capacity};
 use crate::mixer::{ChannelStrip, StereoBuf};
+use crate::padkit::PadKit;
+use crate::padkit::play::PadPlay;
 use crate::params::MachineParam;
 use crate::project::{
     AutoLane, Block, DrumPattern, MachineBody, MachineEntry, NotePattern, Project, Song,
@@ -29,6 +31,7 @@ pub enum MachineDsp {
     Fm(Box<FmSynth>),
     Mono(Box<MonoSynth>),
     Sampler(Box<Sampler>),
+    PadKit(Box<PadKit>),
 }
 
 /// A slot's pattern bank, by what plays it.
@@ -86,7 +89,10 @@ impl Slot {
                 MachineDsp::Mono(Box::new(MonoSynth::new(sample_rate))),
                 SlotPatterns::Notes(m.patterns.clone()),
             ),
-            MachineBody::PadKit(_) => unimplemented!("the Pad Kit joins the rack in Task 4"),
+            MachineBody::PadKit(m) => (
+                MachineDsp::PadKit(Box::new(PadKit::new(sample_rate))),
+                SlotPatterns::Notes(m.patterns.clone()),
+            ),
         };
         let params: Box<[MachineParam]> = MachineParam::all_for(ty).into();
         let knobs: Box<[f32]> = params
@@ -128,6 +134,14 @@ impl Slot {
                 sampler.swap_play(i, &mut play);
             }
         }
+        if let (MachineDsp::PadKit(kit), MachineBody::PadKit(m)) = (&mut slot.dsp, &entry.body) {
+            for (p, pad) in m.pads.iter().enumerate() {
+                for (l, layer) in pad.layers.iter().enumerate() {
+                    kit.swap_sample(p, l, &mut Some(Arc::new(layer.to_sample())));
+                }
+            }
+            kit.swap_play(&mut PadPlay::from_pads(&m.pads));
+        }
         slot
     }
 
@@ -150,6 +164,8 @@ impl Slot {
                 s.set_slot_param(i as usize, p, v)
             }
             (MachineParam::Mono(p), MachineDsp::Mono(m)) => m.set_param(p, v),
+            (MachineParam::PadKit(p), MachineDsp::PadKit(k)) => k.set_param(p, v),
+            (MachineParam::Pad(i, p), MachineDsp::PadKit(k)) => k.set_pad_param(i as usize, p, v),
             _ => {}
         }
     }
@@ -163,6 +179,7 @@ impl Slot {
             MachineDsp::Fm(f) => f.render(l, r),
             MachineDsp::Sampler(s) => s.render(l, r),
             MachineDsp::Mono(m) => m.render(l, r),
+            MachineDsp::PadKit(k) => k.render(l, r),
         }
     }
 
@@ -174,6 +191,7 @@ impl Slot {
             MachineDsp::Fm(f) => f.reset(),
             MachineDsp::Sampler(s) => s.reset(),
             MachineDsp::Mono(m) => m.reset(),
+            MachineDsp::PadKit(k) => k.reset(),
         }
     }
 }

@@ -6,6 +6,7 @@
 
 use crate::engine::Engine;
 use crate::machine::MachineUid;
+use crate::padkit::play::PadPlay;
 use crate::params::ParamId;
 use crate::project::{DrumPattern, NotePattern, SynthPattern};
 use crate::rack::{CompiledSong, RackSwap};
@@ -61,6 +62,20 @@ pub enum Command {
         uid: MachineUid,
         slot: u8,
         play: Box<SlotPlay>,
+    },
+    /// Layer `layer` of pad `pad` on Pad Kit `uid`; the old one (or
+    /// this one, if refused) comes back as `DisposeSample`.
+    PadSample {
+        uid: MachineUid,
+        pad: u8,
+        layer: u8,
+        sample: Option<Arc<SampleData>>,
+    },
+    /// Pad Kit `uid`'s layer ranges; the old ones (or these, if refused)
+    /// come back as `DisposePadPlay`.
+    PadPlay {
+        uid: MachineUid,
+        play: Box<PadPlay>,
     },
     ReplaceEngine(Box<Engine>),
     SetMode(Mode),
@@ -200,6 +215,7 @@ pub enum Event {
     DisposeSong(Box<CompiledSong>),
     DisposeSample(Option<Arc<SampleData>>),
     DisposeSlotPlay(Box<SlotPlay>),
+    DisposePadPlay(Box<PadPlay>),
     /// After `SetRack`: the old slot `Vec` (in `into`) with the removed
     /// machines, unused fresh slots and the old song.
     DisposeRack(Box<RackSwap>),
@@ -339,6 +355,20 @@ impl EngineHost {
                 } => {
                     self.engine.swap_sampler_play(uid, slot as usize, &mut play);
                     self.dispose(Event::DisposeSlotPlay(play));
+                }
+                Command::PadSample {
+                    uid,
+                    pad,
+                    layer,
+                    mut sample,
+                } => {
+                    self.engine
+                        .swap_padkit_sample(uid, pad as usize, layer as usize, &mut sample);
+                    self.dispose(Event::DisposeSample(sample));
+                }
+                Command::PadPlay { uid, mut play } => {
+                    self.engine.swap_padkit_play(uid, &mut play);
+                    self.dispose(Event::DisposePadPlay(play));
                 }
                 Command::ReplaceEngine(mut engine) => {
                     std::mem::swap(&mut self.engine, &mut engine);
@@ -733,6 +763,80 @@ mod tests {
             .count();
         assert_eq!(samples, 1);
         assert!(evs.iter().any(|e| matches!(e, Event::DisposeSlotPlay(_))));
+    }
+
+    #[test]
+    fn pad_kit_samples_and_play_data_come_back_for_disposal() {
+        use crate::machine::MachineType;
+        use crate::padkit::play::PadPlay;
+        let mut p = crate::demo::demo_project();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let (mut host, mut tx, mut rx) = channel(Engine::from_project(SR, &p));
+        let mk = || {
+            Some(Arc::new(SampleData {
+                sample_rate: 44_100,
+                left: vec![0.5; 64].into(),
+                right: None,
+            }))
+        };
+        tx.push(Command::PadSample {
+            uid,
+            pad: 3,
+            layer: 1,
+            sample: mk(),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        tx.push(Command::PadSample {
+            uid,
+            pad: 3,
+            layer: 1,
+            sample: mk(),
+        })
+        .unwrap();
+        let mut play = PadPlay::EMPTY;
+        play.counts[3] = 2;
+        tx.push(Command::PadPlay {
+            uid,
+            play: Box::new(play),
+        })
+        .unwrap();
+        // An unknown uid hands back what it was sent.
+        tx.push(Command::PadSample {
+            uid: MachineUid(999),
+            pad: 0,
+            layer: 0,
+            sample: mk(),
+        })
+        .unwrap();
+        let mut stray = PadPlay::EMPTY;
+        stray.counts[0] = 4;
+        tx.push(Command::PadPlay {
+            uid: MachineUid(999),
+            play: Box::new(stray),
+        })
+        .unwrap();
+        run(&mut host, 512);
+        let evs: Vec<Event> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        let samples = evs
+            .iter()
+            .filter(|e| matches!(e, Event::DisposeSample(Some(_))))
+            .count();
+        assert_eq!(samples, 2, "the first swap's sample, and the refused one");
+        let plays: Vec<&PadPlay> = evs
+            .iter()
+            .filter_map(|e| match e {
+                Event::DisposePadPlay(p) => Some(&**p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            plays,
+            [&PadPlay::EMPTY, &stray],
+            "the kit's old play; the refused one"
+        );
     }
 
     #[test]
