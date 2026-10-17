@@ -16,7 +16,6 @@ use eframe::egui;
 const SAMPLE_PREFIX: &str = "Could not load the sample: ";
 
 impl SidAcidApp {
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn load_pad_dialog(&mut self, uid: MachineUid, pad: usize) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
@@ -81,7 +80,6 @@ impl SidAcidApp {
 
     /// Adds a layer to the pad (re-splitting the ranges), or replaces a
     /// layer when the pad is full (keeping the ranges); no memory check.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn load_pad_decoded_now(
         &mut self,
         uid: MachineUid,
@@ -185,7 +183,6 @@ impl SidAcidApp {
     }
 
     /// Removes one layer, re-splitting the ranges of the rest.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn clear_pad_layer(&mut self, uid: MachineUid, pad: usize, layer: usize) {
         let Some(old) = self.doc.project.padkit(uid).and_then(|k| k.pads.get(pad)) else {
             return;
@@ -203,7 +200,6 @@ impl SidAcidApp {
     }
 
     /// Empties the pad: its layers and its name.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn clear_pad(&mut self, uid: MachineUid, pad: usize) {
         let Some(old) = self.doc.project.padkit(uid).and_then(|k| k.pads.get(pad)) else {
             return;
@@ -215,7 +211,6 @@ impl SidAcidApp {
     }
 
     /// An empty or blank name goes back to the label from the first layer.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn rename_pad(&mut self, uid: MachineUid, pad: usize, name: &str) {
         let Some(old) = self.doc.project.padkit(uid).and_then(|k| k.pads.get(pad)) else {
             return;
@@ -231,7 +226,6 @@ impl SidAcidApp {
 
     /// Sets a layer's velocity range, each end within 1..=127 and `lo`
     /// no higher than `hi` (`hi` is clamped first, then `lo` to it).
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn set_layer_range(
         &mut self,
         uid: MachineUid,
@@ -263,7 +257,6 @@ impl SidAcidApp {
     /// checked against memory together, so the user is asked once; files
     /// that fail are skipped (the rest take the pads in order) and named in
     /// one message.
-    #[allow(dead_code)] // the pad panel uses it in a later task
     pub(crate) fn drop_pad_files(
         &mut self,
         uid: MachineUid,

@@ -2,12 +2,13 @@
 //! controls and waveform with draggable markers, its knobs, and the
 //! pattern row (the roll is in the dock). Audio files can be dropped on it.
 
+use super::padkit_panel::takes_drops;
 use super::sampler_ui::{
     Marker, frame_to_x, key_name, markers, nearest_marker, peaks, set_marker, x_to_frame, zone_text,
 };
 use super::{SidAcidApp, theme};
 use acid_engine::host::Command;
-use acid_engine::machine::{MachineType, MachineUid};
+use acid_engine::machine::MachineUid;
 use acid_engine::params::{MachineParam, SamplerParam, SlotParam};
 use acid_engine::project::{PatternRef, SamplerMachine};
 use acid_engine::sampler::SLOTS;
@@ -110,7 +111,7 @@ impl SidAcidApp {
             });
     }
 
-    fn release_pad_note(&mut self, ui: &egui::Ui) {
+    pub(crate) fn release_pad_note(&mut self, ui: &egui::Ui) {
         if let Some((uid, key)) = self.view.pad_note
             && !ui.input(|i| i.pointer.primary_down())
         {
@@ -332,9 +333,8 @@ impl SidAcidApp {
     }
 
     fn sampler_drop(&mut self, ui: &egui::Ui, uid: MachineUid) {
-        // Samplers are the app's only drop targets, and OS file drags
-        // rarely report a pointer position, so any drop loads into one
-        // sampler: `drop_target`.
+        // OS file drags rarely report a pointer position, so any drop
+        // loads into one machine: `drop_target`.
         if self.drop_target() != Some(uid) {
             return;
         }
@@ -344,15 +344,20 @@ impl SidAcidApp {
         }
     }
 
-    /// The sampler a dropped file loads into: the focused machine if it is
-    /// a sampler, else the first sampler in the rack.
+    /// The machine dropped files load into: the focused machine if it is a
+    /// sampler or Pad Kit, else the first of those in the rack.
     pub(crate) fn drop_target(&self) -> Option<MachineUid> {
         let machines = &self.doc.project.machines;
-        let is_sampler = |uid: &MachineUid| self.doc.project.sampler(*uid).is_some();
-        self.view.focus.filter(is_sampler).or_else(|| {
+        let takes = |uid: &MachineUid| {
+            self.doc
+                .project
+                .machine(*uid)
+                .is_some_and(|m| takes_drops(m.machine_type()))
+        };
+        self.view.focus.filter(takes).or_else(|| {
             machines
                 .iter()
-                .find(|m| m.machine_type() == MachineType::Sampler)
+                .find(|m| takes_drops(m.machine_type()))
                 .map(|m| m.uid)
         })
     }

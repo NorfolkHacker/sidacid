@@ -6,8 +6,8 @@ use crate::document::Edit;
 use acid_engine::fm::patch;
 use acid_engine::host::Command;
 use acid_engine::params::{
-    FmParam, FxParam, MachineParam, MonoParam, OpParam, ParamId, SlotParam, SynthParam, fm_steps,
-    sampler_map, step_index,
+    FmParam, FxParam, MachineParam, MonoParam, OpParam, PadParam, ParamId, SlotParam, SynthParam,
+    fm_steps, sampler_map, step_index,
 };
 use eframe::egui;
 
@@ -27,6 +27,8 @@ pub fn discrete_names(id: ParamId) -> &'static [&'static str] {
             &["-Lin", "-Exp", "+Exp", "+Lin"]
         }
         ParamId::Machine(_, M::FmOp(_, OpParam::FixedFreq)) => &["Ratio", "Fixed"],
+        ParamId::Machine(_, M::Pad(_, PadParam::Mode)) => &["One-shot", "Gate"],
+        ParamId::Machine(_, M::Pad(_, PadParam::Group)) => &["Off", "1", "2", "3", "4"],
         ParamId::Machine(_, M::Mono(p)) => match p {
             MonoParam::Range => &["16'", "8'", "4'", "2'"],
             MonoParam::PwmSource => &["Manual", "LFO", "Env"],

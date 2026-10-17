@@ -24,6 +24,7 @@ mod note_panel;
 mod note_tools;
 mod padkit_load;
 mod padkit_panel;
+mod padkit_wave;
 mod pads;
 mod params_ui;
 mod perf;
@@ -252,15 +253,18 @@ pub struct ViewState {
     /// Tests only: collapsing headers forced open or shut, by id salt.
     #[cfg(test)]
     pub force_open: Vec<(&'static str, bool)>,
-    /// Cached waveform peaks per (sampler, slot): (pcm pointer, pcm
-    /// length, columns, peaks).
+    /// Cached waveform peaks per (sampler, slot), or (Pad Kit, pad ×
+    /// `MAX_LAYERS` + layer): (pcm pointer, pcm length, columns, peaks).
     pub wave_cache: HashMap<(MachineUid, usize), WaveCacheEntry>,
-    /// Marker being dragged in a waveform: (sampler, slot, marker).
+    /// Marker being dragged in a waveform: (sampler, slot, marker), or
+    /// (Pad Kit, pad, Start or End).
     pub wave_drag: Option<(MachineUid, usize, sampler_ui::Marker)>,
     /// Transient sensitivity for "Detect" (None = 0.5).
     pub sampler_sensitivity: Option<f32>,
     /// Key held by a shift-click on a slot pad: (sampler, key).
     pub pad_note: Option<(MachineUid, u8)>,
+    /// A Pad Kit pad's name being typed: (kit, pad, text so far).
+    pub pad_name: Option<(MachineUid, usize, String)>,
     pub perf: perf::PerfMeter,
     /// Machine whose name is being edited, and the text typed so far.
     pub renaming: Option<(MachineUid, String)>,
@@ -503,6 +507,13 @@ impl SidAcidApp {
             // here: its cached waveform peaks are stale.
             if let &Command::SamplerSample { uid, slot, .. } = &cmd {
                 self.view.wave_cache.remove(&(uid, slot as usize));
+            }
+            if let &Command::PadSample {
+                uid, pad, layer, ..
+            } = &cmd
+            {
+                let key = pad as usize * acid_engine::padkit::MAX_LAYERS + layer as usize;
+                self.view.wave_cache.remove(&(uid, key));
             }
             if matches!(cmd, Command::Stop) {
                 self.view.stops_sent = self.view.stops_sent.wrapping_add(1);

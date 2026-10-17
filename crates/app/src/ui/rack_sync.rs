@@ -213,6 +213,7 @@ impl SidAcidApp {
         v.focus = v.focus.filter(|&uid| live(uid));
         v.audition = v.audition.filter(|&(uid, _)| live(uid));
         v.pad_note = v.pad_note.filter(|&(uid, _)| live(uid));
+        v.pad_name = v.pad_name.take().filter(|(uid, ..)| live(*uid));
         v.knob_scroll = v.knob_scroll.take().filter(|(id, _)| live_param(id));
         v.touched_knob = v.touched_knob.filter(live_param);
         v.engine_touch = v.engine_touch.filter(live_param);

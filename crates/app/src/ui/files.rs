@@ -259,6 +259,8 @@ impl SidAcidApp {
             panel.lane_scroll_y = None;
             panel.fm_op = 0;
             panel.sampler_slot = 0;
+            panel.pad = 0;
+            panel.pad_layer = 0;
             panel.fm_browser = Default::default();
             panel.fm_voice_src = None;
         }
@@ -270,6 +272,7 @@ impl SidAcidApp {
         self.view.wave_cache.clear();
         self.view.wave_drag = None;
         self.view.pad_note = None;
+        self.view.pad_name = None;
         self.reset_transport_view();
         self.view.song_cursor = 0;
         for m in &self.doc.project.machines {
