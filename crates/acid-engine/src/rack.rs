@@ -86,6 +86,7 @@ impl Slot {
                 MachineDsp::Mono(Box::new(MonoSynth::new(sample_rate))),
                 SlotPatterns::Notes(m.patterns.clone()),
             ),
+            MachineBody::PadKit(_) => unimplemented!("the Pad Kit joins the rack in Task 4"),
         };
         let params: Box<[MachineParam]> = MachineParam::all_for(ty).into();
         let knobs: Box<[f32]> = params

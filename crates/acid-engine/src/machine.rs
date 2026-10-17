@@ -26,9 +26,11 @@ pub enum MachineType {
     Fm,
     Sampler,
     Mono,
+    PadKit,
 }
 
 impl MachineType {
+    /// Every type a rack can hold.
     pub const ALL: [MachineType; 6] = [
         MachineType::Synth,
         MachineType::Kit808,
@@ -47,6 +49,7 @@ impl MachineType {
             MachineType::Fm => "FM",
             MachineType::Sampler => "Sampler",
             MachineType::Mono => "Mono",
+            MachineType::PadKit => "Pad Kit",
         }
     }
 
@@ -59,6 +62,7 @@ impl MachineType {
             MachineType::Fm => "FM",
             MachineType::Sampler => "Sampler",
             MachineType::Mono => "Mono",
+            MachineType::PadKit => "Pads",
         }
     }
 
@@ -83,6 +87,8 @@ impl MachineType {
             MachineType::Fm => 44 << 10,
             MachineType::Sampler => 24 << 10,
             MachineType::Mono => 16 << 10,
+            // Temporary; measured in Task 4, once the Pad Kit has its DSP.
+            MachineType::PadKit => 16 << 10,
         }
     }
 

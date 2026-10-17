@@ -1059,6 +1059,7 @@ fn pattern_command(p: &Project, uid: MachineUid, slot: u8) -> Command {
         MachineBody::Fm(m) => PatternData::Notes(m.patterns[s].clone()),
         MachineBody::Mono(m) => PatternData::Notes(m.patterns[s].clone()),
         MachineBody::Sampler(m) => PatternData::Notes(m.patterns[s].clone()),
+        MachineBody::PadKit(m) => PatternData::Notes(m.patterns[s].clone()),
     };
     Command::Pattern {
         uid,

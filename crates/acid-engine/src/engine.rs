@@ -1181,6 +1181,13 @@ mod tests {
                         .map(|i| Note::new(0, 4, (i % 128) as u8, 100))
                         .collect();
                 }
+                MachineBody::PadKit(k) => {
+                    let pat = &mut k.patterns[0];
+                    pat.length = 1;
+                    pat.notes = (0..MAX_NOTES)
+                        .map(|i| Note::new(0, 4, (i % crate::padkit::PADS) as u8, 100))
+                        .collect();
+                }
             }
         }
         let bar: Vec<_> = p.machines.iter().map(|m| (m.uid, 0)).collect();

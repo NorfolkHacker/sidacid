@@ -9,6 +9,8 @@ pub const DRUM_INSTRUMENTS: usize = 8;
 pub const FM_OPS: usize = 6;
 /// Sample slots in the sampler.
 pub const SAMPLER_SLOTS: usize = 16;
+/// Pads in the Pad Kit.
+pub const PADS: usize = crate::padkit::PADS;
 
 /// Positions of the FM controls that pick from a list. The numeric ones
 /// are continuous knobs the synth rounds with `step_index(v, N)`.
@@ -95,6 +97,12 @@ param_enum!(OpParam {
     AmpModSens => "Amp Mod Sens", VelSens => "Velocity", Level => "Level",
     FixedFreq => "Fixed Freq", Coarse => "Coarse", Fine => "Fine", Detune => "Detune", On => "On",
 });
+param_enum!(PadKitParam { Volume => "Volume", Accent => "Accent" });
+param_enum!(PadParam {
+    Tune => "Tune", Decay => "Decay", Level => "Level", Pan => "Pan",
+    Cutoff => "Cutoff", Resonance => "Resonance", Start => "Start", End => "End",
+    Reverse => "Reverse", Mode => "Mode", Group => "Mute Group",
+});
 param_enum!(SamplerParam { Volume => "Volume", Grit => "Grit" });
 param_enum!(SlotParam {
     Level => "Level", Pan => "Pan", Tune => "Tune", Fine => "Fine", Cutoff => "Cutoff",
@@ -174,6 +182,8 @@ pub enum MachineParam {
     Sampler(SamplerParam),
     SamplerSlot(u8, SlotParam),
     Mono(MonoParam),
+    PadKit(PadKitParam),
+    Pad(u8, PadParam),
 }
 
 /// A control shared by the whole rack: send effects and master bus.
@@ -321,6 +331,22 @@ impl MachineParam {
                 }
             }
             MachineParam::Mono(p) => p.info(),
+            MachineParam::PadKit(p) => match p {
+                PadKitParam::Volume => cont(p.name(), 0.7),
+                PadKitParam::Accent => cont(p.name(), 0.5),
+            },
+            MachineParam::Pad(_, p) => {
+                use PadParam as P;
+                let n = p.name();
+                match p {
+                    P::Tune | P::Pan => cont(n, 0.5),
+                    P::Decay | P::Cutoff | P::End => cont(n, 1.0),
+                    P::Level => cont(n, 0.8),
+                    P::Resonance | P::Start => cont(n, 0.0),
+                    P::Reverse | P::Mode => disc(n, 0.0, 2),
+                    P::Group => disc(n, 0.0, pad_map::GROUPS as u8),
+                }
+            }
         }
     }
 
@@ -339,6 +365,8 @@ impl MachineParam {
                 ty == MachineType::Sampler && (s as usize) < SAMPLER_SLOTS
             }
             MachineParam::Mono(_) => ty == MachineType::Mono,
+            MachineParam::PadKit(_) => ty == MachineType::PadKit,
+            MachineParam::Pad(i, _) => ty == MachineType::PadKit && (i as usize) < PADS,
         }
     }
 
@@ -363,6 +391,10 @@ impl MachineParam {
                 base + SamplerParam::ALL.len() + s as usize * SlotParam::ALL.len() + p as usize
             }
             MachineParam::Mono(p) => base + p as usize,
+            MachineParam::PadKit(p) => base + p as usize,
+            MachineParam::Pad(i, p) => {
+                base + PadKitParam::ALL.len() + i as usize * PadParam::ALL.len() + p as usize
+            }
         })
     }
 
@@ -398,6 +430,12 @@ impl MachineParam {
                 }
             }
             MachineType::Mono => v.extend(MonoParam::ALL.iter().map(|&p| MachineParam::Mono(p))),
+            MachineType::PadKit => {
+                v.extend(PadKitParam::ALL.iter().map(|&p| MachineParam::PadKit(p)));
+                for i in 0..PADS as u8 {
+                    v.extend(PadParam::ALL.iter().map(|&p| MachineParam::Pad(i, p)));
+                }
+            }
         }
         v
     }
@@ -414,6 +452,7 @@ impl MachineParam {
                     SamplerParam::ALL.len() + SAMPLER_SLOTS * SlotParam::ALL.len()
                 }
                 MachineType::Mono => MonoParam::ALL.len(),
+                MachineType::PadKit => PadKitParam::ALL.len() + PADS * PadParam::ALL.len(),
             }
     }
 }
@@ -526,6 +565,7 @@ machine_param_from!(
     FmParam => Fm,
     SamplerParam => Sampler,
     MonoParam => Mono,
+    PadKitParam => PadKit,
 );
 
 pub fn lin(v: f32, lo: f32, hi: f32) -> f32 {
@@ -547,6 +587,37 @@ pub fn on(v: f32) -> bool {
 
 pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
+}
+
+/// Pad knobs in real units. The engine and the UI share these.
+pub mod pad_map {
+    use super::{exp, on, step_index};
+
+    /// Mute groups: Off, then 1..=4.
+    pub const GROUPS: usize = 5;
+
+    pub fn tune_semitones(v: f32) -> f32 {
+        (v - 0.5) * 48.0
+    }
+
+    /// `None` is open: the sample plays out.
+    pub fn decay_seconds(v: f32) -> Option<f32> {
+        (v < 0.999).then(|| exp(v, 0.01, 4.0))
+    }
+
+    pub fn cutoff_hz(v: f32) -> f32 {
+        exp(v, 20.0, 20_000.0)
+    }
+
+    /// 0 = Off.
+    pub fn group(v: f32) -> u8 {
+        step_index(v, GROUPS as u8) as u8
+    }
+
+    /// Mode: on = Gate (plays while held).
+    pub fn gate(v: f32) -> bool {
+        on(v)
+    }
 }
 
 /// Sampler slot knobs in real units. The engine and the UI share these.
@@ -813,5 +884,47 @@ mod tests {
             assert_eq!(q.index_for(T::Mono), Some(i), "{q:?}");
         }
         assert_eq!(p.info(), MonoParam::Cutoff.info());
+    }
+
+    #[test]
+    fn pad_params_fit_only_pad_kits() {
+        use crate::machine::MachineType as T;
+        let p = MachineParam::Pad(15, PadParam::Start);
+        assert!(p.fits(T::PadKit));
+        assert!(!MachineParam::Pad(16, PadParam::Start).fits(T::PadKit));
+        assert!(!p.fits(T::Sampler));
+        assert!(MachineParam::PadKit(PadKitParam::Accent).fits(T::PadKit));
+        let all = MachineParam::all_for(T::PadKit);
+        assert_eq!(all.len(), MachineParam::count_for(T::PadKit));
+        for (i, q) in all.iter().enumerate() {
+            assert_eq!(q.index_for(T::PadKit), Some(i), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn pad_knob_defaults_and_maps() {
+        use crate::params::pad_map as m;
+        let d = |p| MachineParam::Pad(0, p).info().default;
+        assert_eq!(d(PadParam::Tune), 0.5);
+        assert_eq!(d(PadParam::Decay), 1.0);
+        assert_eq!(d(PadParam::Level), 0.8);
+        assert_eq!(d(PadParam::Pan), 0.5);
+        assert_eq!(d(PadParam::Cutoff), 1.0);
+        assert_eq!(d(PadParam::End), 1.0);
+        assert_eq!(d(PadParam::Start), 0.0);
+        assert_eq!(
+            MachineParam::PadKit(PadKitParam::Volume).info().default,
+            0.7
+        );
+        assert_eq!(
+            MachineParam::PadKit(PadKitParam::Accent).info().default,
+            0.5
+        );
+        assert_eq!(m::tune_semitones(0.0), -24.0);
+        assert_eq!(m::tune_semitones(1.0), 24.0);
+        assert_eq!(m::decay_seconds(1.0), None);
+        assert!((m::cutoff_hz(1.0) - 20_000.0).abs() < 1.0);
+        assert_eq!(m::group(0.0), 0);
+        assert_eq!(m::group(1.0), 4);
     }
 }

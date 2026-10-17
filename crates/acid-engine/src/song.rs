@@ -109,6 +109,7 @@ impl<'a> Banks<'a> {
                 MachineBody::Fm(x) => Bank::Notes(&x.patterns),
                 MachineBody::Sampler(x) => Bank::Notes(&x.patterns),
                 MachineBody::Mono(x) => Bank::Notes(&x.patterns),
+                MachineBody::PadKit(x) => Bank::Notes(&x.patterns),
             }),
         }
     }

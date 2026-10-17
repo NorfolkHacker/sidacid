@@ -476,6 +476,7 @@ impl SidAcidApp {
             MachineBody::Fm(f) => Clip::Notes(f.patterns[slot].clone()),
             MachineBody::Sampler(s) => Clip::Notes(s.patterns[slot].clone()),
             MachineBody::Mono(m) => Clip::Notes(m.patterns[slot].clone()),
+            MachineBody::PadKit(k) => Clip::Notes(k.patterns[slot].clone()),
         });
     }
 

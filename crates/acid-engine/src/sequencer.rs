@@ -1726,7 +1726,7 @@ mod tests {
                         MachineBody::Kit(x) => x.patterns = self.drums[pos - 2].clone(),
                         MachineBody::Fm(x) => x.patterns = self.notes[0].clone(),
                         MachineBody::Sampler(x) => x.patterns = self.notes[1].clone(),
-                        MachineBody::Mono(_) => unreachable!(),
+                        MachineBody::Mono(_) | MachineBody::PadKit(_) => unreachable!(),
                     }
                     m
                 })

@@ -178,6 +178,25 @@ pub mod pcm_codec {
     }
 }
 
+/// Why embedded audio could not be saved and reopened, if it could not:
+/// the checks a slot and a Pad Kit layer share.
+pub fn pcm_problem(pcm: &[i16], channels: u8, sample_rate: u32) -> Option<&'static str> {
+    let frames = pcm.len() / channels.max(1) as usize;
+    if !(1..=2).contains(&channels) {
+        Some("unsupported channel count")
+    } else if !pcm.len().is_multiple_of(channels as usize) {
+        Some("the audio is not a whole number of frames")
+    } else if !(8_000..=192_000).contains(&sample_rate) {
+        Some("sample rate must be 8–192 kHz")
+    } else if frames == 0 {
+        Some("the sample is empty")
+    } else if frames as f32 > MAX_SECONDS * sample_rate as f32 {
+        Some("longer than 30 s")
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SlotData {
     pub name: String,
@@ -230,22 +249,10 @@ impl SlotData {
 
     /// Why this slot could not be saved and reopened, if it could not.
     pub fn problem(&self) -> Option<&'static str> {
-        let frames = self.frames();
-        if !(1..=2).contains(&self.channels) {
-            Some("unsupported channel count")
-        } else if !self.pcm.len().is_multiple_of(self.channels as usize) {
-            Some("the audio is not a whole number of frames")
-        } else if !(8_000..=192_000).contains(&self.sample_rate) {
-            Some("sample rate must be 8–192 kHz")
-        } else if frames == 0 {
-            Some("the sample is empty")
-        } else if frames as f32 > MAX_SECONDS * self.sample_rate as f32 {
-            Some("longer than 30 s")
-        } else if !self.meta.is_well_formed(frames) {
-            Some("slice/zone layout doesn't fit")
-        } else {
-            None
-        }
+        pcm_problem(&self.pcm, self.channels, self.sample_rate).or_else(|| {
+            let frames = self.frames();
+            (!self.meta.is_well_formed(frames)).then_some("slice/zone layout doesn't fit")
+        })
     }
 
     pub fn is_valid(&self) -> bool {

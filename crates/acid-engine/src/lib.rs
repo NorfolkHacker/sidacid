@@ -13,6 +13,7 @@ pub mod host;
 pub mod machine;
 mod migrate;
 pub mod mixer;
+pub mod padkit;
 pub mod params;
 pub mod project;
 pub mod rack;

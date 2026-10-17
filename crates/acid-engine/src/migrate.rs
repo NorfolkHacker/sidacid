@@ -210,6 +210,8 @@ impl MachineBodyV4 {
             MachineType::Fm => MachineBodyV4::Fm(FmMachine::default()),
             MachineType::Sampler => MachineBodyV4::Sampler(SamplerMachine::default()),
             MachineType::Mono => MachineBodyV4::Mono(MonoMachine::default()),
+            // Only `standard_rack` types reach here, and it has no Pad Kit.
+            MachineType::PadKit => unreachable!("a v4 rack has no Pad Kit"),
         }
     }
 

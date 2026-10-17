@@ -14,7 +14,7 @@ use std::path::Path;
 
 pub use crate::rack_edit::RemovedMachine;
 
-pub const PROJECT_VERSION: u32 = 6;
+pub const PROJECT_VERSION: u32 = 7;
 pub const STEPS: usize = 64;
 
 /// A pattern's `length` field as a step count in 1..=STEPS. Patterns are
@@ -251,6 +251,65 @@ impl Default for MonoMachine {
     }
 }
 
+/// A Pad Kit: note patterns whose pitch is the pad, and the pads' samples.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PadKitMachine {
+    pub patterns: Vec<NotePattern>,
+    /// Exactly `PADS`.
+    #[serde(default = "empty_pads", deserialize_with = "exactly_pads")]
+    pub pads: Vec<crate::padkit::pad::Pad>,
+}
+
+/// Reads the pad list, refusing any length but `PADS` before an extra
+/// pad's audio is decoded.
+fn exactly_pads<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::padkit::pad::Pad>, D::Error> {
+    use crate::padkit::PADS;
+    use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+    struct Pads;
+    impl<'de> Visitor<'de> for Pads {
+        type Value = Vec<crate::padkit::pad::Pad>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "exactly {PADS} pads")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut pads = Vec::with_capacity(PADS);
+            while pads.len() < PADS {
+                match seq.next_element()? {
+                    Some(pad) => pads.push(pad),
+                    None => return Err(A::Error::invalid_length(pads.len(), &self)),
+                }
+            }
+            if seq.next_element::<IgnoredAny>()?.is_some() {
+                return Err(A::Error::invalid_length(PADS + 1, &self));
+            }
+            Ok(pads)
+        }
+    }
+    d.deserialize_seq(Pads)
+}
+
+fn empty_pads() -> Vec<crate::padkit::pad::Pad> {
+    vec![crate::padkit::pad::Pad::default(); crate::padkit::PADS]
+}
+
+impl Default for PadKitMachine {
+    fn default() -> Self {
+        Self {
+            patterns: vec![NotePattern::default(); PATTERNS],
+            pads: empty_pads(),
+        }
+    }
+}
+
+impl PadKitMachine {
+    /// Size of the decoded f32 audio of every layer.
+    pub fn memory_bytes(&self) -> usize {
+        self.pads.iter().map(|p| p.memory_bytes()).sum()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SamplerMachine {
     pub patterns: Vec<NotePattern>,
@@ -475,6 +534,7 @@ pub enum MachineBody {
     Fm(FmMachine),
     Sampler(SamplerMachine),
     Mono(MonoMachine),
+    PadKit(PadKitMachine),
 }
 
 impl MachineBody {
@@ -487,6 +547,7 @@ impl MachineBody {
             MachineType::Fm => MachineBody::Fm(FmMachine::default()),
             MachineType::Sampler => MachineBody::Sampler(SamplerMachine::default()),
             MachineType::Mono => MachineBody::Mono(MonoMachine::default()),
+            MachineType::PadKit => MachineBody::PadKit(PadKitMachine::default()),
         }
     }
 
@@ -500,6 +561,7 @@ impl MachineBody {
             MachineBody::Fm(_) => MachineType::Fm,
             MachineBody::Sampler(_) => MachineType::Sampler,
             MachineBody::Mono(_) => MachineType::Mono,
+            MachineBody::PadKit(_) => MachineType::PadKit,
         }
     }
 }
@@ -717,17 +779,20 @@ impl Project {
             .iter()
             .filter_map(|m| match &m.body {
                 MachineBody::Sampler(s) => Some(s.memory_bytes()),
+                MachineBody::PadKit(k) => Some(k.memory_bytes()),
                 _ => None,
             })
             .sum()
     }
     body_accessors!(mono, mono_mut, Mono, MonoMachine);
+    body_accessors!(padkit, padkit_mut, PadKit, PadKitMachine);
 
     /// Note patterns of an FM, Mono or Sampler machine.
     pub fn note_patterns(&self, uid: MachineUid) -> Option<&Vec<NotePattern>> {
         match &self.machine(uid)?.body {
             MachineBody::Fm(m) => Some(&m.patterns),
             MachineBody::Mono(m) => Some(&m.patterns),
+            MachineBody::PadKit(m) => Some(&m.patterns),
             MachineBody::Sampler(m) => Some(&m.patterns),
             _ => None,
         }
@@ -737,6 +802,7 @@ impl Project {
         match &mut self.machine_mut(uid)?.body {
             MachineBody::Fm(m) => Some(&mut m.patterns),
             MachineBody::Mono(m) => Some(&mut m.patterns),
+            MachineBody::PadKit(m) => Some(&mut m.patterns),
             MachineBody::Sampler(m) => Some(&mut m.patterns),
             _ => None,
         }
@@ -750,6 +816,7 @@ impl Project {
             MachineBody::Kit(m) => Some(&m.patterns.get(s)?.roll),
             MachineBody::Fm(m) => m.patterns.get(s),
             MachineBody::Mono(m) => m.patterns.get(s),
+            MachineBody::PadKit(m) => m.patterns.get(s),
             MachineBody::Sampler(m) => m.patterns.get(s),
         }
     }
@@ -761,6 +828,7 @@ impl Project {
             MachineBody::Kit(m) => Some(&mut m.patterns.get_mut(s)?.roll),
             MachineBody::Fm(m) => m.patterns.get_mut(s),
             MachineBody::Mono(m) => m.patterns.get_mut(s),
+            MachineBody::PadKit(m) => m.patterns.get_mut(s),
             MachineBody::Sampler(m) => m.patterns.get_mut(s),
         }
     }
@@ -899,6 +967,7 @@ impl Project {
             MachineBody::Fm(f) => f.patterns.len(),
             MachineBody::Sampler(s) => s.patterns.len(),
             MachineBody::Mono(m) => m.patterns.len(),
+            MachineBody::PadKit(k) => k.patterns.len(),
         };
         if count != PATTERNS {
             return bad(format!("{count} patterns"));
@@ -957,6 +1026,23 @@ impl Project {
                     return bad(format!("pattern {}", label(j)));
                 }
             }
+            MachineBody::PadKit(k) => {
+                for (j, p) in k.patterns.iter().enumerate() {
+                    if !p.is_well_formed()
+                        || p.notes
+                            .iter()
+                            .any(|n| n.pitch as usize >= crate::padkit::PADS)
+                    {
+                        return bad(format!("pattern {}", label(j)));
+                    }
+                }
+                if k.pads.len() != crate::padkit::PADS {
+                    return bad(format!("{} pads", k.pads.len()));
+                }
+                if let Some(i) = k.pads.iter().position(|p| !p.is_well_formed()) {
+                    return bad(format!("pad {}", i + 1));
+                }
+            }
         }
         Ok(())
     }
@@ -1001,9 +1087,11 @@ impl Project {
             // v4 only added the Mono machine: a v3 file reads as v4.
             3 | 4 => v4(ron::from_str::<crate::migrate::ProjectV4>(text).map_err(parse)?)?,
             5 => v5(ron::from_str::<crate::migrate::ProjectV5>(text).map_err(parse)?)?,
-            PROJECT_VERSION => ron::from_str::<Project>(text).map_err(parse)?,
+            // v7 only added the Pad Kit: a v6 file reads as v7.
+            6 | PROJECT_VERSION => ron::from_str::<Project>(text).map_err(parse)?,
             v => return Err(ProjectError::TooNew(v)),
         };
+        p.version = PROJECT_VERSION;
         // Kits older builds named "808"/"909" (plus a number) take today's
         // default names; a name the user typed is kept.
         for m in &mut p.machines {
@@ -1180,7 +1268,7 @@ mod tests {
         assert!(text.contains("name: \"808\"") && text.contains("name: \"909\""));
         let p = Project::from_ron(text).unwrap();
         assert_eq!(p.version, PROJECT_VERSION);
-        assert_eq!(PROJECT_VERSION, 6);
+        assert_eq!(PROJECT_VERSION, 7);
         assert_eq!(
             (p.machines[2].name.as_str(), p.machines[3].name.as_str()),
             ("Kit A", "Kit B")
@@ -1986,6 +2074,59 @@ mod tests {
         let back = Project::from_ron(&p.to_ron()).unwrap();
         assert_eq!(back, p);
         assert_eq!(back.mono(uid).unwrap().patterns.len(), PATTERNS);
+    }
+
+    #[test]
+    fn a_project_with_a_pad_kit_round_trips() {
+        use crate::padkit::pad::Layer;
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let kit = p.padkit_mut(uid).unwrap();
+        kit.pads[3]
+            .layers
+            .push(Layer::new("snare", 48_000, 2, &[0.25; 64]));
+        kit.pads[3].split_evenly();
+        kit.patterns[0].notes.push(Note::new(0, 4, 3, 100));
+        p.validate().unwrap();
+        let back = Project::from_ron(&p.to_ron()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.machine(uid).unwrap().name, "Pads");
+    }
+
+    #[test]
+    fn a_pad_kit_note_past_pad_sixteen_is_invalid() {
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        p.padkit_mut(uid).unwrap().patterns[0]
+            .notes
+            .push(Note::new(0, 4, 16, 100));
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn version_6_files_still_load() {
+        let text = Project::default()
+            .to_ron()
+            .replace("version: 7", "version: 6");
+        assert_eq!(Project::from_ron(&text).unwrap().version, PROJECT_VERSION);
+    }
+
+    #[test]
+    fn pad_audio_counts_toward_sample_bytes() {
+        use crate::padkit::pad::Layer;
+        let mut p = Project::default();
+        let m = p.new_machine(MachineType::PadKit).unwrap();
+        let uid = m.uid;
+        p.insert_machine(p.machines.len(), m).unwrap();
+        let before = p.sample_bytes();
+        p.padkit_mut(uid).unwrap().pads[0]
+            .layers
+            .push(Layer::new("x", 44_100, 1, &[0.0; 1000]));
+        assert_eq!(p.sample_bytes(), before + 1000 * 4);
     }
 
     #[test]

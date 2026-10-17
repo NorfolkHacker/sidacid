@@ -747,6 +747,8 @@ impl SidAcidApp {
                 MachineType::Fm => self.fm_panel(ui, uid),
                 MachineType::Sampler => self.sampler_panel(ui, uid),
                 MachineType::Mono => self.mono_panel(ui, uid),
+                // Placeholder: the Pad Kit panel arrives in a later task.
+                MachineType::PadKit => {}
             }
             ui.add_space(6.0);
         }
