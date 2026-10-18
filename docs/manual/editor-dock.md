@@ -87,7 +87,7 @@ Kit A and Kit B have drum lanes with eight rows, labelled BD, SD, LT, HT, CP, RS
 
 ### Pad lanes
 
-A Pad Kit has a pad lane with 16 rows, one per pad, labelled with the pads' names and with pad 1 at the bottom. It works like a drum lane, except that its notes can be resized (which matters for Gate pads) and have a velocity: the **Vel** strip shows it, and notes are shaded by velocity. Double-click a note to turn its accent on or off; an accented note has a coloured line along its top. The Invert tool isn't available, and the lane ignores the project key. See [Pad Kit](pad-kit.md#the-pad-lane).
+A Pad Kit has a pad lane with 16 rows, one per pad, labelled with the pads' names and with pad 1 at the bottom. It works like a drum lane, except that its notes can be resized (which matters for Gate pads) and have a velocity: the **Vel** strip shows it, and notes are shaded by velocity. Double-click a note to turn its accent on or off; an accented note has a coloured line along its top. The Invert tool isn't available, and the lane ignores the project key. Click and hold a pad's name in the key strip to hear that pad. See [Pad Kit](pad-kit.md#the-pad-lane).
 
 ## Editing notes with the mouse
 

@@ -29,7 +29,7 @@ A pad is up to four *layers*. A layer is one sample with a velocity range, and t
 Pad 1 is at the bottom left of the grid and pad 13 at the top left, so the grid reads like the pad lane: the lowest pad is at the bottom. Each button shows the pad number, the first 8 characters of its name and a dot for each layer. An empty pad shows "·".
 
 - **Click a pad** to select it. The pad row, the waveform and the pad knobs show the selected pad.
-- **Shift-click and hold a pad** to hear it, at velocity 100, until you let go of the mouse button. An empty pad makes no sound.
+- **Click and hold a pad** to hear it, at velocity 100, until you let go of the mouse button. An empty pad makes no sound.
 - **Click a layer tab** (1 to 4) to select a layer. Tabs for layers the pad doesn't have are greyed out.
 - Pads that are sounding, from the audition or from notes under the playhead, get a bright outline.
 
@@ -91,7 +91,7 @@ A pad also cuts its own previous hit: hitting it again fades out the earlier one
 - **One-shot** pads play until the sample ends (or **Decay** closes it), whatever the length of the note in the pattern. Use it for drum hits.
 - **Gate** pads play only while the note lasts. When the note ends, the sound fades out over 5 ms. Use it for sustained sounds and loops, with the note resized to the length you want.
 
-When you hold a pad with Shift-click, a Gate pad stops when you let go. When the pattern stops, Gate pads stop, and One-shot pads finish playing.
+When you hold a pad (or its key in the lane), a Gate pad stops when you let go. When the pattern stops, Gate pads stop, and One-shot pads finish playing.
 
 ## Loading audio
 

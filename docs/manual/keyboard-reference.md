@@ -116,8 +116,7 @@ Click a cell in the step grid's Note row to start. See [Step-writing](acid-synth
 
 | Action | What it does |
 |---|---|
-| Click a pad | Select it. |
-| Shift+click and hold a pad | Hear it at velocity 100 until you let go. |
+| Click and hold a pad | Select it and hear it at velocity 100 until you let go. |
 
 See [Pad Kit](pad-kit.md#pads-and-layers).
 

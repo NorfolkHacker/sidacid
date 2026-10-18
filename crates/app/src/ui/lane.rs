@@ -13,7 +13,7 @@
 //! Chords stack freely. The acid synths keep one note at a time and get
 //! accent and slide lanes instead of velocity; drum lanes get an accent
 //! lane, and double-clicking a drum hit toggles its accent. Clicking the
-//! key strip of an FM, Mono or sampler lane auditions the pitch.
+//! key strip of an FM, Mono, sampler or Pad Kit lane auditions the pitch.
 //! Melodic lanes show the project key (rows off its scale darker, root
 //! rows marked and named) and, with snap to scale on, put clicked and
 //! dragged notes on it; drum lanes ignore the key. A folded melodic lane
@@ -856,7 +856,9 @@ impl SidAcidApp {
             && let Some(p) = pointer
             && p.x < geom.left
         {
-            key_down = geom.pitch_at(p.y).filter(|_| kind == LaneKind::Poly);
+            key_down = geom
+                .pitch_at(p.y)
+                .filter(|_| matches!(kind, LaneKind::Poly | LaneKind::Pads));
         }
         let pressed = resp.clicked() || resp.secondary_clicked() || resp.drag_started();
         if let Some(p) = pointer
@@ -1978,6 +1980,26 @@ mod tests {
             [(0, 4, 60), (8, 4, 62)],
             "one undo step"
         );
+    }
+
+    #[test]
+    fn pressing_a_pad_lane_key_plays_that_pad() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        let mut m = Mouse::new(&mut app, uid, 0);
+        let key = m.at(&mut app, 0.0, 5) - vec2(app.lane_key_w() / 2.0, 0.0);
+        let press = |pressed| Mouse::button(key, egui::PointerButton::Primary, pressed, NONE);
+        app.pending.clear();
+        m.frame(&mut app, vec![egui::Event::PointerMoved(key)], NONE);
+        m.frame(&mut app, vec![press(true)], NONE);
+        assert_eq!(app.view.audition, Some((uid, 5)), "the key is held");
+        m.frame(&mut app, vec![press(false)], NONE);
+        m.frame(&mut app, vec![], NONE);
+        let seen: Vec<_> = app.pending.iter().map(cmd).collect();
+        assert_eq!(seen, [(true, uid.0, 5), (false, uid.0, 5)]);
+        assert!(notes_of(&app, uid).is_empty(), "a key press adds no hit");
     }
 
     #[test]

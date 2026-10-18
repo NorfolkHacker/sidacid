@@ -24,7 +24,7 @@ const PAD_KNOBS: [(PadParam, &str); 11] = [
     (PadParam::Mode, "Mode"),
     (PadParam::Group, "Mute"),
 ];
-/// The audition velocity of a Shift-click on a pad.
+/// The audition velocity of a click on a pad.
 const AUDITION_VEL: u8 = 100;
 
 /// The pad at grid `row` (0 = top) and `col`: pad 1 is bottom left, pad
@@ -136,9 +136,7 @@ impl SidAcidApp {
                         if r.clicked() {
                             self.select_kit_pad(uid, i);
                         }
-                        let shift = ui.input(|inp| inp.modifiers.shift);
-                        if shift
-                            && !empty
+                        if !empty
                             && r.is_pointer_button_down_on()
                             && ui.input(|inp| inp.pointer.primary_down())
                             && self.view.pad_note.is_none()
