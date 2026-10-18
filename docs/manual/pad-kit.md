@@ -135,6 +135,7 @@ The Pad Kit's pattern is a lane in the [editor dock](editor-dock.md). It has 16 
 - Double-click a note to turn its accent on or off.
 - **Invert** isn't available on a pad lane ("Melodic lanes only"). Strum and Arpeggiate aren't either, as on the drum lanes.
 - The lane ignores the project key.
+- Click and hold a pad's name in the key strip to hear it. A hit you place on the grid plays once, for its length at the current tempo, at velocity 100.
 
 A new note starts at velocity 100.
 

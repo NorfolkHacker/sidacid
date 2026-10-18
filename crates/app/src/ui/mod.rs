@@ -253,6 +253,9 @@ pub struct ViewState {
     pub stops_sent: u32,
     /// Note held by a click on a roll's key strip: (machine, pitch).
     pub audition: Option<(MachineUid, u8)>,
+    /// A hit just placed on a Pad Kit lane, sounding for its length:
+    /// (kit, pad, egui time to release it).
+    pub hit_preview: Option<(MachineUid, u8, f64)>,
     /// Tests only: collapsing headers forced open or shut, by id salt.
     #[cfg(test)]
     pub force_open: Vec<(&'static str, bool)>,
@@ -749,6 +752,10 @@ impl SidAcidApp {
         // when it collapsed would never see its release.
         self.release_stale_poly_input(ctx.input(|i| i.pointer.any_down()));
         self.tick_queued_save(ctx);
+        if let Some(left) = self.tick_hit_preview(ctx.input(|i| i.time)) {
+            // Keep frames coming so the hit is released without more input.
+            ctx.request_repaint_after(Duration::from_secs_f64(left));
+        }
         if let Some(left) = self.tick_scroll_gestures(ctx.input(|i| i.time)) {
             // Keep frames coming so the gesture ends without more input.
             ctx.request_repaint_after(Duration::from_secs_f64(left));

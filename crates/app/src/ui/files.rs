@@ -220,6 +220,9 @@ impl SidAcidApp {
         if let Some((uid, pitch)) = self.view.audition.take() {
             cmds.push(Command::NoteOff { uid, pitch });
         }
+        if let Some((uid, pitch, _)) = self.view.hit_preview.take() {
+            cmds.push(Command::NoteOff { uid, pitch });
+        }
         self.send(cmds);
     }
 
@@ -272,6 +275,7 @@ impl SidAcidApp {
         // Its popup was the old document's; the next frame shuts it.
         self.view.colour_popup = None;
         self.view.audition = None;
+        self.view.hit_preview = None;
         self.view.wave_cache.clear();
         self.view.wave_drag = None;
         self.view.pad_note = None;

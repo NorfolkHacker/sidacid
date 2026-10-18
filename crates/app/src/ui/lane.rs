@@ -13,7 +13,8 @@
 //! Chords stack freely. The acid synths keep one note at a time and get
 //! accent and slide lanes instead of velocity; drum lanes get an accent
 //! lane, and double-clicking a drum hit toggles its accent. Clicking the
-//! key strip of an FM, Mono, sampler or Pad Kit lane auditions the pitch.
+//! key strip of an FM, Mono, sampler or Pad Kit lane auditions the pitch,
+//! and a hit placed on a Pad Kit lane plays for its length.
 //! Melodic lanes show the project key (rows off its scale darker, root
 //! rows marked and named) and, with snap to scale on, put clicked and
 //! dragged notes on it; drum lanes ignore the key. A folded melodic lane
@@ -1035,6 +1036,9 @@ impl SidAcidApp {
                     if let Some(i) = add(pattern, snap.floor(tick), snap.ticks(), pitch, NEW_VEL) {
                         *sel = note_ops::settle(pattern, &[i], kind);
                         frame.changed = true;
+                        if kind == LaneKind::Pads {
+                            self.preview_hit(uid, pitch, snap.ticks(), ui.input(|i| i.time));
+                        }
                     }
                     frame.finished = true;
                 }
@@ -1392,6 +1396,36 @@ impl SidAcidApp {
         if open {
             self.doc.end_gesture();
         }
+    }
+
+    /// Plays a hit just placed on pad `pitch` of kit `uid` for its `len`
+    /// ticks at the project tempo, from egui time `now`; a hit still
+    /// sounding from an earlier placement stops first.
+    fn preview_hit(&mut self, uid: MachineUid, pitch: u8, len: u16, now: f64) {
+        let mut cmds = Vec::new();
+        if let Some((m, p, _)) = self.view.hit_preview.take() {
+            cmds.push(Command::NoteOff { uid: m, pitch: p });
+        }
+        cmds.push(Command::NoteOn {
+            uid,
+            pitch,
+            vel: NEW_VEL,
+        });
+        let tick_secs = 60.0 / self.doc.project.bpm as f64 / 4.0 / TICKS_PER_STEP as f64;
+        self.view.hit_preview = Some((uid, pitch, now + len as f64 * tick_secs));
+        self.send(cmds);
+    }
+
+    /// Once per frame: releases a placed hit whose length is up at egui
+    /// time `now`. Returns the seconds left while one is still sounding.
+    pub(crate) fn tick_hit_preview(&mut self, now: f64) -> Option<f64> {
+        let (uid, pitch, end) = self.view.hit_preview?;
+        if now < end {
+            return Some(end - now);
+        }
+        self.view.hit_preview = None;
+        self.send(vec![Command::NoteOff { uid, pitch }]);
+        None
     }
 
     /// Follows the key-strip press: starts the pressed pitch, stops the old one.
@@ -2000,6 +2034,45 @@ mod tests {
         let seen: Vec<_> = app.pending.iter().map(cmd).collect();
         assert_eq!(seen, [(true, uid.0, 5), (false, uid.0, 5)]);
         assert!(notes_of(&app, uid).is_empty(), "a key press adds no hit");
+    }
+
+    #[test]
+    fn a_hit_placed_on_a_pad_lane_plays_for_its_length() {
+        let mut app = SidAcidApp::headless(Document::new(Project::default()));
+        let uid = app
+            .add_machine(acid_engine::machine::MachineType::PadKit)
+            .unwrap();
+        let mut m = Mouse::new(&mut app, uid, 0);
+        let at = m.at(&mut app, 0.5, 7);
+        app.pending.clear();
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, uid).len(), 1, "the hit is placed");
+        assert_eq!(notes_sent(&app), [(true, uid.0, 7)]);
+        let (_, _, end) = app.view.hit_preview.unwrap();
+        let len = app.view.dock.snap.ticks() as f64;
+        let tick_secs = 60.0 / app.doc.project.bpm as f64 / 4.0 / TICKS_PER_STEP as f64;
+        app.pending.clear();
+        let left = app.tick_hit_preview(end - len * tick_secs / 2.0).unwrap();
+        assert!(
+            (left - len * tick_secs / 2.0).abs() < 1e-9,
+            "half the hit is left"
+        );
+        assert!(notes_sent(&app).is_empty(), "still sounding");
+        assert_eq!(app.tick_hit_preview(end), None);
+        assert_eq!(notes_sent(&app), [(false, uid.0, 7)]);
+        assert_eq!(app.view.hit_preview, None);
+    }
+
+    #[test]
+    fn placing_a_hit_on_a_melodic_lane_plays_nothing() {
+        let mut app = fm_app();
+        let mut m = Mouse::new(&mut app, FM, 72);
+        let at = m.at(&mut app, 0.5, 60);
+        app.pending.clear();
+        m.click(&mut app, at, NONE);
+        assert_eq!(notes_of(&app, FM).len(), 1);
+        assert!(notes_sent(&app).is_empty());
+        assert_eq!(app.view.hit_preview, None);
     }
 
     #[test]
@@ -2636,6 +2709,15 @@ mod tests {
             Command::NoteOff { uid, pitch } => (false, uid.0, *pitch),
             _ => panic!("unexpected command"),
         }
+    }
+
+    /// The note commands queued, as `cmd` gives them.
+    fn notes_sent(app: &SidAcidApp) -> Vec<(bool, u16, u8)> {
+        app.pending
+            .iter()
+            .filter(|c| matches!(c, Command::NoteOn { .. } | Command::NoteOff { .. }))
+            .map(cmd)
+            .collect()
     }
 
     #[test]

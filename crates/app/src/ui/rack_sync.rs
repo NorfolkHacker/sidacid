@@ -179,6 +179,7 @@ impl SidAcidApp {
     /// seen is a new host's own and restarts once.
     pub(crate) fn reload_after_refused_rack(&mut self, _status: &Status) -> bool {
         self.view.audition = None;
+        self.view.hit_preview = None;
         self.view.pad_note = None;
         if self.audio.is_some() {
             self.start_audio();
@@ -217,6 +218,7 @@ impl SidAcidApp {
         v.focus = v.focus.filter(|&uid| live(uid));
         v.audition = v.audition.filter(|&(uid, _)| live(uid));
         v.pad_note = v.pad_note.filter(|&(uid, _)| live(uid));
+        v.hit_preview = v.hit_preview.filter(|&(uid, ..)| live(uid));
         v.pad_name = v.pad_name.take().filter(|(uid, ..)| live(*uid));
         v.knob_scroll = v.knob_scroll.take().filter(|(id, _)| live_param(id));
         v.touched_knob = v.touched_knob.filter(live_param);
